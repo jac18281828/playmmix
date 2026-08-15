@@ -47,6 +47,7 @@ describe('PlaymmixStack', () => {
     template.hasResource('AWS::S3::Bucket', {
       DeletionPolicy: 'Retain',
       Properties: Match.objectLike({
+        BucketName: 'playmmix-us-east-1-504242000181',
         BucketEncryption: Match.anyValue(),
         PublicAccessBlockConfiguration: {
           BlockPublicAcls: true,
