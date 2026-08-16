@@ -132,39 +132,167 @@ fn splice_tab(textarea: &HtmlTextAreaElement) {
     let value = textarea.value();
     let start = textarea.selection_start().ok().flatten().unwrap_or(0) as usize;
     let end = textarea.selection_end().ok().flatten().unwrap_or(0) as usize;
-    let start = start.min(value.len());
-    let end = end.min(value.len());
 
-    let mut spliced = String::with_capacity(value.len() + 1);
-    spliced.push_str(&value[..start]);
-    spliced.push('\t');
-    spliced.push_str(&value[end..]);
+    let spliced = splice_at_utf16_offsets(&value, start, end, "\t");
     textarea.set_value(&spliced);
 
     let caret = (start + 1) as u32;
     let _ = textarea.set_selection_range(caret, caret);
 }
 
-/// Render one source line as the overlay's colored spans, tagged by
-/// `highlight::classify`. Untagged gaps between spans render in the
-/// overlay's default text color.
-fn render_line(line: &str) -> Html {
+/// Convert a UTF-16 code-unit offset — what `selectionStart`/`selectionEnd`
+/// report — into a UTF-8 byte offset into `value`. An offset at or past the
+/// end of `value` clamps to `value.len()`.
+fn utf16_offset_to_byte(value: &str, utf16_offset: usize) -> usize {
+    let mut utf16_count = 0;
+    for (byte_offset, ch) in value.char_indices() {
+        if utf16_count >= utf16_offset {
+            return byte_offset;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    value.len()
+}
+
+/// Splice `insert` into `value` in place of the `[start_utf16, end_utf16)`
+/// range, given as UTF-16 code-unit offsets (a textarea's selection
+/// endpoints). Plain function, no browser types: `value.len()` (bytes) and
+/// selection offsets (UTF-16 code units) disagree whenever `value` holds a
+/// character outside the ASCII range, so indexing the raw offsets straight
+/// into a UTF-8 `String` can land off a char boundary and panic; converting
+/// through `utf16_offset_to_byte` first keeps this host-testable.
+fn splice_at_utf16_offsets(
+    value: &str,
+    start_utf16: usize,
+    end_utf16: usize,
+    insert: &str,
+) -> String {
+    let start = utf16_offset_to_byte(value, start_utf16);
+    let end = utf16_offset_to_byte(value, end_utf16);
+
+    let mut spliced = String::with_capacity(value.len() + insert.len());
+    spliced.push_str(&value[..start]);
+    spliced.push_str(insert);
+    spliced.push_str(&value[end..]);
+    spliced
+}
+
+/// One piece of a tokenized line: either literal text between (or after)
+/// `highlight::classify` spans, or the text of a span itself.
+enum LinePiece<'a> {
+    Plain(&'a str),
+    Styled(&'a str, highlight::TokenKind),
+}
+
+impl<'a> LinePiece<'a> {
+    fn text(&self) -> &'a str {
+        match *self {
+            LinePiece::Plain(text) | LinePiece::Styled(text, _) => text,
+        }
+    }
+}
+
+/// Split `line` into `LinePiece`s covering it end to end with no gaps and no
+/// overlaps: `highlight::classify`'s spans as `Styled`, and everything
+/// between them as `Plain`. Plain function, no `Html`, so the
+/// reconstruction invariant this depends on — concatenating every piece's
+/// text reproduces `line` exactly — is host-testable; `classify` emitting an
+/// out-of-order or overlapping span is a bug in `classify`, not here.
+fn line_pieces(line: &str) -> Vec<LinePiece<'_>> {
     let spans = highlight::classify(line);
-    let mut children = Vec::new();
+    let mut pieces = Vec::new();
     let mut cursor = 0;
 
     for span in &spans {
         if span.start > cursor {
-            children.push(html! { <span>{ &line[cursor..span.start] }</span> });
+            pieces.push(LinePiece::Plain(&line[cursor..span.start]));
         }
-        children.push(html! {
-            <span class={span.kind.css_class()}>{ &line[span.start..span.end] }</span>
-        });
+        pieces.push(LinePiece::Styled(&line[span.start..span.end], span.kind));
         cursor = span.end;
     }
     if cursor < line.len() {
-        children.push(html! { <span>{ &line[cursor..] }</span> });
+        pieces.push(LinePiece::Plain(&line[cursor..]));
     }
 
+    pieces
+}
+
+/// Render one source line as the overlay's colored spans. Untagged gaps
+/// between spans render in the overlay's default text color.
+fn render_line(line: &str) -> Html {
+    let children: Vec<Html> = line_pieces(line)
+        .into_iter()
+        .map(|piece| {
+            let class = match piece {
+                LinePiece::Plain(_) => None,
+                LinePiece::Styled(_, kind) => Some(kind.css_class()),
+            };
+            html! { <span {class}>{ piece.text() }</span> }
+        })
+        .collect();
+
     html! { <span class="overlay-line">{ for children }</span> }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splice_at_utf16_offsets_handles_multibyte_prefix() {
+        // "café": 'é' is 2 UTF-8 bytes but 1 UTF-16 code unit, so a caret
+        // reported at UTF-16 offset 4 (just after 'é') lands on UTF-8 byte
+        // offset 4, which is mid-character. Indexing that byte offset
+        // straight into the `String` (the original bug) panics; converting
+        // through `utf16_offset_to_byte` first must not.
+        let value = "café";
+        let spliced = splice_at_utf16_offsets(value, 4, 4, "\t");
+        assert_eq!(spliced, "café\t");
+    }
+
+    #[test]
+    fn splice_at_utf16_offsets_replaces_a_selection_after_multibyte_text() {
+        let value = "café bar";
+        // "bar" sits at UTF-16 offsets 5..8, same as its byte offsets here,
+        // but reached only by walking past the multibyte 'é' first.
+        let spliced = splice_at_utf16_offsets(value, 5, 8, "\t");
+        assert_eq!(spliced, "café \t");
+    }
+
+    #[test]
+    fn splice_at_utf16_offsets_inserts_at_start_of_multibyte_line() {
+        let value = "café";
+        let spliced = splice_at_utf16_offsets(value, 0, 0, "\t");
+        assert_eq!(spliced, "\tcafé");
+    }
+
+    fn reconstruct(line: &str) -> String {
+        line_pieces(line)
+            .into_iter()
+            .map(|piece| piece.text())
+            .collect()
+    }
+
+    #[test]
+    fn line_pieces_reconstruct_every_test_corpus_line() {
+        // Reconstruction invariant: for any line, concatenating every piece
+        // `render_line` would draw must reproduce the line exactly. A
+        // `classify` span that overlaps or skips out of order breaks this
+        // and duplicates or drops glyphs in the overlay — see the
+        // unterminated char-literal case below, which broke it once.
+        let lines = [
+            r#"Text	BYTE	"Hello world!",'\n',0"#,
+            "X\tBYTE\t\"100%\"\t% real comment",
+            "Main\tdebug \"hi\"",
+            "\tLDA\t\t$255,Text",
+            r"'\n'",
+            "\t.BYTE\t1,2,3",
+            "Main' IS 3",
+            "café ; a comment with non-ASCII",
+            "",
+        ];
+        for line in lines {
+            assert_eq!(reconstruct(line), line, "line: {line:?}");
+        }
+    }
 }

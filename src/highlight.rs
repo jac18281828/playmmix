@@ -135,8 +135,12 @@ pub fn classify(line: &str) -> Vec<Span> {
                 });
             }
             // char_literal: 'x' or '\n' | '\r' | '\t' | '\0' | '\\' | '\''.
+            // The grammar requires a closing '\''; without one this is not
+            // a char_literal, so no span is emitted and whatever was
+            // peeked past falls through unstyled rather than being claimed
+            // by a span that runs to end-of-line and overlaps later spans.
             '\'' => {
-                let mut end = line.len();
+                let mut closing = None;
                 if let Some(&(_, next)) = chars.peek() {
                     chars.next();
                     if next == '\\' {
@@ -147,13 +151,15 @@ pub fn classify(line: &str) -> Vec<Span> {
                     && cj == '\''
                 {
                     chars.next();
-                    end = j + cj.len_utf8();
+                    closing = Some(j + cj.len_utf8());
                 }
-                spans.push(Span {
-                    start: i,
-                    end,
-                    kind: TokenKind::Char,
-                });
+                if let Some(end) = closing {
+                    spans.push(Span {
+                        start: i,
+                        end,
+                        kind: TokenKind::Char,
+                    });
+                }
             }
             // register_num: '$' followed by one or more digits.
             '$' => {
@@ -312,6 +318,29 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].kind, TokenKind::Char);
         assert_eq!(span_text(line, &spans[0]), r"'\n'");
+    }
+
+    #[test]
+    fn unterminated_char_literal_emits_no_char_span() {
+        // No closing '\'' anywhere on the line: not a valid char_literal
+        // per the grammar, so it must not be classified as one, and the
+        // spans that are emitted must stay disjoint and in order (the
+        // invariant `render_line` depends on).
+        let line = "Main' IS 3";
+        let spans = classify(line);
+
+        assert!(!spans.iter().any(|s| s.kind == TokenKind::Char));
+        for pair in spans.windows(2) {
+            assert!(pair[0].end <= pair[1].start, "overlapping spans: {spans:?}");
+        }
+
+        assert_eq!(
+            spans
+                .iter()
+                .find(|s| s.kind == TokenKind::Keyword)
+                .map(|s| span_text(line, s)),
+            Some("IS")
+        );
     }
 
     #[test]

@@ -96,7 +96,13 @@ pre {
 }
 
 .overlay {
+    background: #111;
     color: #ddd;
+    border-radius: 4px;
+    /* Override the bare `pre` selector's wrap/height rules, which would
+       break the glyph-grid alignment with the textarea underneath. */
+    max-height: none;
+    word-break: normal;
     /* Cosmetic layer only; the textarea above it is what the user scrolls
        and types into. */
     pointer-events: none;
