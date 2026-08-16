@@ -2,4 +2,5 @@
 /dist
 /node_modules
 /cdk.out
+/prompts
 .DS_Store

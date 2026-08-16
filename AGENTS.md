@@ -62,8 +62,8 @@ Before marking work complete, run and report:
 5. `trunk build --release` — subsumes a wasm-target check; the wasm bundle
    is the artifact that matters, so there is no separate
    `cargo check --target wasm32-unknown-unknown` step.
-6. `npm run build` — typecheck the CDK stack in `cdk/`.
-7. `npm test` — jest specs for the CDK stack.
-8. `npx cdk synth` — the stack must synthesize to a template.
+6. `bun run build` — typecheck the CDK stack in `cdk/`.
+7. `bun run test` — jest specs for the CDK stack.
+8. `bun run cdk:synth` — the stack must synthesize to a template.
 
 Do not mark work complete until all gates pass.

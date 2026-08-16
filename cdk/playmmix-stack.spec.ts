@@ -18,7 +18,7 @@ describe('PlaymmixStack', () => {
     template.resourceCountIs('AWS::CloudFront::Distribution', 1);
     template.resourceCountIs('AWS::CertificateManager::Certificate', 1);
     template.resourceCountIs('AWS::S3::BucketPolicy', 1);
-    // Owned bucket, not solitaire's fromBucketAttributes import — a
+    // Owned bucket, provisioned by this stack rather than imported — a
     // regression to an imported bucket would drop this resource entirely.
     template.resourceCountIs('AWS::S3::Bucket', 1);
   });
@@ -43,9 +43,10 @@ describe('PlaymmixStack', () => {
     template.resourceCountIs('AWS::CloudFront::CloudFrontOriginAccessIdentity', 0);
   });
 
-  it('retains the bucket, encrypts it, and blocks all public access', () => {
+  it('destroys the bucket, encrypts it, and blocks all public access', () => {
     template.hasResource('AWS::S3::Bucket', {
-      DeletionPolicy: 'Retain',
+      DeletionPolicy: 'Delete',
+      UpdateReplacePolicy: 'Delete',
       Properties: Match.objectLike({
         BucketName: 'playmmix-us-east-1-504242000181',
         BucketEncryption: Match.anyValue(),
@@ -56,6 +57,42 @@ describe('PlaymmixStack', () => {
           RestrictPublicBuckets: true,
         },
       }),
+    });
+  });
+
+  it('empties the bucket before teardown via the auto-delete custom resource', () => {
+    const bucketLogicalIds = Object.keys(template.findResources('AWS::S3::Bucket'));
+    expect(bucketLogicalIds).toHaveLength(1);
+    const [bucketLogicalId] = bucketLogicalIds;
+
+    const handlerRoleLogicalIds = Object.keys(template.findResources('AWS::IAM::Role'));
+    expect(handlerRoleLogicalIds).toHaveLength(1);
+    const [handlerRoleLogicalId] = handlerRoleLogicalIds;
+
+    // BucketName must reference this stack's own bucket, not merely exist —
+    // a custom resource pointed at a different bucket would pass a bare
+    // resource-count check while leaving this bucket un-emptied.
+    template.hasResourceProperties('Custom::S3AutoDeleteObjects', {
+      BucketName: { Ref: bucketLogicalId },
+    });
+
+    // The handler role needs an explicit delete grant on this bucket, or
+    // the custom resource exists but fails at runtime with AccessDenied.
+    template.hasResourceProperties('AWS::S3::BucketPolicy', {
+      Bucket: { Ref: bucketLogicalId },
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: 'Allow',
+            Action: Match.arrayWith(['s3:DeleteObject*']),
+            Principal: {
+              AWS: {
+                'Fn::GetAtt': [handlerRoleLogicalId, 'Arn'],
+              },
+            },
+          }),
+        ]),
+      },
     });
   });
 

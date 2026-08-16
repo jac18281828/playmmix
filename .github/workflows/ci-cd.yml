@@ -57,12 +57,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       - name: Install dependencies
-        run: npm ci
+        run: bun install --include=dev
       - name: Typecheck
-        run: npm run build
+        run: bun run build
       - name: Run CDK stack tests
-        run: npm test
+        run: bun run test
       - name: Synthesize CDK stack
-        run: npx cdk synth
+        run: bun run cdk:synth
