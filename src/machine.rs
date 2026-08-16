@@ -38,34 +38,49 @@ const MEMORY_ROW_WIDTH: usize = 16;
 pub enum RegisterRow {
     /// Register `$index`, individually visible under the full ISA rule.
     Register { index: u8, value: u64 },
-    /// `$32..=$255`, collapsed into one row: no `GREG` directive ran, so
-    /// every register in this range is genuinely unallocated (never gated
-    /// on value -- `Control` has no way to tell an allocated-but-zero
-    /// global from a never-allocated one).
-    UnallocatedGlobalRange,
+    /// A contiguous, all-zero sub-range of `$32..=$255` (inclusive bounds),
+    /// collapsed into one row: no `GREG` directive ran, so this stretch is
+    /// genuinely unallocated (never gated on value alone -- `Control` has
+    /// no way to tell an allocated-but-zero global from a never-allocated
+    /// one, so only registers already known zero ever fold in here). A
+    /// nonzero register inside `$32..=$255` still renders individually and
+    /// splits the collapse around it.
+    UnallocatedGlobalRange { start: u8, end: u8 },
 }
 
 /// Visible general registers under the full ISA rule: show `$i` when its
 /// value is nonzero, or `i < rL` (a local register in use), or `i >= rG` (a
-/// global register) -- ascending order. Collapses `$32..=$255` into one
-/// summary row when `rG` still holds `initialize()`'s default, since that
-/// only happens when no `GREG` directive ran and the whole range is then
-/// genuinely unallocated.
+/// global register) -- ascending order. When `rG` still holds
+/// `initialize()`'s default (no `GREG` directive ran), the all-zero run
+/// within `$32..=$255` collapses into one summary row per contiguous
+/// stretch; a nonzero register in that range still renders individually.
 pub fn visible_registers(mmix: &MMix) -> Vec<RegisterRow> {
     let rg = mmix.get_special(SpecialReg::RG);
     let rl = mmix.get_special(SpecialReg::RL);
     let mut rows = Vec::new();
+    let mut collapse_start: Option<u8> = None;
+
     for i in 0u16..256 {
         let addr = u64::from(i);
-        if rg == NO_GREG_RG && addr >= NO_GREG_RG {
-            rows.push(RegisterRow::UnallocatedGlobalRange);
-            break;
-        }
         let index = i as u8;
         let value = mmix.get_register(index);
+
+        if rg == NO_GREG_RG && addr >= NO_GREG_RG && value == 0 {
+            collapse_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = collapse_start.take() {
+            rows.push(RegisterRow::UnallocatedGlobalRange {
+                start,
+                end: index - 1,
+            });
+        }
         if value != 0 || addr < rl || addr >= rg {
             rows.push(RegisterRow::Register { index, value });
         }
+    }
+    if let Some(start) = collapse_start.take() {
+        rows.push(RegisterRow::UnallocatedGlobalRange { start, end: 255 });
     }
     rows
 }
@@ -307,12 +322,15 @@ fn render_register_row(row: &RegisterRow) -> Html {
                 <span class="reg-dec">{ (*value as i64).to_string() }</span>
             </div>
         },
-        RegisterRow::UnallocatedGlobalRange => html! {
-            <div class="register-row register-collapsed">
-                <span class="reg-name">{ "$32\u{2013}$255" }</span>
-                <span class="reg-note">{ "unallocated (0)" }</span>
-            </div>
-        },
+        RegisterRow::UnallocatedGlobalRange { start, end } => {
+            let count = u32::from(*end) - u32::from(*start) + 1;
+            html! {
+                <div class="register-row register-collapsed">
+                    <span class="reg-name">{ format!("${start}\u{2013}${end}") }</span>
+                    <span class="reg-note">{ format!("{count} unallocated (0)") }</span>
+                </div>
+            }
+        }
     }
 }
 
@@ -379,7 +397,7 @@ mod tests {
             .into_iter()
             .map(|row| match row {
                 RegisterRow::Register { index, .. } => index,
-                RegisterRow::UnallocatedGlobalRange => {
+                RegisterRow::UnallocatedGlobalRange { .. } => {
                     panic!("rG = 253, not 32; must not collapse")
                 }
             })
@@ -425,12 +443,16 @@ mod tests {
         );
 
         let rows = visible_registers(&mmix);
-        let collapsed = rows
+        let collapsed: Vec<&RegisterRow> = rows
             .iter()
-            .filter(|row| matches!(row, RegisterRow::UnallocatedGlobalRange))
-            .count();
+            .filter(|row| matches!(row, RegisterRow::UnallocatedGlobalRange { .. }))
+            .collect();
         assert_eq!(
-            collapsed, 1,
+            collapsed,
+            vec![&RegisterRow::UnallocatedGlobalRange {
+                start: 32,
+                end: 255
+            }],
             "the whole $32..$255 range must collapse into one summary row"
         );
 
@@ -442,6 +464,39 @@ mod tests {
             .filter(|row| matches!(row, RegisterRow::Register { index, .. } if *index >= 32))
             .count();
         assert_eq!(individual_globals, 0);
+    }
+
+    /// Same fixture as `control.rs`'s `CALL_MMS`: no `GREG` at all, but
+    /// `SET $255,$0` writes a nonzero value into a register above the
+    /// no-GREG collapse floor before `TRAP 0,Halt,0`.
+    const CALL_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,40\n\tSETL\t$2,2\n\tPUSHJ\t$0,AddFunc\n\tSET\t$255,$0\n\tTRAP\t0,Halt,0\nAddFunc\tADDU\t$0,$0,$1\n\tPOP\t1,0\n";
+
+    #[test]
+    fn visible_registers_show_a_nonzero_global_written_with_no_greg() {
+        let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
+        let outcome = control.run_chunk(1_000_000);
+        assert_eq!(outcome, crate::control::StepOutcome::Halted);
+        assert!(control.is_halted(), "the run must actually reach a halt");
+        assert_eq!(
+            control.machine().get_special(SpecialReg::RG),
+            32,
+            "no GREG directive: rG stays at initialize()'s default"
+        );
+
+        let value255 = control.machine().get_register(255);
+        assert_ne!(value255, 0, "fixture must write a nonzero value into $255");
+
+        // Deleting the fix would collapse $255 into the unallocated-range
+        // summary row, hiding its real value behind a false "(0)" label.
+        let rows = visible_registers(control.machine());
+        let has_individual_255 = rows.iter().any(
+            |row| matches!(row, RegisterRow::Register { index: 255, value } if *value == value255),
+        );
+        assert!(
+            has_individual_255,
+            "$255's nonzero value must render individually, not be \
+             swallowed into the unallocated-range collapse"
+        );
     }
 
     #[test]

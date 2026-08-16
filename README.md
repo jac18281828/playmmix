@@ -18,7 +18,7 @@ Clicking a line number in the gutter toggles a breakpoint there (rejected as
 a no-op on a line with no address, such as a blank line or a comment); the
 gutter also marks the paused machine's current line.
 
-The machine pane on the right reflects whatever the machine last did — a
+The machine pane, below the editor, reflects whatever the machine last did — a
 step, a run, or a fresh load. General registers show under the full ISA
 visibility rule (nonzero, or a local register in use, or a global register),
 so a run doesn't drown in 224 zero rows; an unallocated global range
