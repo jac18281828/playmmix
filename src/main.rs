@@ -1,3 +1,4 @@
+use gloo_timers::callback::Timeout;
 use log::info;
 use yew::{Component, Context, Html, Renderer, html};
 
@@ -5,7 +6,7 @@ mod control;
 mod editor;
 mod highlight;
 
-use control::{Control, Controls, StepOutcome, yield_to_event_loop};
+use control::{Control, ControlBar, StepOutcome, yield_to_event_loop};
 use editor::Editor;
 
 /// `examples/hello_world.mms` from checksmix, embedded verbatim. Not
@@ -13,6 +14,13 @@ use editor::Editor;
 /// (crates.io registry cache or git checkout alike), is not a stable,
 /// crate-relative path.
 const HELLO_WORLD_MMS: &str = "\tLOC\tData_Segment\n\tGREG\t@\nText\tBYTE\t\"Hello world!\",'\\n',0\n\n\tLOC\t#100\n\nMain\tdebug \"Version 0.1: Hello World Example\"\t\n\tLDA\t\t$255,Text\n\tTRAP\t0,Fputs,StdOut\n\tTRAP\t0,Halt,0\n";
+
+/// A minimal, fixed program that always assembles -- the fallback if the
+/// embedded `HELLO_WORLD_MMS` somehow doesn't (e.g. a checksmix upgrade
+/// changes accepted syntax), so `App::create` has no fallible path of its
+/// own without threading an `Option<Control>` through every view and update
+/// path just for that one unlikely case.
+const FALLBACK_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
 
 /// The filename `Control` assembles the editor's buffer under. Fixed:
 /// playmmix edits a single in-memory buffer, not a multi-file project, and
@@ -35,14 +43,40 @@ pub struct App {
     source: String,
     control: Control,
     error: Option<String>,
+    /// The pending chunk-tick timeout, if a chunked Run or Step Over is in
+    /// flight. Held rather than `.forget()`-ten so Stop, or a `reload` mid-
+    /// run, can cancel it by dropping this (runs `clearTimeout` and frees
+    /// the closure) instead of leaking one allocation per chunk boundary.
+    chunk_timeout: Option<Timeout>,
 }
 
 impl App {
     /// Yield to the event loop, then deliver `Msg::ChunkTick` -- the one
-    /// place a chunked run reschedules itself.
-    fn schedule_chunk_tick(ctx: &Context<Self>) {
+    /// place a chunked Run or Step Over reschedules itself. Replaces
+    /// `chunk_timeout`, dropping (and so cancelling) any tick already
+    /// pending.
+    fn schedule_chunk_tick(&mut self, ctx: &Context<Self>) {
         let link = ctx.link().clone();
-        yield_to_event_loop(move || link.send_message(Msg::ChunkTick));
+        self.chunk_timeout = Some(yield_to_event_loop(move || {
+            link.send_message(Msg::ChunkTick)
+        }));
+    }
+
+    /// Advance one chunk of whichever operation -- Run or Step Over -- is
+    /// in flight, rescheduling if it isn't finished. The scheduling policy
+    /// for `Msg::ChunkTick`.
+    fn advance_chunk(&mut self, ctx: &Context<Self>) {
+        // A Stop is checked only between chunks, never inside one; this is
+        // that check. Cancelling `chunk_timeout` on Stop already prevents
+        // this from firing in the normal case -- this guard is a
+        // defensive backstop, not the primary safety mechanism.
+        if !self.control.is_running() {
+            return;
+        }
+        match self.control.continue_chunk(control::CHUNK_BUDGET) {
+            StepOutcome::BudgetExhausted => self.schedule_chunk_tick(ctx),
+            StepOutcome::Halted | StepOutcome::Breakpoint(_) | StepOutcome::Advanced => {}
+        }
     }
 }
 
@@ -51,12 +85,20 @@ impl Component for App {
     type Properties = ();
 
     fn create(_ctx: &Context<Self>) -> Self {
-        let control = Control::new(HELLO_WORLD_MMS, SOURCE_FILENAME)
-            .expect("the embedded hello-world example assembles");
-        Self {
-            source: HELLO_WORLD_MMS.to_string(),
-            control,
-            error: None,
+        match Control::new(HELLO_WORLD_MMS, SOURCE_FILENAME) {
+            Ok(control) => Self {
+                source: HELLO_WORLD_MMS.to_string(),
+                control,
+                error: None,
+                chunk_timeout: None,
+            },
+            Err(error) => Self {
+                source: HELLO_WORLD_MMS.to_string(),
+                control: Control::new(FALLBACK_MMS, SOURCE_FILENAME)
+                    .expect("FALLBACK_MMS is a fixed, minimal, always-valid program"),
+                error: Some(error),
+                chunk_timeout: None,
+            },
         }
     }
 
@@ -65,6 +107,7 @@ impl Component for App {
             Msg::SourceChanged(source) => {
                 self.error = self.control.reload(&source).err();
                 self.source = source;
+                self.chunk_timeout = None;
                 true
             }
             Msg::ToggleBreakpoint(line) => {
@@ -73,7 +116,9 @@ impl Component for App {
             }
             Msg::Run => {
                 self.control.start_run();
-                Self::schedule_chunk_tick(ctx);
+                if self.control.is_running() {
+                    self.schedule_chunk_tick(ctx);
+                }
                 true
             }
             Msg::Step => {
@@ -84,30 +129,22 @@ impl Component for App {
             }
             Msg::StepOver => {
                 if !self.control.is_running() {
-                    self.control.step_over();
+                    match self.control.step_over_chunk(control::CHUNK_BUDGET) {
+                        StepOutcome::BudgetExhausted => self.schedule_chunk_tick(ctx),
+                        StepOutcome::Advanced
+                        | StepOutcome::Halted
+                        | StepOutcome::Breakpoint(_) => {}
+                    }
                 }
                 true
             }
             Msg::Stop => {
                 self.control.stop();
+                self.chunk_timeout = None;
                 true
             }
             Msg::ChunkTick => {
-                // A Stop is checked only between chunks, never inside one;
-                // this is that check. If Stop landed while this tick was
-                // already scheduled, drop the tick instead of running.
-                if !self.control.is_running() {
-                    return false;
-                }
-                match self.control.run_chunk(control::CHUNK_BUDGET) {
-                    StepOutcome::BudgetExhausted => Self::schedule_chunk_tick(ctx),
-                    StepOutcome::Halted | StepOutcome::Breakpoint(_) => {}
-                    StepOutcome::Advanced => {
-                        unreachable!(
-                            "run_chunk always halts, hits a breakpoint, or exhausts its budget"
-                        )
-                    }
-                }
+                self.advance_chunk(ctx);
                 true
             }
         }
@@ -135,7 +172,14 @@ impl Component for App {
         html! {
             <main>
                 <h1>{ "playmmix" }</h1>
-                <Controls running={self.control.is_running()} {on_run} {on_step} {on_step_over} {on_stop} />
+                <ControlBar
+                    running={self.control.is_running()}
+                    halted={self.control.is_halted()}
+                    {on_run}
+                    {on_step}
+                    {on_step_over}
+                    {on_stop}
+                />
                 <Editor
                     source={self.source.clone()}
                     {on_change}

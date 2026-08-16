@@ -91,17 +91,7 @@ impl Component for Editor {
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                let line = i + 1;
-                let mut class = classes!("gutter-line");
-                if breakpoints.contains(&line) {
-                    class.push("gutter-breakpoint");
-                }
-                if current_line == Some(line) {
-                    class.push("gutter-current");
-                }
-                let on_toggle_breakpoint = on_toggle_breakpoint.clone();
-                let onclick = Callback::from(move |_: MouseEvent| on_toggle_breakpoint.emit(line));
-                html! { <span {class} {onclick}>{ line }</span> }
+                render_gutter_row(i + 1, &breakpoints, current_line, &on_toggle_breakpoint)
             })
             .collect();
 
@@ -146,6 +136,26 @@ impl Component for Editor {
             </div>
         }
     }
+}
+
+/// Render one gutter row: the line number, styled for a breakpoint and/or
+/// the paused machine's current line, and clickable to toggle a breakpoint.
+fn render_gutter_row(
+    line: usize,
+    breakpoints: &BTreeSet<usize>,
+    current_line: Option<usize>,
+    on_toggle_breakpoint: &Callback<usize>,
+) -> Html {
+    let mut class = classes!("gutter-line");
+    if breakpoints.contains(&line) {
+        class.push("gutter-breakpoint");
+    }
+    if current_line == Some(line) {
+        class.push("gutter-current");
+    }
+    let on_toggle_breakpoint = on_toggle_breakpoint.clone();
+    let onclick = Callback::from(move |_: MouseEvent| on_toggle_breakpoint.emit(line));
+    html! { <span {class} {onclick}>{ line }</span> }
 }
 
 /// Splice a literal tab into `textarea` at the caret, replacing any current
