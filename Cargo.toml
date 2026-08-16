@@ -10,7 +10,7 @@ readme = "README.md"
 yew = { version = "0.23.0", features = ["csr"] }
 log = { version = "0.4", features = ["release_max_level_info"] }
 wasm-logger = "0.2.0"
-checksmix = { git = "https://github.com/jac18281828/checksmix", rev = "2f3f20c9b786e23b78b26e7e17842b501e663f04", default-features = false }
+checksmix = { version = "0.3", default-features = false }
 
 [profile.release]
 opt-level = 'z'
