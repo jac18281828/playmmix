@@ -3,6 +3,8 @@
 //! `white-space: pre` and no wrap everywhere (`style.css`) keep line N of
 //! the source mapped to row N of both the overlay and the gutter.
 
+use std::collections::BTreeSet;
+
 use web_sys::{HtmlElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
@@ -12,6 +14,12 @@ use crate::highlight;
 pub struct EditorProps {
     pub source: String,
     pub on_change: Callback<String>,
+    /// Line numbers with a breakpoint set, for the gutter markers.
+    pub breakpoints: BTreeSet<usize>,
+    /// The line the paused machine's PC maps to, if any. `None` while
+    /// running, since nothing should visibly track a moving PC mid-chunk.
+    pub current_line: Option<usize>,
+    pub on_toggle_breakpoint: Callback<usize>,
 }
 
 pub struct Editor {
@@ -75,10 +83,26 @@ impl Component for Editor {
         // new, empty final line, which still needs a gutter row.
         let lines: Vec<&str> = source.split('\n').collect();
 
+        let breakpoints = ctx.props().breakpoints.clone();
+        let current_line = ctx.props().current_line;
+        let on_toggle_breakpoint = ctx.props().on_toggle_breakpoint.clone();
+
         let gutter_rows: Html = lines
             .iter()
             .enumerate()
-            .map(|(i, _)| html! { <span class="gutter-line">{ i + 1 }</span> })
+            .map(|(i, _)| {
+                let line = i + 1;
+                let mut class = classes!("gutter-line");
+                if breakpoints.contains(&line) {
+                    class.push("gutter-breakpoint");
+                }
+                if current_line == Some(line) {
+                    class.push("gutter-current");
+                }
+                let on_toggle_breakpoint = on_toggle_breakpoint.clone();
+                let onclick = Callback::from(move |_: MouseEvent| on_toggle_breakpoint.emit(line));
+                html! { <span {class} {onclick}>{ line }</span> }
+            })
             .collect();
 
         let overlay_rows: Html = lines.iter().map(|line| render_line(line)).collect();

@@ -1,10 +1,11 @@
-use checksmix::{Command, Debugger, MMixAssembler};
 use log::info;
 use yew::{Component, Context, Html, Renderer, html};
 
+mod control;
 mod editor;
 mod highlight;
 
+use control::{Control, Controls, StepOutcome, yield_to_event_loop};
 use editor::Editor;
 
 /// `examples/hello_world.mms` from checksmix, embedded verbatim. Not
@@ -13,40 +14,36 @@ use editor::Editor;
 /// crate-relative path.
 const HELLO_WORLD_MMS: &str = "\tLOC\tData_Segment\n\tGREG\t@\nText\tBYTE\t\"Hello world!\",'\\n',0\n\n\tLOC\t#100\n\nMain\tdebug \"Version 0.1: Hello World Example\"\t\n\tLDA\t\t$255,Text\n\tTRAP\t0,Fputs,StdOut\n\tTRAP\t0,Halt,0\n";
 
-/// Assemble, load, and run `source` to halt, returning the rendered
-/// `Command::Run` output followed by `Command::State`'s. A parse error
-/// surfaces as `Err` rather than a panic. Free of Yew and browser APIs so it
-/// is unit-testable on the host target; the Yew component below is the only
-/// wasm-specific caller.
-fn run_source(source: &str) -> Result<Vec<String>, String> {
-    let mut assembler = MMixAssembler::new(source, "hello.mms");
-    assembler.parse()?;
-    let mut debugger = Debugger::load(assembler);
-    let mut output = debugger.execute(Command::Run);
-    output.extend(debugger.execute(Command::State));
-    Ok(output)
-}
-
-/// Assemble and run `source`, returning the fields `App` stores: the source
-/// itself (handed back so the caller can move it in unconditionally), the
-/// rendered output, and a parse error if assembly failed. Free of Yew and
-/// browser APIs, so the editor's `oninput` wiring is host-testable without a
-/// browser — `Component::update` is the only caller.
-fn apply_source(source: String) -> (String, Vec<String>, Option<String>) {
-    match run_source(&source) {
-        Ok(output) => (source, output, None),
-        Err(error) => (source, Vec::new(), Some(error)),
-    }
-}
+/// The filename `Control` assembles the editor's buffer under. Fixed:
+/// playmmix edits a single in-memory buffer, not a multi-file project, and
+/// breakpoint/PC line lookups need the same name on every assemble.
+const SOURCE_FILENAME: &str = "source.mms";
 
 pub enum Msg {
     SourceChanged(String),
+    ToggleBreakpoint(usize),
+    Run,
+    Step,
+    StepOver,
+    Stop,
+    /// One chunk boundary: reschedule if the run isn't finished, or if a
+    /// `Stop` landed while this tick was scheduled, do nothing.
+    ChunkTick,
 }
 
 pub struct App {
     source: String,
-    output: Vec<String>,
+    control: Control,
     error: Option<String>,
+}
+
+impl App {
+    /// Yield to the event loop, then deliver `Msg::ChunkTick` -- the one
+    /// place a chunked run reschedules itself.
+    fn schedule_chunk_tick(ctx: &Context<Self>) {
+        let link = ctx.link().clone();
+        yield_to_event_loop(move || link.send_message(Msg::ChunkTick));
+    }
 }
 
 impl Component for App {
@@ -54,21 +51,63 @@ impl Component for App {
     type Properties = ();
 
     fn create(_ctx: &Context<Self>) -> Self {
-        let (source, output, error) = apply_source(HELLO_WORLD_MMS.to_string());
+        let control = Control::new(HELLO_WORLD_MMS, SOURCE_FILENAME)
+            .expect("the embedded hello-world example assembles");
         Self {
-            source,
-            output,
-            error,
+            source: HELLO_WORLD_MMS.to_string(),
+            control,
+            error: None,
         }
     }
 
-    fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
+    fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
             Msg::SourceChanged(source) => {
-                let (source, output, error) = apply_source(source);
+                self.error = self.control.reload(&source).err();
                 self.source = source;
-                self.output = output;
-                self.error = error;
+                true
+            }
+            Msg::ToggleBreakpoint(line) => {
+                self.control.toggle_breakpoint(line);
+                true
+            }
+            Msg::Run => {
+                self.control.start_run();
+                Self::schedule_chunk_tick(ctx);
+                true
+            }
+            Msg::Step => {
+                if !self.control.is_running() {
+                    self.control.step();
+                }
+                true
+            }
+            Msg::StepOver => {
+                if !self.control.is_running() {
+                    self.control.step_over();
+                }
+                true
+            }
+            Msg::Stop => {
+                self.control.stop();
+                true
+            }
+            Msg::ChunkTick => {
+                // A Stop is checked only between chunks, never inside one;
+                // this is that check. If Stop landed while this tick was
+                // already scheduled, drop the tick instead of running.
+                if !self.control.is_running() {
+                    return false;
+                }
+                match self.control.run_chunk(control::CHUNK_BUDGET) {
+                    StepOutcome::BudgetExhausted => Self::schedule_chunk_tick(ctx),
+                    StepOutcome::Halted | StepOutcome::Breakpoint(_) => {}
+                    StepOutcome::Advanced => {
+                        unreachable!(
+                            "run_chunk always halts, hits a breakpoint, or exhausts its budget"
+                        )
+                    }
+                }
                 true
             }
         }
@@ -77,14 +116,33 @@ impl Component for App {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let body = match &self.error {
             Some(error) => format!("Assembly error: {error}"),
-            None => self.output.join("\n"),
+            None => format!("{}", self.control.machine()),
         };
+
         let on_change = ctx.link().callback(Msg::SourceChanged);
+        let on_toggle_breakpoint = ctx.link().callback(Msg::ToggleBreakpoint);
+        let on_run = ctx.link().callback(|()| Msg::Run);
+        let on_step = ctx.link().callback(|()| Msg::Step);
+        let on_step_over = ctx.link().callback(|()| Msg::StepOver);
+        let on_stop = ctx.link().callback(|()| Msg::Stop);
+
+        // The PC indicator only means something while nothing is actively
+        // moving it; showing it mid-run would flicker with every chunk.
+        let current_line = (!self.control.is_running())
+            .then(|| self.control.current_line())
+            .flatten();
 
         html! {
             <main>
                 <h1>{ "playmmix" }</h1>
-                <Editor source={self.source.clone()} on_change={on_change} />
+                <Controls running={self.control.is_running()} {on_run} {on_step} {on_step_over} {on_stop} />
+                <Editor
+                    source={self.source.clone()}
+                    {on_change}
+                    breakpoints={self.control.breakpoint_lines().clone()}
+                    {current_line}
+                    {on_toggle_breakpoint}
+                />
                 <pre>{ body }</pre>
             </main>
         }
@@ -95,51 +153,4 @@ fn main() {
     wasm_logger::init(wasm_logger::Config::default());
     info!("Starting playmmix");
     Renderer::<App>::new().render();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn run_source_reports_halted_state() {
-        let output = run_source(HELLO_WORLD_MMS).expect("hello world assembles and runs");
-        assert!(!output.is_empty());
-        assert!(
-            output.iter().any(|line| line.contains("PC = 0x")),
-            "expected Command::State output to include a PC line, got: {output:?}"
-        );
-    }
-
-    #[test]
-    fn run_source_surfaces_parse_errors() {
-        let result = run_source("this is not valid mmix assembly $$$ ???");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn apply_source_reflects_the_current_program() {
-        let (_, hello_world_output, hello_world_error) = apply_source(HELLO_WORLD_MMS.to_string());
-        assert!(hello_world_error.is_none());
-
-        let halt_only = "\tLOC\t#100\n\tTRAP\t0,Halt,0\n".to_string();
-        let (_, halt_only_output, halt_only_error) = apply_source(halt_only);
-        assert!(halt_only_error.is_none());
-
-        assert_ne!(
-            hello_world_output, halt_only_output,
-            "a different valid program must change the rendered output"
-        );
-    }
-
-    #[test]
-    fn apply_source_surfaces_a_new_parse_error() {
-        let (_, _, valid_error) = apply_source(HELLO_WORLD_MMS.to_string());
-        assert!(valid_error.is_none());
-
-        let (_, _, broken_error) =
-            apply_source("this is not valid mmix assembly $$$ ???".to_string());
-        assert_ne!(valid_error, broken_error);
-        assert!(broken_error.is_some());
-    }
 }

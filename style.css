@@ -31,6 +31,44 @@ pre {
     word-break: break-word;
 }
 
+/* Control pane: Run / Step / Step Over / Stop and the run-state indicator.
+   Real <button> elements, so every control is keyboard-reachable without
+   extra wiring; styled on its own classes per the editor pane's rule below. */
+
+.controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.controls button {
+    font: inherit;
+    font-size: 0.9rem;
+    padding: 0.4rem 0.9rem;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #2d2d2d;
+    color: #ddd;
+    cursor: pointer;
+}
+
+.controls button:disabled {
+    color: #666;
+    cursor: default;
+    opacity: 0.6;
+}
+
+.controls button:not(:disabled):hover {
+    background: #383838;
+}
+
+.run-state {
+    margin-left: 0.25rem;
+    font-size: 0.85rem;
+    color: #999;
+}
+
 /* Editor pane: a transparent textarea layered over a highlight-colored
    overlay, with a line-number gutter. Every rule below is scoped to its own
    class rather than the bare `pre` selector above, whose wrapping and
@@ -82,6 +120,34 @@ pre {
 .overlay-line {
     display: block;
     height: 1.4em;
+}
+
+.gutter-line {
+    cursor: pointer;
+    padding-right: 0.5em;
+}
+
+.gutter-line:hover {
+    color: #aaa;
+}
+
+/* A line with no address (blank, comment, some directives) rejects a
+   breakpoint as a no-op, so this class only ever appears on a line that can
+   actually stop a run. */
+.gutter-breakpoint {
+    color: #f14c4c;
+    font-weight: bold;
+}
+
+.gutter-breakpoint::before {
+    content: "\25cf ";
+}
+
+/* The paused machine's current line, from source_loc(get_pc()); absent
+   while a run is in flight. */
+.gutter-current {
+    background: #2d2d2d;
+    color: #dcdcaa;
 }
 
 .overlay,

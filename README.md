@@ -5,13 +5,25 @@ an MMIX interpreter written in Rust. checksmix's library half compiles for
 `wasm32-unknown-unknown`; playmmix is a Yew app that runs it in a browser tab.
 
 The source pane is editable: it loads with `examples/hello_world.mms` from
-checksmix, and every edit re-assembles and re-runs the buffer, replacing the
-machine-state dump below with the new result or a visible parse error. The
-pane pairs a transparent `<textarea>` with a syntax-highlight overlay and a
-line-number gutter. It shows machine state only — the program's own output
-(`Fputs`) writes to `stdout()`, which is a silent sink on wasm until
-checksmix lands a `Host` trait. There is no examples picker, output pane, or
-run/step/breakpoint controls yet; those arrive in later phases.
+checksmix, and every edit re-assembles and loads a fresh machine at the
+program's entry point — nothing runs until asked to. The pane pairs a
+transparent `<textarea>` with a syntax-highlight overlay and a line-number
+gutter.
+
+Run, Step, Step Over, and Stop control execution explicitly. Run executes in
+chunks, yielding to the browser between them, so Stop takes effect within
+about a quarter second rather than freezing the tab. Step advances one
+instruction; Step Over runs a whole call without descending into it.
+Clicking a line number in the gutter toggles a breakpoint there (rejected as
+a no-op on a line with no address, such as a blank line or a comment); the
+gutter also marks the paused machine's current line. The machine-state dump
+below reflects whatever the machine last did — a step, a run, or a fresh
+load.
+
+It shows machine state only — the program's own output (`Fputs`) writes to
+`stdout()`, which is a silent sink on wasm until checksmix lands a `Host`
+trait. There is no examples picker or output pane yet; those arrive in later
+phases.
 
 ## Run locally
 
@@ -60,5 +72,8 @@ which this stack imports read-only and no stack owns.
 
 playmmix depends on checksmix as a published crates.io version (see
 `Cargo.toml`). It calls only checksmix's public API — `MMixAssembler` to
-assemble source, and `Debugger` to load and run the assembled program and
-render its state.
+assemble source, and `MMix` directly (not `Debugger`) to load, step, and run
+the assembled program and render its state. Driving `MMix` directly gives
+playmmix a caller-chosen instruction budget per chunk and a structured
+[`Stop`](https://docs.rs/checksmix) reason, which the chunked run loop and
+breakpoint handling in `src/control.rs` depend on.
