@@ -16,9 +16,17 @@ about a quarter second rather than freezing the tab. Step advances one
 instruction; Step Over runs a whole call without descending into it.
 Clicking a line number in the gutter toggles a breakpoint there (rejected as
 a no-op on a line with no address, such as a blank line or a comment); the
-gutter also marks the paused machine's current line. The machine-state dump
-below reflects whatever the machine last did — a step, a run, or a fresh
-load.
+gutter also marks the paused machine's current line.
+
+The machine pane on the right reflects whatever the machine last did — a
+step, a run, or a fresh load. General registers show under the full ISA
+visibility rule (nonzero, or a local register in use, or a global register),
+so a run doesn't drown in 224 zero rows; an unallocated global range
+collapses into one summary line instead. Special registers pin `rA rG rL rO
+rS rJ`, the ones that teach the register stack, and show any other nonzero
+one alongside them. Memory shows the program's loaded extent — grouped by
+MMIX segment, with hex and ASCII columns, tagged with the source labels that
+name each address.
 
 It shows machine state only — the program's own output (`Fputs`) writes to
 `stdout()`, which is a silent sink on wasm until checksmix lands a `Host`

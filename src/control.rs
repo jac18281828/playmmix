@@ -13,7 +13,7 @@
 //! [`Control::run_chunk`] or [`Control::step_over_chunk`] and when to yield
 //! via [`yield_to_event_loop`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use checksmix::{MMix, MMixAssembler, entry_point, write_image};
 use gloo_timers::callback::Timeout;
@@ -160,6 +160,14 @@ impl Control {
 
     pub fn get_pc(&self) -> u64 {
         self.mmix.get_pc()
+    }
+
+    /// The current assembly's label table, for tagging addresses in the
+    /// machine pane. Unlike the retired `Debugger::load`, which consumed
+    /// the assembler once, `Control` keeps it alive for the session's
+    /// life, re-set on every `reload`.
+    pub fn labels(&self) -> &HashMap<String, u64> {
+        &self.assembler.labels
     }
 
     /// Whether a chunked Run or chunked Step Over is in flight.

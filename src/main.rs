@@ -5,9 +5,11 @@ use yew::{Component, Context, Html, Renderer, html};
 mod control;
 mod editor;
 mod highlight;
+mod machine;
 
 use control::{Control, ControlBar, StepOutcome, yield_to_event_loop};
 use editor::Editor;
+use machine::MachinePane;
 
 /// `examples/hello_world.mms` from checksmix, embedded verbatim. Not
 /// `include_str!`: a dependency's on-disk location, wherever cargo puts it
@@ -151,9 +153,26 @@ impl Component for App {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        let body = match &self.error {
-            Some(error) => format!("Assembly error: {error}"),
-            None => format!("{}", self.control.machine()),
+        let machine_view = match &self.error {
+            Some(error) => html! { <pre>{ format!("Assembly error: {error}") }</pre> },
+            None => {
+                let mmix = self.control.machine();
+                let registers = machine::visible_registers(mmix);
+                let specials = machine::visible_specials(mmix);
+                let runs = machine::memory_runs(mmix, self.control.labels());
+                let memory = machine::memory_rows(&runs);
+                let exit_code = self.control.is_halted().then(|| mmix.get_exit_code());
+                html! {
+                    <MachinePane
+                        {registers}
+                        {specials}
+                        {memory}
+                        pc={self.control.get_pc()}
+                        {exit_code}
+                        call_depth={self.control.call_depth()}
+                    />
+                }
+            }
         };
 
         let on_change = ctx.link().callback(Msg::SourceChanged);
@@ -187,7 +206,7 @@ impl Component for App {
                     {current_line}
                     {on_toggle_breakpoint}
                 />
-                <pre>{ body }</pre>
+                { machine_view }
             </main>
         }
     }

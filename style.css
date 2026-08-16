@@ -207,3 +207,101 @@ pre {
 .tok-keyword {
     color: #569cd6;
 }
+
+/* Machine pane: registers, special registers, memory. A table-like grid,
+   not the bare `pre` selector above, whose wrap/max-height/border/padding
+   are tuned for a single preformatted block, not a scrolling row list. */
+
+.machine-pane {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 0.9rem;
+    background: #111;
+    color: #ddd;
+    border: 1px solid #333;
+    border-radius: 4px;
+    padding: 0.75rem;
+    max-height: 80vh;
+    overflow: auto;
+}
+
+.machine-pane h2 {
+    font-size: 0.85rem;
+    margin: 0.75rem 0 0.4rem;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.machine-pane section:first-of-type h2 {
+    margin-top: 0;
+}
+
+.machine-status {
+    display: flex;
+    gap: 1rem;
+    color: #dcdcaa;
+}
+
+.register-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    gap: 0.15rem 0.75rem;
+}
+
+.register-row {
+    display: flex;
+    gap: 0.5rem;
+    white-space: nowrap;
+}
+
+.reg-name {
+    color: #9cdcfe;
+    min-width: 3.5em;
+}
+
+.reg-hex {
+    color: #ddd;
+}
+
+.reg-dec {
+    color: #888;
+}
+
+.register-collapsed {
+    color: #666;
+    font-style: italic;
+}
+
+.memory-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.memory-row {
+    display: flex;
+    gap: 0.75rem;
+    white-space: nowrap;
+}
+
+.mem-segment {
+    color: #569cd6;
+    min-width: 3.5em;
+}
+
+.mem-addr {
+    color: #dcdcaa;
+}
+
+.mem-hex {
+    color: #ddd;
+    letter-spacing: 0.05em;
+}
+
+.mem-ascii {
+    color: #6a9955;
+}
+
+.mem-label {
+    color: #ce9178;
+}
