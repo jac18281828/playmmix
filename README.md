@@ -4,13 +4,14 @@ A browser playground for [checksmix](https://github.com/jac18281828/checksmix),
 an MMIX interpreter written in Rust. checksmix's library half compiles for
 `wasm32-unknown-unknown`; playmmix is a Yew app that runs it in a browser tab.
 
-This is the **walking skeleton**: one hardcoded MMIX program
-(`examples/hello_world.mms` from checksmix), assembled and run to halt on
-page load, with the resulting machine state rendered as preformatted text.
-It shows machine state only — the program's own output (`Fputs`) writes to
-`stdout()`, which is a silent sink on wasm until checksmix lands a `Host`
-trait. There is no editor, no examples picker, and no output pane yet; those
-arrive in later phases.
+The source pane is editable: it loads with `examples/hello_world.mms` from
+checksmix, and every edit re-assembles and re-runs the buffer, replacing the
+machine-state dump below with the new result or a visible parse error. The
+pane pairs a transparent `<textarea>` with a syntax-highlight overlay and a
+line-number gutter. It shows machine state only — the program's own output
+(`Fputs`) writes to `stdout()`, which is a silent sink on wasm until
+checksmix lands a `Host` trait. There is no examples picker, output pane, or
+run/step/breakpoint controls yet; those arrive in later phases.
 
 ## Run locally
 
@@ -57,7 +58,7 @@ which this stack imports read-only and no stack owns.
 
 ## Relationship to checksmix
 
-playmmix depends on checksmix as a git dependency pinned to a commit SHA
-(see `Cargo.toml`). It calls only checksmix's public API — `MMixAssembler`
-to assemble source, and `Debugger` to load and run the assembled program and
+playmmix depends on checksmix as a published crates.io version (see
+`Cargo.toml`). It calls only checksmix's public API — `MMixAssembler` to
+assemble source, and `Debugger` to load and run the assembled program and
 render its state.

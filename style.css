@@ -30,3 +30,108 @@ pre {
     white-space: pre-wrap;
     word-break: break-word;
 }
+
+/* Editor pane: a transparent textarea layered over a highlight-colored
+   overlay, with a line-number gutter. Every rule below is scoped to its own
+   class rather than the bare `pre` selector above, whose wrapping and
+   padding/border/overflow would break the glyph-grid alignment and the
+   line-number mapping this pane depends on. */
+
+.editor {
+    display: flex;
+    margin-bottom: 1rem;
+    border: 1px solid #333;
+    border-radius: 4px;
+    background: #111;
+    height: 60vh;
+}
+
+.editor-surface {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+}
+
+.gutter,
+.overlay,
+.source-input {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    tab-size: 4;
+    padding: 0.75rem;
+    margin: 0;
+    border: 0;
+    white-space: pre;
+    box-sizing: border-box;
+}
+
+.gutter {
+    flex: none;
+    height: 100%;
+    /* Scrolled only via JS, mirroring the textarea (§1's scroll-sync rule);
+       no independent scrollbar of its own. */
+    overflow: hidden;
+    color: #666;
+    text-align: right;
+    user-select: none;
+    border-right: 1px solid #333;
+}
+
+.gutter-line,
+.overlay-line {
+    display: block;
+    height: 1.4em;
+}
+
+.overlay,
+.source-input {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    resize: none;
+}
+
+.overlay {
+    color: #ddd;
+    /* Cosmetic layer only; the textarea above it is what the user scrolls
+       and types into. */
+    pointer-events: none;
+}
+
+.source-input {
+    background: transparent;
+    color: transparent;
+    caret-color: #ddd;
+}
+
+.source-input::selection {
+    background: #264f78;
+}
+
+.tok-comment {
+    color: #6a9955;
+}
+
+.tok-string {
+    color: #ce9178;
+}
+
+.tok-char {
+    color: #d16969;
+}
+
+.tok-register {
+    color: #9cdcfe;
+}
+
+.tok-label {
+    color: #dcdcaa;
+}
+
+.tok-keyword {
+    color: #569cd6;
+}
