@@ -346,10 +346,23 @@ main {
     border: 1px solid #333;
     border-radius: 4px;
     background: #111;
-    /* Same custom property the row splitter's grid track reads (§1.3):
-       growing the track alone wouldn't grow the visible pane past this
-       cap, so both read the one inherited value. */
-    max-height: var(--output-h, 14rem);
+    /* Deliberately NOT var(--output-h, ...): percentages in max-height
+       resolve against this pane's own containing block (its grid area,
+       i.e. the row track itself), not against `main`. Feeding --output-h's
+       min(px, calc(100% - ...)) value in here directly once made "100%"
+       mean two different things in two places -- on the grid track it was
+       main's height (correct), but on this property it was the track's OWN
+       height, so the same px number capped the pane 158px short of its
+       track on every drag. --output-pane-cap is a second, simpler property
+       written only alongside a committed --output-h (main.rs's
+       main_style): "100%" is unambiguous once the track itself is a
+       definite size, which is exactly when this is set. Left unset (falls
+       back to 14rem, a fixed length, never a percentage) for the
+       undragged default, where the row is `auto` -- an indefinite
+       containing block, against which a percentage max-height computes to
+       "none" per the CSS box spec, silently removing the cap rather than
+       resolving to 0. */
+    max-height: var(--output-pane-cap, 14rem);
 }
 
 .output-header {

@@ -153,20 +153,27 @@ const LEFT_COLUMN_CEILING_CALC: &str = "calc(100% - 6px - 1.5rem - 38rem)";
 /// `min(px, calc(...))` backstop, embedded in `--output-h` (see
 /// `main_style`), so a window shortened after a drag -- with no further
 /// drag -- can't push the output pane tall enough to starve the editor,
-/// mirroring finding 3's horizontal fix for the vertical axis.
+/// mirroring finding 3's horizontal fix for the vertical axis. Only
+/// `grid-template-rows` reads this value directly; `.output-pane`'s own
+/// `max-height` deliberately does not (see that rule's comment in
+/// `style.css` for why feeding it the same percentage-bearing value once
+/// capped the pane 158px short of its own track).
 ///
-/// Unlike the horizontal ceiling, this can't subtract the header row's own
-/// height: `style.css`'s `main` grid sizes it `auto` (`.app-header` can wrap
-/// onto a second line), which a static `calc()` has no way to read. The
-/// `100%` here is `main`'s full height, header included, so this ceiling is
-/// conservative rather than exact -- it can still let `--output-h` claim a
-/// few dozen px more than the header strictly leaves free. `style.css`'s
-/// `minmax(8rem, 1fr)` on the editor row (`EDITOR_MIN_SHARE_PX`, matched
-/// below) is the actual floor guarantee: together, the editor's rendered
-/// height never drops below its share, and any residual overflow this
-/// ceiling misses is bounded to the header's own height rather than growing
-/// without limit as the viewport shrinks (the unfixed behavior).
-const OUTPUT_HEIGHT_CEILING_CALC: &str = "calc(100% - 6px - 1.5rem - 8rem)";
+/// Three `0.75rem` gaps separate this axis's four row tracks (header,
+/// editor, splitter, output) -- not two, the column axis's count between
+/// its three tracks. Unlike the horizontal ceiling, this also can't
+/// subtract the header row's own height: `style.css`'s `main` grid sizes it
+/// `auto` (`.app-header` can wrap onto a second line), which a static
+/// `calc()` has no way to read. The `100%` here is `main`'s full height,
+/// header included, so this ceiling is conservative rather than exact -- it
+/// can still let `--output-h` claim the header's height more than it
+/// strictly leaves free. `style.css`'s `minmax(8rem, 1fr)` on the editor row
+/// (`EDITOR_MIN_SHARE_PX`, matched below) is the actual floor guarantee:
+/// together, the editor's rendered height never drops below its share, and
+/// any residual overflow this ceiling misses is bounded to the header's own
+/// height rather than growing without limit as the viewport shrinks (the
+/// unfixed behavior).
+const OUTPUT_HEIGHT_CEILING_CALC: &str = "calc(100% - 6px - 2.25rem - 8rem)";
 
 /// Clamp the column splitter's requested left-column width to the range
 /// `style.css`'s grid can actually render without overflowing: never
@@ -220,14 +227,21 @@ struct DragState {
 /// set only for a dimension a drag has actually touched (`None` means "use
 /// the stylesheet's default", so nothing is written for it), plus
 /// `user-select: none` for an active drag's duration -- the direct fix for
-/// a drag starting a text selection instead of resizing. Both properties
-/// are always built together from the same two values, whether called from
-/// `view()` or from a live drag's imperative write, so committing one drag
-/// never clobbers the other's already-set property. Both `--left-col` and
-/// `--output-h` are wrapped in `min(..., ...CEILING_CALC)` (finding 3 and
-/// its vertical twin): the plain px value alone would go stale the moment
-/// the window resizes again without a new drag, since nothing re-clamps it
-/// but another drag.
+/// a drag starting a text selection instead of resizing. Both dimensions'
+/// properties are always built together from the same two values, whether
+/// called from `view()` or from a live drag's imperative write, so
+/// committing one drag never clobbers the other's already-set properties.
+///
+/// `--left-col` and `--output-h` are wrapped in `min(..., ...CEILING_CALC)`
+/// (finding 3 and its vertical twin): the plain px value alone would go
+/// stale the moment the window resizes again without a new drag, since
+/// nothing re-clamps it but another drag. `--output-pane-cap` rides
+/// alongside `--output-h`, written only when it is (i.e. only once a drag
+/// has committed): a fixed `"100%"`, never a length, and never read by
+/// `grid-template-rows` -- `.output-pane`'s own `max-height` reads it
+/// instead, exactly when its containing block (the row track) is a
+/// definite size rather than the undragged default's `auto` (see that
+/// rule's comment in `style.css`).
 fn main_style(
     left_column_width: Option<f64>,
     output_height: Option<f64>,
@@ -241,7 +255,7 @@ fn main_style(
     }
     if let Some(px) = output_height {
         style.push_str(&format!(
-            "--output-h:min({px}px,{OUTPUT_HEIGHT_CEILING_CALC});"
+            "--output-h:min({px}px,{OUTPUT_HEIGHT_CEILING_CALC});--output-pane-cap:100%;"
         ));
     }
     if dragging {
@@ -1254,7 +1268,7 @@ mod tests {
         );
         assert_eq!(
             main_style(None, Some(200.0), false),
-            format!("--output-h:min(200px,{OUTPUT_HEIGHT_CEILING_CALC});")
+            format!("--output-h:min(200px,{OUTPUT_HEIGHT_CEILING_CALC});--output-pane-cap:100%;")
         );
     }
 
@@ -1263,9 +1277,20 @@ mod tests {
         assert_eq!(
             main_style(Some(300.0), Some(200.0), false),
             format!(
-                "--left-col:min(300px,{LEFT_COLUMN_CEILING_CALC});--output-h:min(200px,{OUTPUT_HEIGHT_CEILING_CALC});"
+                "--left-col:min(300px,{LEFT_COLUMN_CEILING_CALC});--output-h:min(200px,{OUTPUT_HEIGHT_CEILING_CALC});--output-pane-cap:100%;"
             )
         );
+    }
+
+    #[test]
+    fn main_style_writes_output_pane_cap_only_when_output_height_is_committed() {
+        // `.output-pane`'s max-height reads --output-pane-cap, never
+        // --output-h directly (see style.css): a percentage max-height
+        // against the row's `auto` (undragged) containing block computes to
+        // "none", not 0, so this property must be absent -- not merely
+        // unused -- whenever the row itself is still auto-sized.
+        assert!(!main_style(Some(300.0), None, false).contains("--output-pane-cap"));
+        assert!(main_style(None, Some(200.0), false).contains("--output-pane-cap:100%;"));
     }
 
     #[test]
@@ -1322,10 +1347,13 @@ mod tests {
 
     #[test]
     fn output_height_ceiling_calc_matches_the_floor_constants_it_names() {
+        // 3 gaps, not 2: the row axis has 4 tracks (header, editor,
+        // splitter, output) to the column axis's 3, so one more 0.75rem
+        // gap separates them.
         let expected = format!(
             "calc(100% - {}px - {}rem - {}rem)",
             SPLITTER_SIZE_PX as u32,
-            (2.0 * GRID_GAP_PX) / 16.0,
+            (3.0 * GRID_GAP_PX) / 16.0,
             EDITOR_MIN_SHARE_PX / 16.0
         );
         assert_eq!(OUTPUT_HEIGHT_CEILING_CALC, expected);
