@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn memory_runs_tag_the_text_label_with_its_full_loaded_bytes() {
-        let mut assembler = MMixAssembler::new(crate::HELLO_WORLD_MMS, "hello.mms");
+        let mut assembler = MMixAssembler::new(crate::examples::HELLO_WORLD_MMS, "hello.mms");
         assembler.parse().expect("hello_world.mms must assemble");
         let mut mmix = MMix::new();
         write_image(&mut mmix, &assembler);
@@ -1121,7 +1121,8 @@ mod tests {
     #[test]
     fn memory_runs_stay_fixed_across_a_real_run_via_loaded_extent() {
         let mut control =
-            crate::control::Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+            crate::control::Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms")
+                .expect("assembles");
 
         let before = memory_runs(control.machine(), control.labels());
         let before_len: usize = before.iter().map(|run| run.bytes.len()).sum();
@@ -1141,7 +1142,7 @@ mod tests {
         let after = memory_runs(control.machine(), control.labels());
         let after_len: usize = after.iter().map(|run| run.bytes.len()).sum();
 
-        // 82 text + 14 data, per HELLO_WORLD_MMS as embedded in main.rs
+        // 82 text + 14 data, per HELLO_WORLD_MMS as embedded in examples.rs
         // today -- unchanged by the run, since loaded_extent() tracks only
         // what write_image loaded, not the register-stack spills a real
         // run performs.

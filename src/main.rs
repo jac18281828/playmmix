@@ -9,39 +9,14 @@ use yew::{Callback, Component, Context, Html, NodeRef, Renderer, html};
 
 mod control;
 mod editor;
+mod examples;
 mod highlight;
 mod machine;
 
 use control::{Control, ControlBar, StepOutcome, yield_to_event_loop};
 use editor::Editor;
+use examples::DEFAULT_MMS;
 use machine::{MachinePane, OutputPane, RegisterContinuity, SpecialContinuity};
-
-/// `examples/hello_world.mms` from checksmix, embedded verbatim. Not
-/// `include_str!`: a dependency's on-disk location, wherever cargo puts it
-/// (crates.io registry cache or git checkout alike), is not a stable,
-/// crate-relative path. No longer the editor's default program (see
-/// `DEFAULT_MMS`) -- kept for its own sake as a behaviorally rich test
-/// fixture (`debug`, `LDA`, `Fputs`, a data-segment string) across
-/// `control.rs` and `machine.rs`, which is its only remaining use --
-/// `#[cfg(test)]` accordingly, or it's dead code in a release build.
-#[cfg(test)]
-const HELLO_WORLD_MMS: &str = "\tLOC\tData_Segment\n\tGREG\t@\nText\tBYTE\t\"Hello world!\",'\\n',0\n\n\tLOC\t#100\n\nMain\tdebug \"Version 0.1: Hello World Example\"\t\n\tLDA\t\t$255,Text\n\tTRAP\t0,Fputs,StdOut\n\tTRAP\t0,Halt,0\n";
-
-/// The program the editor loads on first visit: the minimal skeleton every
-/// MMIX program needs -- an entry point that halts cleanly, and an empty
-/// `Data_Segment` with `GREG @` ready for whatever a user adds -- rather
-/// than a worked example. `debug`-pseudo-op walkthroughs and multi-word
-/// pseudo-ops step confusingly (they expand into several physical
-/// instructions, only the first of which maps back to its source line);
-/// this has neither, so Step always lands on the next source line.
-const DEFAULT_MMS: &str = "% ------------------------------------------------------------\n% mmix.mms -- minimal starting point for an MMIX program\n% ------------------------------------------------------------\n\n\tLOC\t#100\t\t\t% code segment start\nMain\tTRAP\t0,Halt,0\t\t% exit\n\n\tLOC\tData_Segment\n\tGREG\t@\n";
-
-/// A minimal, fixed program that always assembles -- the fallback if the
-/// embedded `DEFAULT_MMS` somehow doesn't (e.g. a checksmix upgrade
-/// changes accepted syntax), so `App::create` has no fallible path of its
-/// own without threading an `Option<Control>` through every view and update
-/// path just for that one unlikely case.
-const FALLBACK_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
 
 /// The filename `Control` assembles the editor's buffer under. Fixed:
 /// playmmix edits a single in-memory buffer, not a multi-file project, and
@@ -823,23 +798,12 @@ impl Component for App {
     type Properties = ();
 
     fn create(_ctx: &Context<Self>) -> Self {
-        // Not routed through `describe_source_error`: this error is about
-        // the embedded DEFAULT_MMS constant, not user-supplied source,
-        // so a MIX check makes no sense here -- but it still must not go
-        // bare, so `view()`'s "render `self.error` verbatim" invariant
-        // holds for every path.
-        let (control, error) = match Control::new(DEFAULT_MMS, SOURCE_FILENAME) {
-            Ok(control) => (control, None),
-            Err(error) => (
-                Control::new(FALLBACK_MMS, SOURCE_FILENAME)
-                    .expect("FALLBACK_MMS is a fixed, minimal, always-valid program"),
-                Some(format!("Assembly error: {error}")),
-            ),
-        };
+        let control = Control::new(DEFAULT_MMS, SOURCE_FILENAME)
+            .expect("DEFAULT_MMS assembles; pinned by examples::tests::default_mms_assembles");
         let mut app = Self {
             source: DEFAULT_MMS.to_string(),
             control,
-            error,
+            error: None,
             chunk_timeout: None,
             register_continuity: RegisterContinuity::new(),
             special_continuity: SpecialContinuity::new(),

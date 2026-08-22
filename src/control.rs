@@ -830,9 +830,10 @@ mod tests {
         // Reproduces against playmmix's own default program: `main.rs`'s
         // HELLO_WORLD_MMS, line 3, is `Text BYTE "Hello world!",'\n',0` --
         // a data line with a real, resolvable address the PC never reaches.
-        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
 
-        let addr = expect_addr(crate::HELLO_WORLD_MMS, "hello.mms", 3);
+        let addr = expect_addr(crate::examples::HELLO_WORLD_MMS, "hello.mms", 3);
         assert!(
             addr >= DATA_SEGMENT_START,
             "line 3 must resolve into the data segment for this test to mean anything"
@@ -955,7 +956,8 @@ mod tests {
         // breakpoints_untouched`, for the two fields that test doesn't cover:
         // a halted run has both `has_advanced` set and real output captured,
         // and a failed reload must leave both exactly as they were.
-        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         let outcome = control.run_chunk(1_000_000);
         assert_eq!(outcome, StepOutcome::Halted, "fixture must reach a halt");
         let output_before = control.output();
@@ -982,7 +984,8 @@ mod tests {
         // back to the instruction that actually ran, and current_line() must
         // resolve to that instruction's source line -- HELLO_WORLD_MMS's
         // `TRAP 0,Halt,0` is line 10.
-        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         let outcome = control.run_chunk(1_000_000);
         assert_eq!(outcome, StepOutcome::Halted, "fixture must reach a halt");
 
@@ -1005,7 +1008,8 @@ mod tests {
         // Checked at the fresh-load PC and again after one step, so a
         // mutation that subtracts 4 unconditionally (not just when halted)
         // fails both.
-        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         assert!(!control.is_halted());
         assert_eq!(control.marker_pc(), control.get_pc());
 
@@ -1114,7 +1118,8 @@ mod tests {
 
     #[test]
     fn output_capture_includes_program_stdout_and_the_halt_diagnostic() {
-        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         let outcome = control.run_chunk(1_000_000);
         assert_eq!(outcome, StepOutcome::Halted, "fixture must reach a halt");
 
@@ -1179,7 +1184,8 @@ mod tests {
 
     #[test]
     fn reset_via_reload_restores_fresh_load_values() {
-        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         let fresh_pc = control.get_pc();
 
         let outcome = control.run_chunk(1_000_000);
@@ -1189,7 +1195,7 @@ mod tests {
         assert!(!control.output().is_empty());
 
         control
-            .reload(crate::HELLO_WORLD_MMS)
+            .reload(crate::examples::HELLO_WORLD_MMS)
             .expect("still assembles");
 
         assert_eq!(control.get_pc(), fresh_pc, "PC returns to the entry point");
@@ -1374,7 +1380,8 @@ mod tests {
         // Mirrors HELLO_WORLD_MMS's shape: a labeled `debug "..."` line as
         // the very first instruction, compiling to a PUSHJ into checksmix's
         // appended, entirely unmapped debug-print subroutine.
-        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         let pre_call_depth = control.call_depth();
 
         // (1) The call itself: depth increases, landing on the callee's own
