@@ -503,6 +503,7 @@ main {
 .register-grid {
     display: flex;
     flex-direction: column;
+    align-items: flex-start;
     gap: 0.1rem;
 }
 
@@ -525,9 +526,13 @@ main {
     color: #ddd;
 }
 
+/* i64::MIN ("-9223372036854775808") is 21 characters -- the widest value
+   this column ever renders. Fixed rather than flex: 1 so the row hugs its
+   own content instead of stretching the decimal value to the far edge of
+   the (much wider) machine pane column. */
 .reg-dec {
     display: inline-block;
-    flex: 1;
+    width: 21ch;
     text-align: right;
     color: #888;
 }
@@ -535,6 +540,14 @@ main {
 .register-collapsed {
     color: #666;
     font-style: italic;
+}
+
+/* The collapsed range label ("$32-$255") can run to 8+ characters, well past
+   .reg-name's 5ch width sized for a single register ("$25"). Auto-width
+   here so the label reserves its real space instead of overflowing into
+   .reg-note's box and rendering on top of it. */
+.register-collapsed .reg-name {
+    width: auto;
 }
 
 .memory-grid {
