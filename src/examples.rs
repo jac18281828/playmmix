@@ -11,7 +11,7 @@
 ///
 /// Must assemble: `App::create` loads it unconditionally. Pinned by
 /// `default_mms_assembles` below.
-pub const DEFAULT_MMS: &str = "% ------------------------------------------------------------\n% mmix.mms -- minimal starting point for an MMIX program\n% ------------------------------------------------------------\n\n\tLOC\t#100\t\t\t% code segment start\nMain\tTRAP\t0,Halt,0\t\t% exit\n\n\tLOC\tData_Segment\n\tGREG\t@\n";
+pub const DEFAULT_MMS: &str = "% minimal MMIX program\n\n\tLOC\t#100\t\t\t% code segment start\nMain\tTRAP\t0,Halt,0\t\t% exit\n\n\tLOC\tData_Segment\n\tGREG\t@\n";
 
 /// `examples/hello_world.mms` from checksmix, embedded verbatim. Not
 /// `include_str!`: a dependency's on-disk location, wherever cargo puts it
