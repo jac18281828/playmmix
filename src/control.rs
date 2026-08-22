@@ -233,8 +233,45 @@ impl Control {
         self.resolved_breakpoints = self
             .breakpoints
             .iter()
-            .filter_map(|&line| self.assembler.addr_for_line(&self.filename, line))
+            .filter_map(|&line| self.resolve_breakpoint_line(line))
             .collect();
+    }
+
+    /// Resolve `line` to an address a breakpoint can actually fire at, or
+    /// `None` if it can't. Shared by `toggle_breakpoint` (deciding whether
+    /// to accept a new breakpoint) and `resolve_breakpoints` (recomputing
+    /// `resolved_breakpoints` from every stored line) so the two can never
+    /// disagree about what a line resolves to.
+    ///
+    /// Tries `addr_for_line` first (a line that itself emits an
+    /// instruction/directive), then falls back to treating the line's first
+    /// whitespace-delimited token as a label -- checksmix's debug info only
+    /// tags a line that emits code, so a label alone on its own line (legal
+    /// MMIXAL) has no `addr_for_line` entry even though it resolves in
+    /// `assembler.labels()`. No leading-whitespace precondition: checksmix's
+    /// grammar has none, and the fallback only runs once `addr_for_line` has
+    /// already failed for the line, so it can't collide with an ordinary
+    /// instruction line's mnemonic. The label candidate must itself have a
+    /// source mapping (`source_loc`), rejecting a trailing label past the
+    /// last instruction, whose address is real but holds no instruction and
+    /// so could never fire. Either path's address is rejected if it falls
+    /// in the data segment, which the program counter never reaches.
+    fn resolve_breakpoint_line(&self, line: usize) -> Option<u64> {
+        let addr = self
+            .assembler
+            .addr_for_line(&self.filename, line)
+            .or_else(|| {
+                let text = self.assembler.source_text(&self.filename, line)?;
+                let token = text.split_whitespace().next()?;
+                let candidate = *self.assembler.labels.get(token)?;
+                self.assembler.source_loc(candidate)?;
+                Some(candidate)
+            })?;
+        if addr >= DATA_SEGMENT_START {
+            None
+        } else {
+            Some(addr)
+        }
     }
 
     /// The loaded machine, for reading PC, registers, or memory.
@@ -313,22 +350,24 @@ impl Control {
         &self.breakpoints
     }
 
-    /// Toggle a breakpoint on `line`. Returns `false`, a no-op, if `line`
-    /// has no address in the current assembly (a blank line, a comment, or
-    /// some directives), or if its address falls in the data segment (a
-    /// `BYTE`/`OCTA`/etc. line) -- the program counter never reaches data,
-    /// so a breakpoint there could never fire. Never silently sets a
-    /// breakpoint that can't fire.
+    /// Toggle a breakpoint on `line`. Removing an already-set breakpoint
+    /// always succeeds, even if `line` no longer resolves against the
+    /// current assembly (source edited since it was set) -- otherwise a
+    /// stale breakpoint could never be cleared. Setting a new one is gated
+    /// on `resolve_breakpoint_line`: returns `false`, a no-op, if `line` has
+    /// no address in the current assembly (a blank line, a comment, or some
+    /// directives), or if its address falls in the data segment -- the
+    /// program counter never reaches data, so a breakpoint there could
+    /// never fire. Never silently sets a breakpoint that can't fire.
     pub fn toggle_breakpoint(&mut self, line: usize) -> bool {
-        let Some(addr) = self.assembler.addr_for_line(&self.filename, line) else {
-            return false;
-        };
-        if addr >= DATA_SEGMENT_START {
+        if self.breakpoints.remove(&line) {
+            self.resolve_breakpoints();
+            return true;
+        }
+        if self.resolve_breakpoint_line(line).is_none() {
             return false;
         }
-        if !self.breakpoints.remove(&line) {
-            self.breakpoints.insert(line);
-        }
+        self.breakpoints.insert(line);
         self.resolve_breakpoints();
         true
     }
@@ -348,20 +387,65 @@ impl Control {
         self.step_over_target_depth = None;
     }
 
-    /// Execute exactly one instruction. Never checks breakpoints or a
-    /// budget -- an explicit Step always executes, even onto a
-    /// breakpointed line. No-op once halted.
+    /// Execute one source-level step. Never checks breakpoints or a budget
+    /// -- an explicit Step always executes, even onto a breakpointed line.
+    /// No-op once halted. See `step_instruction_group` for what "one
+    /// source-level step" means when the current line expands to more than
+    /// one physical instruction.
     pub fn step(&mut self) -> StepOutcome {
         if self.halted {
             return StepOutcome::Halted;
         }
+        self.step_instruction_group()
+    }
+
+    /// Execute one physical instruction, then, only if both (a) the PC was
+    /// already on a mapped source line before executing and (b) executing
+    /// it didn't change `call_depth`, keep executing (bounded) until the PC
+    /// reaches another mapped line -- hiding a pseudo-op's own internal
+    /// words (`SETI`/`SET`/`LDA` compile to up to 4 physical words, tagged
+    /// with a source line only on the first) so the current-line marker
+    /// never lands mid-group.
+    ///
+    /// Condition (b) existing alone would also search from an already-
+    /// unmapped PC (e.g. a second Step taken from inside the `debug`
+    /// pseudo-op's generated subroutine), silently running further and
+    /// executing side effects the user never asked for. Condition (a) rules
+    /// that out: every Step taken from an already-unmapped PC is a plain
+    /// single physical instruction, unconditionally -- if the PC just
+    /// changed depth (a call) or was already unmapped, this stops
+    /// immediately after the one instruction, mapped or not.
+    ///
+    /// The bound is 3 *additional* instructions: the largest group checksmix
+    /// emits is 4 physical words total, and the head instruction just
+    /// executed is one of those four, so at most 3 more are ever needed.
+    ///
+    /// Never checks a breakpoint mid-group, matching this contract's
+    /// existing "never checks breakpoints" rule. Returns the `StepOutcome`
+    /// of the last physical instruction actually executed. Callers must
+    /// have already checked `self.halted`.
+    fn step_instruction_group(&mut self) -> StepOutcome {
+        let pc_was_mapped = self.assembler.source_loc(self.get_pc()).is_some();
+        let pre_call_depth = self.call_depth();
+
         self.has_advanced = true;
-        if self.mmix.execute_instruction() {
-            StepOutcome::Advanced
-        } else {
+        if !self.mmix.execute_instruction() {
             self.halted = true;
-            StepOutcome::Halted
+            return StepOutcome::Halted;
         }
+
+        if pc_was_mapped && self.call_depth() == pre_call_depth {
+            let mut budget = 3;
+            while budget > 0 && self.assembler.source_loc(self.get_pc()).is_none() {
+                if !self.mmix.execute_instruction() {
+                    self.halted = true;
+                    return StepOutcome::Halted;
+                }
+                budget -= 1;
+            }
+        }
+
+        StepOutcome::Advanced
     }
 
     /// `Debugger::do_next`'s rule, chunked: begin or continue a Step Over.
@@ -388,9 +472,11 @@ impl Control {
         }
         if self.step_over_target_depth.is_none() {
             let pre_call_depth = self.call_depth();
-            self.has_advanced = true;
-            if !self.mmix.execute_instruction() {
-                self.halted = true;
+            // May execute up to 4 instructions, not necessarily 1 (see
+            // `step_instruction_group`); the depth comparison below still
+            // correctly reflects whatever actually happened, since it reads
+            // `call_depth()` fresh rather than assuming a single call.
+            if self.step_instruction_group() == StepOutcome::Halted {
                 return StepOutcome::Halted;
             }
             if self.call_depth() <= pre_call_depth {
@@ -488,9 +574,9 @@ pub fn yield_to_event_loop<F: FnOnce() + 'static>(callback: F) -> Timeout {
 }
 
 /// Run/Step/Step Over/Stop/Reset's disabled state for a given
-/// `(running, halted)` pair -- `docs/layout-spec.md`'s Run lifecycle table,
-/// factored into one plain function so `ControlBar`'s body states it once
-/// and a table-driven test can pin the whole table at once.
+/// `(running, halted, has_error)` triple -- `docs/layout-spec.md`'s Run
+/// lifecycle table, factored into one plain function so `ControlBar`'s body
+/// states it once and a table-driven test can pin the whole table at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlEnablement {
     pub run_disabled: bool,
@@ -500,7 +586,19 @@ pub struct ControlEnablement {
     pub reset_disabled: bool,
 }
 
-pub fn control_enablement(running: bool, halted: bool) -> ControlEnablement {
+/// `has_error` forces every field `true`: an assembly error means there is
+/// no valid program loaded to Run, Step, Step Over, Stop, or Reset, so every
+/// control disables regardless of `running`/`halted`.
+pub fn control_enablement(running: bool, halted: bool, has_error: bool) -> ControlEnablement {
+    if has_error {
+        return ControlEnablement {
+            run_disabled: true,
+            step_disabled: true,
+            step_over_disabled: true,
+            stop_disabled: true,
+            reset_disabled: true,
+        };
+    }
     ControlEnablement {
         run_disabled: running,
         step_disabled: running || halted,
@@ -520,6 +618,10 @@ pub struct ControlBarProps {
     /// Whether anything has executed since the last load -- distinguishes
     /// `paused` from `ready` in the run-state label.
     pub has_advanced: bool,
+    /// Whether the currently displayed source has an assembly error --
+    /// forces every control disabled (see `control_enablement`), since a
+    /// broken program isn't the one that would actually run.
+    pub has_error: bool,
     pub on_run: Callback<()>,
     pub on_step: Callback<()>,
     pub on_step_over: Callback<()>,
@@ -532,7 +634,7 @@ pub struct ControlBarProps {
 pub fn control_bar(props: &ControlBarProps) -> Html {
     let running = props.running;
     let halted = props.halted;
-    let enablement = control_enablement(running, halted);
+    let enablement = control_enablement(running, halted, props.has_error);
 
     html! {
         <div class="controls">
@@ -1095,37 +1197,42 @@ mod tests {
     #[test]
     fn control_enablement_matches_the_run_lifecycle_table() {
         // `docs/layout-spec.md`'s Run lifecycle table, restated as
-        // (running, halted) -> disabled state for every control.
+        // (running, halted, has_error) -> disabled state for every control.
         let cases = [
-            // (running, halted, run, step, step_over, stop, reset)
-            (false, false, false, false, false, true, false), // ready
-            (true, false, true, true, true, false, true),     // running
+            // (running, halted, has_error, run, step, step_over, stop, reset)
+            (false, false, false, false, false, false, true, false), // ready
+            (true, false, false, true, true, true, false, true),     // running
             // paused is (running=false, halted=false) after having advanced --
             // has_advanced doesn't affect enablement, only the label, so
             // "ready" and "paused" share one row here.
-            (false, true, false, true, true, true, false), // halted
+            (false, true, false, false, true, true, true, false), // halted
+            // has_error forces every control disabled, regardless of what
+            // running/halted would otherwise allow.
+            (false, false, true, true, true, true, true, true), // ready + error
+            (true, false, true, true, true, true, true, true),  // running + error
+            (false, true, true, true, true, true, true, true),  // halted + error
         ];
-        for (running, halted, run, step, step_over, stop, reset) in cases {
-            let enablement = control_enablement(running, halted);
+        for (running, halted, has_error, run, step, step_over, stop, reset) in cases {
+            let enablement = control_enablement(running, halted, has_error);
             assert_eq!(
                 enablement.run_disabled, run,
-                "Run disabled at running={running} halted={halted}"
+                "Run disabled at running={running} halted={halted} has_error={has_error}"
             );
             assert_eq!(
                 enablement.step_disabled, step,
-                "Step disabled at running={running} halted={halted}"
+                "Step disabled at running={running} halted={halted} has_error={has_error}"
             );
             assert_eq!(
                 enablement.step_over_disabled, step_over,
-                "Step Over disabled at running={running} halted={halted}"
+                "Step Over disabled at running={running} halted={halted} has_error={has_error}"
             );
             assert_eq!(
                 enablement.stop_disabled, stop,
-                "Stop disabled at running={running} halted={halted}"
+                "Stop disabled at running={running} halted={halted} has_error={has_error}"
             );
             assert_eq!(
                 enablement.reset_disabled, reset,
-                "Reset disabled at running={running} halted={halted}"
+                "Reset disabled at running={running} halted={halted} has_error={has_error}"
             );
         }
     }
@@ -1148,5 +1255,155 @@ mod tests {
                 "running={running} halted={halted} has_advanced={has_advanced}"
             );
         }
+    }
+
+    /// A five-iteration countdown loop identical to `LOOP_MMS`'s shape, but
+    /// with the loop label on its own line -- legal MMIXAL, and the exact
+    /// case `addr_for_line` can't resolve on its own.
+    const LABEL_LINE_MMS: &str =
+        "\tLOC\t#100\nMain\tSETL\t$1,5\nLoop\n\tSUBI\t$1,$1,1\n\tBNZ\t$1,Loop\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn breakpoint_on_a_standalone_label_line_resolves_via_the_label_fallback() {
+        let mut control = Control::new(LABEL_LINE_MMS, "label.mms").expect("assembles");
+
+        // Independent oracle: `Loop`'s address per the assembler's own label
+        // table, read from a fresh assembler instance, not through `Control`.
+        let mut oracle = MMixAssembler::new(LABEL_LINE_MMS, "label.mms");
+        oracle.parse().expect("test program assembles");
+        let label_addr = *oracle.labels.get("Loop").expect("Loop is a real label");
+        assert!(
+            oracle.addr_for_line("label.mms", 3).is_none(),
+            "line 3 is the bare label; addr_for_line alone can't resolve it, \
+             only the label fallback can"
+        );
+
+        assert!(
+            control.toggle_breakpoint(3),
+            "a standalone label line must be accepted, not silently ignored"
+        );
+        assert!(control.breakpoint_lines().contains(&3));
+
+        // Exercise `resolve_breakpoints`'s output, not just
+        // `toggle_breakpoint`'s return value: a revert that fixes only
+        // `toggle_breakpoint` (leaving `resolve_breakpoints` ignorant of the
+        // label fallback) would still pass the assertions above but fail
+        // this one, since `run_chunk` checks `resolved_breakpoints`.
+        let outcome = control.run_chunk(1_000);
+        assert_eq!(outcome, StepOutcome::Breakpoint(label_addr));
+        assert_eq!(control.get_pc(), label_addr);
+    }
+
+    #[test]
+    fn a_trailing_label_past_the_last_instruction_is_rejected() {
+        // `End` sits past the last real instruction: its address is real
+        // (the label resolves) but holds no instruction, so a breakpoint
+        // there could never fire.
+        const TRAILING_LABEL_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,5\n\tTRAP\t0,Halt,0\nEnd\n";
+        let mut control = Control::new(TRAILING_LABEL_MMS, "trailing.mms").expect("assembles");
+
+        let mut oracle = MMixAssembler::new(TRAILING_LABEL_MMS, "trailing.mms");
+        oracle.parse().expect("test program assembles");
+        let end_addr = *oracle.labels.get("End").expect("End is a real label");
+        assert!(
+            oracle.source_loc(end_addr).is_none(),
+            "End's address must hold no instruction for this test to mean anything"
+        );
+
+        assert!(
+            !control.toggle_breakpoint(4),
+            "a trailing label with no instruction at its address must be rejected"
+        );
+        assert!(control.breakpoint_lines().is_empty());
+    }
+
+    #[test]
+    fn a_breakpoint_that_no_longer_resolves_can_still_be_cleared() {
+        const SHORT_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
+
+        let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
+        assert!(control.toggle_breakpoint(3), "line 3 has an address");
+
+        control.reload(SHORT_MMS).expect("still assembles");
+        assert!(
+            control.breakpoint_lines().contains(&3),
+            "the breakpoint's line number survives reload even though it no \
+             longer resolves against the new source"
+        );
+
+        // Reverting the fix (gating removal on resolvability, same as
+        // adding) would return `false` here instead, leaving line 3 stuck
+        // forever.
+        assert!(
+            control.toggle_breakpoint(3),
+            "clearing a breakpoint must never be gated on resolvability"
+        );
+        assert!(!control.breakpoint_lines().contains(&3));
+    }
+
+    #[test]
+    fn step_crosses_a_multiword_pseudo_op_group_in_one_call() {
+        // SETI compiles to exactly 4 physical words (SETH/SETMH/SETML/
+        // SETL), tagged with a source line only on the first.
+        const SETI_MMS: &str = "\tLOC\t#100\nMain\tSETI\t$1,40\n\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(SETI_MMS, "seti.mms").expect("assembles");
+
+        assert_eq!(control.step(), StepOutcome::Advanced);
+        assert_eq!(
+            control.machine().get_register(1),
+            40,
+            "the whole SETI group must have executed, not just its first word"
+        );
+        assert!(
+            control.assembler.source_loc(control.marker_pc()).is_some(),
+            "one step() call must land on a mapped address -- reverting the \
+             fix would still be mid-group here (today it takes 4 calls)"
+        );
+
+        // The very next step() must be the TRAP: proof the first step()
+        // consumed the entire 4-word group and nothing more.
+        assert_eq!(control.step(), StepOutcome::Halted);
+    }
+
+    #[test]
+    fn step_never_searches_past_a_call_into_unmapped_generated_code() {
+        // Mirrors HELLO_WORLD_MMS's shape: a labeled `debug "..."` line as
+        // the very first instruction, compiling to a PUSHJ into checksmix's
+        // appended, entirely unmapped debug-print subroutine.
+        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let pre_call_depth = control.call_depth();
+
+        // (1) The call itself: depth increases, landing on the callee's own
+        // first instruction (SAVE), which has no source mapping at all.
+        assert_eq!(control.step(), StepOutcome::Advanced);
+        assert!(
+            control.call_depth() > pre_call_depth,
+            "PUSHJ must have pushed a call frame"
+        );
+        assert!(
+            control.assembler.source_loc(control.marker_pc()).is_none(),
+            "the debug subroutine's own SAVE instruction has no source mapping"
+        );
+
+        // (2) A second Step, taken from that already-unmapped PC: exactly
+        // one more physical instruction, not a further search. Reverting
+        // condition (b) (searching whenever depth is merely unchanged,
+        // ignoring whether the pre-step PC was mapped) would instead run
+        // several more instructions of the subroutine here, including the
+        // diagnostic TRAP write -- a real side effect the user never asked
+        // for.
+        let pc_before_second = control.get_pc();
+        let depth_before_second = control.call_depth();
+        assert_eq!(control.step(), StepOutcome::Advanced);
+        assert_eq!(
+            control.call_depth(),
+            depth_before_second,
+            "SAVE must not itself change call depth, for this test to mean anything"
+        );
+        assert_eq!(
+            control.get_pc(),
+            pc_before_second + 4,
+            "exactly one physical instruction must execute -- not a search"
+        );
     }
 }

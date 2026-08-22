@@ -31,6 +31,74 @@ const FALLBACK_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
 /// breakpoint/PC line lookups need the same name on every assemble.
 const SOURCE_FILENAME: &str = "source.mms";
 
+/// MIX-only opcodes: mnemonics classic MIX has but MMIXAL doesn't, so their
+/// presence as a whole token is a strong signal the pasted source is MIX,
+/// not MMIXAL. The register-sign/zero/overflow jump family (`JAN`, `JAZ`,
+/// `JAP`, `JANN`, `JANZ`, `JANP`, `JAO`) repeats for registers 1-6 and X;
+/// `JNOV` has no per-register form.
+const MIX_ONLY_OPCODES: &[&str] = &[
+    "ENTA", "ENTX", "ENNA", "ENNX", "CMPA", "CMP1", "CMP2", "CMP3", "CMP4", "CMP5", "CMP6", "INCA",
+    "INCX", "DECA", "DECX", "SLAX", "SRAX", "SLC", "SRC", "HLT", "IOC", "JAN", "JAZ", "JAP",
+    "JANN", "JANZ", "JANP", "JAO", "J1N", "J1Z", "J1P", "J1NN", "J1NZ", "J1NP", "J1O", "J2N",
+    "J2Z", "J2P", "J2NN", "J2NZ", "J2NP", "J2O", "J3N", "J3Z", "J3P", "J3NN", "J3NZ", "J3NP",
+    "J3O", "J4N", "J4Z", "J4P", "J4NN", "J4NZ", "J4NP", "J4O", "J5N", "J5Z", "J5P", "J5NN", "J5NZ",
+    "J5NP", "J5O", "J6N", "J6Z", "J6P", "J6NN", "J6NZ", "J6NP", "J6O", "JXN", "JXZ", "JXP", "JXNN",
+    "JXNZ", "JXNP", "JXO", "JNOV",
+];
+
+/// Whether `token` contains a MIX field-spec operand, `(<digits>:<digits>)`
+/// -- MMIXAL never uses a parenthesized range. Scoped to one token (not a
+/// raw substring search over the whole line) so a match can't span into an
+/// unrelated token, e.g. a comment or string literal.
+fn token_has_mix_field_spec(token: &str) -> bool {
+    let mut rest = token;
+    while let Some(open) = rest.find('(') {
+        let after_open = &rest[open + 1..];
+        match after_open.find(')') {
+            Some(close) => {
+                let inner = &after_open[..close];
+                if let Some((left, right)) = inner.split_once(':') {
+                    let is_digits =
+                        |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+                    if is_digits(left) && is_digits(right) {
+                        return true;
+                    }
+                }
+                rest = &after_open[close + 1..];
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
+/// A heuristic classifier for classic MIX source (Knuth's original
+/// architecture, distinct from MMIX): checked only after MMIXAL parsing has
+/// already failed, so it never changes what parses -- it only improves the
+/// message when parsing was always going to fail. Matches whitespace-
+/// delimited tokens, never a raw substring search, so an MMIXAL comment or
+/// string literal containing e.g. "ORIG" or "CMPA" can't false-positive.
+fn looks_like_mix(source: &str) -> bool {
+    source.lines().any(|line| {
+        line.split_whitespace().any(|token| {
+            token == "ORIG" || MIX_ONLY_OPCODES.contains(&token) || token_has_mix_field_spec(token)
+        })
+    })
+}
+
+/// The complete message to display for a load/reload error from
+/// user-supplied source: the bare MIX sentence if `source` looks like MIX
+/// (see `looks_like_mix`), or the normal "Assembly error: ..." otherwise --
+/// decided once, here, so `view()` can render `self.error` verbatim with no
+/// formatting of its own.
+fn describe_source_error(source: &str, error: &str) -> String {
+    if looks_like_mix(source) {
+        "This looks like MIX, not MMIX.".to_string()
+    } else {
+        format!("Assembly error: {error}")
+    }
+}
+
 pub enum Msg {
     SourceChanged(String),
     ToggleBreakpoint(usize),
@@ -180,7 +248,7 @@ impl App {
                 self.reset_view_state();
             }
             Err(error) => {
-                self.error = Some(error);
+                self.error = Some(describe_source_error(&self.source, &error));
             }
         }
     }
@@ -191,12 +259,17 @@ impl Component for App {
     type Properties = ();
 
     fn create(_ctx: &Context<Self>) -> Self {
+        // Not routed through `describe_source_error`: this error is about
+        // the embedded HELLO_WORLD_MMS constant, not user-supplied source,
+        // so a MIX check makes no sense here -- but it still must not go
+        // bare, so `view()`'s "render `self.error` verbatim" invariant
+        // holds for every path.
         let (control, error) = match Control::new(HELLO_WORLD_MMS, SOURCE_FILENAME) {
             Ok(control) => (control, None),
             Err(error) => (
                 Control::new(FALLBACK_MMS, SOURCE_FILENAME)
                     .expect("FALLBACK_MMS is a fixed, minimal, always-valid program"),
-                Some(error),
+                Some(format!("Assembly error: {error}")),
             ),
         };
         let mut app = Self {
@@ -231,7 +304,7 @@ impl Component for App {
                         self.reset_view_state();
                     }
                     Err(error) => {
-                        self.error = Some(error);
+                        self.error = Some(describe_source_error(&source, &error));
                     }
                 }
                 self.source = source;
@@ -313,7 +386,7 @@ impl Component for App {
             .then(|| self.control.machine().get_exit_code());
 
         let machine_view = match &self.error {
-            Some(error) => html! { <pre>{ format!("Assembly error: {error}") }</pre> },
+            Some(error) => html! { <pre>{ error.clone() }</pre> },
             None => {
                 let mmix = self.control.machine();
                 let registers = machine::visible_registers(mmix, &self.register_continuity);
@@ -359,6 +432,7 @@ impl Component for App {
                         running={self.control.is_running()}
                         halted={self.control.is_halted()}
                         has_advanced={self.control.has_advanced()}
+                        has_error={self.error.is_some()}
                         {on_run}
                         {on_step}
                         {on_step_over}
@@ -384,4 +458,34 @@ fn main() {
     wasm_logger::init(wasm_logger::Config::default());
     info!("Starting playmmix");
     Renderer::<App>::new().render();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_mix_detects_orig_and_mix_only_opcodes() {
+        let mix_source = "\tORIG\t3000\nSTART\tENTA\t0\n\tCMPA\t2000,1\n";
+        assert!(looks_like_mix(mix_source));
+    }
+
+    #[test]
+    fn looks_like_mix_detects_a_field_spec_operand() {
+        let mix_source = "\tLDA\t6,X(1:3)\n";
+        assert!(looks_like_mix(mix_source));
+    }
+
+    #[test]
+    fn looks_like_mix_is_false_for_ordinary_mmixal() {
+        assert!(!looks_like_mix(HELLO_WORLD_MMS));
+    }
+
+    #[test]
+    fn looks_like_mix_never_substring_matches_across_tokens() {
+        // "ORIG" and "CMPA" as substrings of unrelated, larger tokens (not
+        // whitespace-delimited on their own) must not false-positive.
+        let source = "; a comment mentioning PREORIGAMI and DECMPACT\n";
+        assert!(!looks_like_mix(source));
+    }
 }

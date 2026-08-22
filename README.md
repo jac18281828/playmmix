@@ -17,14 +17,17 @@ the overlay.
 Run, Step, Step Over, Stop, and Reset control execution explicitly. Run
 executes in chunks, yielding to the browser between them, so Stop takes
 effect within about a quarter second rather than freezing the tab. Step
-advances one instruction; Step Over runs a whole call without descending
-into it; Reset reloads the current source from the top, clearing output and
-highlights. The run state reads as one of `stopped` (loaded, nothing
-executed yet), `running`, `paused` (stopped after at least one instruction —
-a breakpoint, a Step, or an explicit Stop), or `halted`; Run while halted
-resets and runs again in one click. Clicking a line number in the gutter
-toggles a breakpoint there (rejected as a no-op on a line with no address,
-such as a blank line or a comment).
+advances one source-level step — a multi-word pseudo-op such as `SETI`,
+`SET`, or `LDA` executes as a single Step, not several; Step Over runs a
+whole call without descending into it; Reset reloads the current source
+from the top, clearing output and highlights. The run state reads as one of
+`stopped` (loaded, nothing executed yet), `running`, `paused` (stopped
+after at least one instruction — a breakpoint, a Step, or an explicit
+Stop), or `halted`; Run while halted resets and runs again in one click.
+Clicking a line number in the gutter toggles a breakpoint there — a
+standalone label line resolves to its next instruction's address; it's
+rejected as a no-op on a line with no address at all, such as a blank line,
+a comment, or a trailing label past the last instruction.
 
 The output pane, under the editor, shows the program's own stdout, stderr,
 and diagnostic output (such as the HALT notice checksmix emits), interleaved
