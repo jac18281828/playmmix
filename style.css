@@ -340,6 +340,14 @@ main {
 /* Output pane: the program's captured stdout/stderr/diagnostic output,
    left column, under the editor. */
 
+:root {
+    /* The output pane's cap absent any drag -- both the base rule below
+       and its @media backstop must agree, since disagreement between them
+       is exactly the class of bug both exist to prevent. One property,
+       not two literals. */
+    --output-pane-default-cap: 14rem;
+}
+
 .output-pane {
     grid-area: output;
     display: flex;
@@ -359,10 +367,11 @@ main {
        main_style): "100%" is unambiguous once the track itself is a
        definite size, which is exactly when this is set on `main` -- while
        `main` stays in the two-column grid below. Left unset (falls back to
-       14rem, a fixed length, never a percentage) for the undragged
-       default, where the row is `auto` -- an indefinite containing block,
-       against which a percentage max-height computes to "none" per the CSS
-       box spec, silently removing the cap rather than resolving to 0.
+       --output-pane-default-cap, a fixed length, never a percentage) for
+       the undragged default, where the row is `auto` -- an indefinite
+       containing block, against which a percentage max-height computes to
+       "none" per the CSS box spec, silently removing the cap rather than
+       resolving to 0.
 
        --output-pane-cap is an inline property on `main`: it does NOT stop
        applying below the @media (max-width: 1100px) breakpoint just
@@ -374,19 +383,17 @@ main {
        same specificity as this rule, declared after it, so it wins
        whenever the breakpoint applies regardless of what --output-pane-cap
        says. */
-    max-height: var(--output-pane-cap, 14rem);
+    max-height: var(--output-pane-cap, var(--output-pane-default-cap));
 }
 
-/* Backstop for the leak described above: a plain 14rem, immune to the
-   percentage-resolution question entirely, wins by source order once the
-   grid collapses. Deliberately its own rule rather than folded into the
-   @media block near .col-splitter/.row-splitter above (same specificity,
-   earlier in the file -- verified losing to the bare rule above: measured
-   the pane still uncapped at a narrow width after a wide-viewport drag
-   when placed there). */
+/* Backstop for the leak described above: immune to the percentage-
+   resolution question entirely, wins by source order once the grid
+   collapses. Must be declared after the base rule, not folded into the
+   @media block near .col-splitter/.row-splitter above -- same specificity,
+   but earlier in the file loses. */
 @media (max-width: 1100px) {
     .output-pane {
-        max-height: 14rem;
+        max-height: var(--output-pane-default-cap);
     }
 }
 

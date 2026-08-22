@@ -70,9 +70,12 @@ right is the machine. CSS grid with named areas on `<main>`:
   value. Horizontally this ceiling is exact; vertically it can't account for
   the header row's own (`auto`, wrappable) height, so the editor's `minmax(
   8rem, 1fr)` floor is what actually guarantees the editor pane stays
-  visible -- a very short window can still show a small residual overflow
-  bounded to roughly the header's height, not the grid overflowing without
-  limit.
+  visible. Below roughly a 420px window height the editor holds at that
+  128px floor rather than shrinking further, and the page scrolls instead --
+  a real tradeoff, not a tightly bounded residual: the overflow grows
+  somewhat as the window keeps shrinking (measured up to ~240px at a 200px
+  window height, undragged), but the editor never disappears, which an
+  unguarded `1fr` row would allow.
 
 Registers in a column, one per row, is the load-bearing change: it makes rows
 addressable by position, which is what continuity (§ registers) and change
