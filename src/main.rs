@@ -465,8 +465,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn looks_like_mix_detects_orig_and_mix_only_opcodes() {
-        let mix_source = "\tORIG\t3000\nSTART\tENTA\t0\n\tCMPA\t2000,1\n";
+    fn looks_like_mix_detects_orig_on_its_own() {
+        // No MIX-only opcode here -- isolates the ORIG signal so a mutant
+        // that deletes it (leaving only the opcode-table check) goes red,
+        // instead of surviving behind the opcode signal in a combined test.
+        let mix_source = "\tORIG\t3000\nSTART\tLDA\t0\n";
+        assert!(looks_like_mix(mix_source));
+    }
+
+    #[test]
+    fn looks_like_mix_detects_a_mix_only_opcode_on_its_own() {
+        // No ORIG here -- isolates the opcode-table signal so a mutant that
+        // deletes MIX_ONLY_OPCODES entirely goes red on its own.
+        let mix_source = "START\tENTA\t0\n\tCMPA\t2000,1\n";
         assert!(looks_like_mix(mix_source));
     }
 
