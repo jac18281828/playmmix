@@ -4,34 +4,47 @@ A browser playground for [checksmix](https://github.com/jac18281828/checksmix),
 an MMIX interpreter written in Rust. checksmix's library half compiles for
 `wasm32-unknown-unknown`; playmmix is a Yew app that runs it in a browser tab.
 
-The source pane is editable: it loads with `examples/hello_world.mms` from
-checksmix, and every edit re-assembles and loads a fresh machine at the
-program's entry point — nothing runs until asked to. The pane pairs a
-transparent `<textarea>` with a syntax-highlight overlay and a line-number
-gutter.
+playmmix splits the screen into two columns: the source editor and program
+output on the left, machine status/registers/specials/memory on the right,
+collapsing to one column below about 1100px wide. The source pane is
+editable: it loads with `examples/hello_world.mms` from checksmix, and every
+edit re-assembles and loads a fresh machine at the program's entry point —
+nothing runs until asked to. The pane pairs a transparent `<textarea>` with a
+syntax-highlight overlay and a line-number gutter; the current line (the last
+instruction that ran) is marked in both the gutter and a full-width band in
+the overlay.
 
-Run, Step, Step Over, and Stop control execution explicitly. Run executes in
-chunks, yielding to the browser between them, so Stop takes effect within
-about a quarter second rather than freezing the tab. Step advances one
-instruction; Step Over runs a whole call without descending into it.
-Clicking a line number in the gutter toggles a breakpoint there (rejected as
-a no-op on a line with no address, such as a blank line or a comment); the
-gutter also marks the paused machine's current line.
+Run, Step, Step Over, Stop, and Reset control execution explicitly. Run
+executes in chunks, yielding to the browser between them, so Stop takes
+effect within about a quarter second rather than freezing the tab. Step
+advances one instruction; Step Over runs a whole call without descending
+into it; Reset reloads the current source from the top, clearing output and
+highlights. The run state reads as one of `stopped` (loaded, nothing
+executed yet), `running`, `paused` (stopped after at least one instruction —
+a breakpoint, a Step, or an explicit Stop), or `halted`; Run while halted
+resets and runs again in one click. Clicking a line number in the gutter
+toggles a breakpoint there (rejected as a no-op on a line with no address,
+such as a blank line or a comment).
 
-The machine pane, below the editor, reflects whatever the machine last did — a
-step, a run, or a fresh load. General registers show under the full ISA
-visibility rule (nonzero, or a local register in use, or a global register),
-so a run doesn't drown in 224 zero rows; an unallocated global range
-collapses into one summary line instead. Special registers pin `rA rG rL rO
-rS rJ`, the ones that teach the register stack, and show any other nonzero
-one alongside them. Memory shows the program's loaded extent — grouped by
-MMIX segment, with hex and ASCII columns, tagged with the source labels that
-name each address.
+The output pane, under the editor, shows the program's own stdout, stderr,
+and diagnostic output (such as the HALT notice checksmix emits), interleaved
+in arrival order and pinned to the bottom as it grows; its header shows the
+exit code once halted.
 
-It shows machine state only — the program's own output (`Fputs`) writes to
-`stdout()`, which is a silent sink on wasm until checksmix lands a `Host`
-trait. There is no examples picker or output pane yet; those arrive in later
-phases.
+The machine pane, on the right, reflects whatever the machine last did — a
+step, a run, or a fresh load. Registers and specials render in a single
+column, one row per register at a fixed width so a value updates in place
+without reflow. `$0`-`$31` always render; a register or special that has
+ever needed to render individually keeps rendering for the life of the
+load, even if its value later returns to what would otherwise hide it, so a
+row never pops in and out of view between renders. An unallocated global
+range still collapses into one summary line when no `GREG` directive has
+run. Memory shows the program's loaded extent, aligned to 16-byte rows
+regardless of where a run starts, with hex and ASCII columns and the source
+labels naming each address; the row and 4-byte instruction span containing
+the last executed instruction are highlighted, as is any register, special,
+or byte whose value changed since the last pause. Registers/specials and
+memory each scroll independently.
 
 ## Run locally
 

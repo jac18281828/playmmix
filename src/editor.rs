@@ -95,7 +95,11 @@ impl Component for Editor {
             })
             .collect();
 
-        let overlay_rows: Html = lines.iter().map(|line| render_line(line)).collect();
+        let overlay_rows: Html = lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| render_line(line, current_line == Some(i + 1)))
+            .collect();
 
         let oninput = ctx.link().callback(|_: InputEvent| EditorMsg::Input);
         let onscroll = ctx.link().callback(|_: Event| EditorMsg::Scroll);
@@ -251,9 +255,21 @@ fn line_pieces(line: &str) -> Vec<LinePiece<'_>> {
     pieces
 }
 
+/// `.overlay-line`, plus `.overlay-current` when this line carries the
+/// paused machine's current line -- a full-width background band, additive
+/// alongside the gutter's own `gutter-current` marker (defect 4 is
+/// specifically that the gutter-only marker is too easy to miss).
+fn overlay_line_class(is_current: bool) -> Classes {
+    let mut class = classes!("overlay-line");
+    if is_current {
+        class.push("overlay-current");
+    }
+    class
+}
+
 /// Render one source line as the overlay's colored spans. Untagged gaps
 /// between spans render in the overlay's default text color.
-fn render_line(line: &str) -> Html {
+fn render_line(line: &str, is_current: bool) -> Html {
     let children: Vec<Html> = line_pieces(line)
         .into_iter()
         .map(|piece| {
@@ -265,7 +281,7 @@ fn render_line(line: &str) -> Html {
         })
         .collect();
 
-    html! { <span class="overlay-line">{ for children }</span> }
+    html! { <span class={overlay_line_class(is_current)}>{ for children }</span> }
 }
 
 #[cfg(test)]
@@ -327,6 +343,16 @@ mod tests {
         ];
         for line in lines {
             assert_eq!(reconstruct(line), line, "line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn overlay_current_line_gets_the_class_only_on_that_line() {
+        let current_line = Some(2);
+        let line_numbers = [1, 2, 3];
+        for line in line_numbers {
+            let class = overlay_line_class(current_line == Some(line));
+            assert_eq!(class.contains("overlay-current"), line == 2, "line {line}");
         }
     }
 }

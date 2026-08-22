@@ -13,9 +13,11 @@
 //! [`Control::run_chunk`] or [`Control::step_over_chunk`] and when to yield
 //! via [`yield_to_event_loop`].
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
-use checksmix::{MMix, MMixAssembler, entry_point, write_image};
+use checksmix::{Host, MMix, MMixAssembler, entry_point, write_image};
 use gloo_timers::callback::Timeout;
 use yew::prelude::*;
 
@@ -68,6 +70,67 @@ pub enum StepOutcome {
     BudgetExhausted,
 }
 
+/// Which stream a captured [`OutputSpan`] came from. `Diagnostic` is
+/// checksmix's own operator-facing notices (an unhandled trap, a truncated
+/// string, the HALT notice `handle_halt` always emits) -- a third class,
+/// distinct from the program's own stdout/stderr, but appended to the same
+/// buffer in arrival order so the output pane reads as one timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+    Diagnostic,
+}
+
+/// One captured write, in the order it arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputSpan {
+    pub stream: OutputStream,
+    pub text: String,
+}
+
+/// Shared handle to a program's captured output. `MMix::with_host` consumes
+/// the host, so this `Rc` is the only way back to what it wrote -- held by
+/// `Control`, cloned into the `Host` impl passed to `with_host`.
+type OutputBuffer = Rc<RefCell<Vec<OutputSpan>>>;
+
+/// Routes a loaded program's stdout (fd 1), stderr (fd 2), and diagnostics
+/// into the shared [`OutputBuffer`] -- the seam that replaces `StdHost`
+/// (whose `stdout()`/`stderr()` are a silent sink under
+/// `wasm32-unknown-unknown`) with something the output pane can render.
+struct CaptureHost {
+    buffer: OutputBuffer,
+}
+
+impl Host for CaptureHost {
+    fn write(&mut self, fd: u8, bytes: &[u8]) -> std::io::Result<()> {
+        // checksmix confirms only fd 1 or 2 ever reach a `Host`; an
+        // unrecognized fd (defensive only, never expected) is treated as
+        // stdout rather than dropped, so no write silently vanishes.
+        let stream = if fd == 2 {
+            OutputStream::Stderr
+        } else {
+            OutputStream::Stdout
+        };
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        self.buffer.borrow_mut().push(OutputSpan { stream, text });
+        Ok(())
+    }
+
+    fn now_micros(&mut self) -> u64 {
+        // Unused by any example this prompt covers; matches checksmix's own
+        // `Host` doctest.
+        0
+    }
+
+    fn diagnostic(&mut self, msg: &str) {
+        self.buffer.borrow_mut().push(OutputSpan {
+            stream: OutputStream::Diagnostic,
+            text: format!("{msg}\n"),
+        });
+    }
+}
+
 /// The loaded machine, its assembler, and the control-pane state layered on
 /// top: breakpoints (by line, resolved to addresses), and whether a run or
 /// chunked Step Over is in flight.
@@ -97,6 +160,16 @@ pub struct Control {
     /// Step, or Step Over after a halt would execute whatever uninitialized
     /// memory sits past the halt instruction.
     halted: bool,
+    /// Set the first time `step`, `run_chunk`, or `step_over_chunk` actually
+    /// executes an instruction since the last `new`/`reload` -- including
+    /// one that itself halts the machine. Distinguishes `paused` (something
+    /// ran, then stopped) from `ready` (nothing has run yet) for the
+    /// run-state label; never set by a halted no-op early return.
+    has_advanced: bool,
+    /// The current load's captured stdout/stderr/diagnostic output, in
+    /// arrival order. Rebuilt by `assemble_and_load`, so both `new` and a
+    /// successful `reload` start with an empty buffer automatically.
+    output: OutputBuffer,
 }
 
 impl Control {
@@ -104,7 +177,7 @@ impl Control {
     /// -- nothing executed. No breakpoints yet; there is no prior state to
     /// preserve them from.
     pub fn new(source: &str, filename: &str) -> Result<Self, String> {
-        let (mmix, assembler) = Self::assemble_and_load(source, filename)?;
+        let (mmix, assembler, output) = Self::assemble_and_load(source, filename)?;
         Ok(Self {
             mmix,
             assembler,
@@ -114,6 +187,8 @@ impl Control {
             running: false,
             step_over_target_depth: None,
             halted: false,
+            has_advanced: false,
+            output,
         })
     }
 
@@ -128,21 +203,30 @@ impl Control {
     pub fn reload(&mut self, source: &str) -> Result<(), String> {
         self.running = false;
         self.step_over_target_depth = None;
-        let (mmix, assembler) = Self::assemble_and_load(source, &self.filename)?;
+        let (mmix, assembler, output) = Self::assemble_and_load(source, &self.filename)?;
         self.mmix = mmix;
         self.assembler = assembler;
         self.halted = false;
+        self.has_advanced = false;
+        self.output = output;
         self.resolve_breakpoints();
         Ok(())
     }
 
-    fn assemble_and_load(source: &str, filename: &str) -> Result<(MMix, MMixAssembler), String> {
+    fn assemble_and_load(
+        source: &str,
+        filename: &str,
+    ) -> Result<(MMix, MMixAssembler, OutputBuffer), String> {
         let mut assembler = MMixAssembler::new(source, filename);
         assembler.parse()?;
-        let mut mmix = MMix::new();
+        let output: OutputBuffer = Rc::new(RefCell::new(Vec::new()));
+        let host = CaptureHost {
+            buffer: output.clone(),
+        };
+        let mut mmix = MMix::with_host(host);
         write_image(&mut mmix, &assembler);
         mmix.set_pc(entry_point(&assembler));
-        Ok((mmix, assembler))
+        Ok((mmix, assembler, output))
     }
 
     fn resolve_breakpoints(&mut self) {
@@ -185,12 +269,42 @@ impl Control {
         self.mmix.call_depth()
     }
 
-    /// The 1-based source line the current PC maps to, or `None` for an
-    /// address with no source mapping (compiler-generated code, or past the
-    /// end of the program).
+    /// Whether `step`, `run_chunk`, or `step_over_chunk` has actually
+    /// executed an instruction since the last `new`/successful `reload` --
+    /// including one that itself halts the machine. False immediately after
+    /// a fresh load; never set by a halted no-op early return.
+    pub fn has_advanced(&self) -> bool {
+        self.has_advanced
+    }
+
+    /// The address "where you are": once `halted`, `get_pc()` already points
+    /// 4 bytes past the last real instruction (`handle_halt` advances the PC
+    /// past the halting `TRAP` before returning), so this steps back to the
+    /// instruction that actually ran. Otherwise identical to `get_pc()`.
+    /// Both the editor's current-line lookup and the memory pane's
+    /// current-row/current-instruction computation use this address, not
+    /// the raw PC, so the marker lands on the halting instruction rather
+    /// than past it.
+    pub fn marker_pc(&self) -> u64 {
+        if self.halted {
+            self.get_pc().saturating_sub(4)
+        } else {
+            self.get_pc()
+        }
+    }
+
+    /// The current load's captured stdout/stderr/diagnostic output, in
+    /// arrival order.
+    pub fn output(&self) -> Vec<OutputSpan> {
+        self.output.borrow().clone()
+    }
+
+    /// The 1-based source line `marker_pc` maps to, or `None` for an address
+    /// with no source mapping (compiler-generated code, or past the end of
+    /// the program).
     pub fn current_line(&self) -> Option<usize> {
         self.assembler
-            .source_loc(self.get_pc())
+            .source_loc(self.marker_pc())
             .filter(|loc| loc.file == self.filename)
             .map(|loc| loc.line)
     }
@@ -241,6 +355,7 @@ impl Control {
         if self.halted {
             return StepOutcome::Halted;
         }
+        self.has_advanced = true;
         if self.mmix.execute_instruction() {
             StepOutcome::Advanced
         } else {
@@ -273,6 +388,7 @@ impl Control {
         }
         if self.step_over_target_depth.is_none() {
             let pre_call_depth = self.call_depth();
+            self.has_advanced = true;
             if !self.mmix.execute_instruction() {
                 self.halted = true;
                 return StepOutcome::Halted;
@@ -331,6 +447,7 @@ impl Control {
             if count >= budget {
                 return StepOutcome::BudgetExhausted;
             }
+            self.has_advanced = true;
             if !self.mmix.execute_instruction() {
                 self.running = false;
                 self.halted = true;
@@ -370,32 +487,62 @@ pub fn yield_to_event_loop<F: FnOnce() + 'static>(callback: F) -> Timeout {
     Timeout::new(0, callback)
 }
 
+/// Run/Step/Step Over/Stop/Reset's disabled state for a given
+/// `(running, halted)` pair -- `docs/layout-spec.md`'s Run lifecycle table,
+/// factored into one plain function so `ControlBar`'s body states it once
+/// and a table-driven test can pin the whole table at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlEnablement {
+    pub run_disabled: bool,
+    pub step_disabled: bool,
+    pub step_over_disabled: bool,
+    pub stop_disabled: bool,
+    pub reset_disabled: bool,
+}
+
+pub fn control_enablement(running: bool, halted: bool) -> ControlEnablement {
+    ControlEnablement {
+        run_disabled: running,
+        step_disabled: running || halted,
+        step_over_disabled: running || halted,
+        stop_disabled: !running,
+        // Reset shares Run's running-only gate, so it is available in
+        // every state Stop is not -- the "play again" control stays
+        // reachable whether the machine is ready, paused, or halted.
+        reset_disabled: running,
+    }
+}
+
 #[derive(Properties, PartialEq)]
 pub struct ControlBarProps {
     pub running: bool,
     pub halted: bool,
+    /// Whether anything has executed since the last load -- distinguishes
+    /// `paused` from `ready` in the run-state label.
+    pub has_advanced: bool,
     pub on_run: Callback<()>,
     pub on_step: Callback<()>,
     pub on_step_over: Callback<()>,
     pub on_stop: Callback<()>,
+    pub on_reset: Callback<()>,
 }
 
-/// Run / Step / Step Over / Stop. Stop is enabled only while a run is in
-/// flight; Step and Step Over only while one is not, and never once halted.
+/// Run / Step / Step Over / Stop / Reset, enabled per `control_enablement`.
 #[function_component(ControlBar)]
 pub fn control_bar(props: &ControlBarProps) -> Html {
     let running = props.running;
     let halted = props.halted;
-    let idle_only = running || halted;
+    let enablement = control_enablement(running, halted);
 
     html! {
         <div class="controls">
-            { control_button("Run", idle_only, props.on_run.clone()) }
-            { control_button("Step", idle_only, props.on_step.clone()) }
-            { control_button("Step Over", idle_only, props.on_step_over.clone()) }
-            { control_button("Stop", !running, props.on_stop.clone()) }
+            { control_button("Run", enablement.run_disabled, props.on_run.clone()) }
+            { control_button("Step", enablement.step_disabled, props.on_step.clone()) }
+            { control_button("Step Over", enablement.step_over_disabled, props.on_step_over.clone()) }
+            { control_button("Stop", enablement.stop_disabled, props.on_stop.clone()) }
+            { control_button("Reset", enablement.reset_disabled, props.on_reset.clone()) }
             <span class="run-state">
-                { run_state_label(running, halted) }
+                { run_state_label(running, halted, props.has_advanced) }
             </span>
         </div>
     }
@@ -410,11 +557,17 @@ fn control_button(label: &'static str, disabled: bool, on_click: Callback<()>) -
     }
 }
 
-fn run_state_label(running: bool, halted: bool) -> &'static str {
+/// The run-state label: `running`/`halted` take precedence over whether
+/// anything has executed; otherwise `paused` (something ran, then stopped)
+/// or `stopped` (nothing has run since the last load) distinguish a fresh
+/// load from a mid-program pause. `running && halted` cannot occur.
+fn run_state_label(running: bool, halted: bool, has_advanced: bool) -> &'static str {
     if running {
         "running"
     } else if halted {
         "halted"
+    } else if has_advanced {
+        "paused"
     } else {
         "stopped"
     }
@@ -691,6 +844,32 @@ mod tests {
     }
 
     #[test]
+    fn reload_with_invalid_source_leaves_has_advanced_and_output_untouched() {
+        // Mirrors `reload_with_invalid_source_leaves_previous_machine_and_
+        // breakpoints_untouched`, for the two fields that test doesn't cover:
+        // a halted run has both `has_advanced` set and real output captured,
+        // and a failed reload must leave both exactly as they were.
+        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let outcome = control.run_chunk(1_000_000);
+        assert_eq!(outcome, StepOutcome::Halted, "fixture must reach a halt");
+        let output_before = control.output();
+        assert!(!output_before.is_empty(), "the halted run must have output");
+
+        let result = control.reload(INVALID_MMS);
+
+        assert!(result.is_err());
+        assert!(
+            control.has_advanced(),
+            "has_advanced is untouched by a failed reload"
+        );
+        assert_eq!(
+            control.output(),
+            output_before,
+            "captured output is untouched by a failed reload"
+        );
+    }
+
+    #[test]
     fn running_to_halt_then_stepping_or_running_again_is_a_no_op() {
         let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
         control.start_run();
@@ -782,5 +961,149 @@ mod tests {
         // as the interrupted call returns -- well short of the halt.
         control.start_run();
         assert_eq!(control.continue_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+    }
+
+    #[test]
+    fn output_capture_includes_program_stdout_and_the_halt_diagnostic() {
+        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let outcome = control.run_chunk(1_000_000);
+        assert_eq!(outcome, StepOutcome::Halted, "fixture must reach a halt");
+
+        let output = control.output();
+        let stdout_text: String = output
+            .iter()
+            .filter(|span| span.stream == OutputStream::Stdout)
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(
+            stdout_text.contains("Hello world!\n"),
+            "the program's own Fputs output must be captured: {stdout_text:?}"
+        );
+
+        // `handle_halt` always calls `Host::diagnostic` on a halt, so the
+        // buffer holds more than just the program's own output -- not
+        // asserted as exact equality, since the diagnostic's PC value
+        // varies by build.
+        assert!(
+            output
+                .iter()
+                .any(|span| span.stream == OutputStream::Diagnostic),
+            "a halt must append a diagnostic line"
+        );
+    }
+
+    #[test]
+    fn has_advanced_tracks_whether_anything_has_executed() {
+        let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
+        assert!(
+            !control.has_advanced(),
+            "a fresh load must not report having advanced"
+        );
+
+        control.step();
+        assert!(control.has_advanced(), "one step must set has_advanced");
+
+        control.reload(LOOP_MMS).expect("still assembles");
+        assert!(
+            !control.has_advanced(),
+            "a successful reload must clear has_advanced"
+        );
+    }
+
+    #[test]
+    fn has_advanced_is_set_even_when_the_first_instruction_halts() {
+        const HALTS_IMMEDIATELY_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(HALTS_IMMEDIATELY_MMS, "halt.mms").expect("assembles");
+
+        assert_eq!(control.step(), StepOutcome::Halted);
+        assert!(
+            control.has_advanced(),
+            "the halting instruction still executed, so has_advanced must be true \
+             even though the resulting state is halted, not paused"
+        );
+
+        // A second step is now a halted no-op and must not disturb
+        // has_advanced (already true, but this pins the no-op path too).
+        assert_eq!(control.step(), StepOutcome::Halted);
+        assert!(control.has_advanced());
+    }
+
+    #[test]
+    fn reset_via_reload_restores_fresh_load_values() {
+        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let fresh_pc = control.get_pc();
+
+        let outcome = control.run_chunk(1_000_000);
+        assert_eq!(outcome, StepOutcome::Halted, "fixture must reach a halt");
+        assert!(control.is_halted());
+        assert!(control.has_advanced());
+        assert!(!control.output().is_empty());
+
+        control
+            .reload(crate::HELLO_WORLD_MMS)
+            .expect("still assembles");
+
+        assert_eq!(control.get_pc(), fresh_pc, "PC returns to the entry point");
+        assert!(!control.is_halted(), "halted clears on Reset");
+        assert!(!control.has_advanced(), "has_advanced clears on Reset");
+        assert!(control.output().is_empty(), "output clears on Reset");
+    }
+
+    #[test]
+    fn control_enablement_matches_the_run_lifecycle_table() {
+        // `docs/layout-spec.md`'s Run lifecycle table, restated as
+        // (running, halted) -> disabled state for every control.
+        let cases = [
+            // (running, halted, run, step, step_over, stop, reset)
+            (false, false, false, false, false, true, false), // ready
+            (true, false, true, true, true, false, true),     // running
+            // paused is (running=false, halted=false) after having advanced --
+            // has_advanced doesn't affect enablement, only the label, so
+            // "ready" and "paused" share one row here.
+            (false, true, false, true, true, true, false), // halted
+        ];
+        for (running, halted, run, step, step_over, stop, reset) in cases {
+            let enablement = control_enablement(running, halted);
+            assert_eq!(
+                enablement.run_disabled, run,
+                "Run disabled at running={running} halted={halted}"
+            );
+            assert_eq!(
+                enablement.step_disabled, step,
+                "Step disabled at running={running} halted={halted}"
+            );
+            assert_eq!(
+                enablement.step_over_disabled, step_over,
+                "Step Over disabled at running={running} halted={halted}"
+            );
+            assert_eq!(
+                enablement.stop_disabled, stop,
+                "Stop disabled at running={running} halted={halted}"
+            );
+            assert_eq!(
+                enablement.reset_disabled, reset,
+                "Reset disabled at running={running} halted={halted}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_state_label_matches_every_reachable_state() {
+        // running && halted cannot occur.
+        let cases = [
+            (false, false, false, "stopped"),
+            (false, false, true, "paused"),
+            (true, false, false, "running"),
+            (true, false, true, "running"),
+            (false, true, false, "halted"),
+            (false, true, true, "halted"),
+        ];
+        for (running, halted, has_advanced, expected) in cases {
+            assert_eq!(
+                run_state_label(running, halted, has_advanced),
+                expected,
+                "running={running} halted={halted} has_advanced={has_advanced}"
+            );
+        }
     }
 }

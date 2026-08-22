@@ -13,7 +13,7 @@ body {
 
 h1 {
     font-size: 1.2rem;
-    margin: 0 0 0.75rem;
+    margin: 0;
 }
 
 pre {
@@ -31,15 +31,54 @@ pre {
     word-break: break-word;
 }
 
-/* Control pane: Run / Step / Step Over / Stop and the run-state indicator.
-   Real <button> elements, so every control is keyboard-reachable without
-   extra wiring; styled on its own classes per the editor pane's rule below. */
+/* Screen layout: two-column CSS grid, per docs/layout-spec.md's Screen
+   regions section. Header spans both columns; the editor and output pane
+   share the left column, the machine pane owns the right. Under ~1100px
+   the grid collapses to one column -- the machine pane's own internal
+   order is already vertical, so nothing else changes. */
+
+main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(38rem, 42rem);
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas:
+        "header  header"
+        "editor  machine"
+        "output  machine";
+    gap: 0.75rem;
+    height: calc(100vh - 2rem);
+}
+
+@media (max-width: 1100px) {
+    main {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto auto auto;
+        grid-template-areas:
+            "header"
+            "editor"
+            "output"
+            "machine";
+        height: auto;
+    }
+}
+
+.app-header {
+    grid-area: header;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+/* Control pane: Run / Step / Step Over / Stop / Reset and the run-state
+   indicator. Real <button> elements, so every control is keyboard-reachable
+   without extra wiring; styled on its own classes per the editor pane's
+   rule below. */
 
 .controls {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-bottom: 0.75rem;
 }
 
 .controls button {
@@ -76,12 +115,12 @@ pre {
    line-number mapping this pane depends on. */
 
 .editor {
+    grid-area: editor;
     display: flex;
-    margin-bottom: 1rem;
     border: 1px solid #333;
     border-radius: 4px;
     background: #111;
-    height: 60vh;
+    min-height: 0;
 }
 
 .editor-surface {
@@ -143,11 +182,18 @@ pre {
     content: "\25cf ";
 }
 
-/* The paused machine's current line, from source_loc(get_pc()); absent
-   while a run is in flight. */
+/* The paused machine's current line, from marker_pc; absent while a run is
+   in flight. */
 .gutter-current {
     background: #2d2d2d;
     color: #dcdcaa;
+}
+
+/* The same current-line signal, layered onto the overlay as a full-width
+   background band -- additive alongside gutter-current, not a replacement:
+   the gutter-only marker alone is easy to miss (defect 4). */
+.overlay-current {
+    background: #2d2d2d;
 }
 
 .overlay,
@@ -208,9 +254,62 @@ pre {
     color: #569cd6;
 }
 
+/* Output pane: the program's captured stdout/stderr/diagnostic output,
+   left column, under the editor. */
+
+.output-pane {
+    grid-area: output;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #333;
+    border-radius: 4px;
+    background: #111;
+    max-height: 14rem;
+}
+
+.output-header {
+    flex: none;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.75rem;
+    color: #999;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid #333;
+}
+
+.output-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0.5rem 0.75rem;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+}
+
+.output-stdout {
+    color: #ddd;
+}
+
+.output-stderr {
+    color: #f14c4c;
+}
+
+.output-diagnostic {
+    color: #999;
+    font-style: italic;
+}
+
 /* Machine pane: registers, special registers, memory. A table-like grid,
    not the bare `pre` selector above, whose wrap/max-height/border/padding
    are tuned for a single preformatted block, not a scrolling row list. */
+
+.machine-slot {
+    grid-area: machine;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
 
 .machine-pane {
     font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -220,8 +319,10 @@ pre {
     border: 1px solid #333;
     border-radius: 4px;
     padding: 0.75rem;
-    max-height: 80vh;
-    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
 }
 
 .machine-pane h2 {
@@ -237,15 +338,42 @@ pre {
 }
 
 .machine-status {
+    flex: none;
     display: flex;
     gap: 1rem;
     color: #dcdcaa;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #333;
 }
 
+/* Registers and Specials share one independently-scrolling region (Specials
+   renders immediately under Registers, per this prompt's deviation from a
+   literal reading of the layout spec's three-pane scroll list). Memory
+   scrolls in its own region below -- each pane's own scrollbar, never the
+   machine pane as a whole. */
+
+.registers-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.memory {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    border-top: 1px solid #333;
+}
+
+/* Registers/specials: a single vertical column, one row per register, with
+   fixed ch-based column widths so a value updates in place without reflow
+   (the load-bearing fix for the garbled multi-column grid this pane
+   previously rendered). */
+
 .register-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
-    gap: 0.15rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
 }
 
 .register-row {
@@ -255,21 +383,35 @@ pre {
 }
 
 .reg-name {
+    display: inline-block;
+    width: 5ch;
+    text-align: right;
     color: #9cdcfe;
-    min-width: 3.5em;
 }
 
 .reg-hex {
+    display: inline-block;
+    width: 18ch;
     color: #ddd;
 }
 
 .reg-dec {
+    display: inline-block;
+    flex: 1;
+    text-align: right;
     color: #888;
 }
 
 .register-collapsed {
     color: #666;
     font-style: italic;
+}
+
+/* Changed-since-last-pause: accent text, no background, visible only while
+   paused or halted -- cleared during a Run or Step Over's intermediate
+   chunk repaints. */
+.changed {
+    color: #4ec9b0;
 }
 
 .memory-grid {
@@ -282,6 +424,12 @@ pre {
     display: flex;
     gap: 0.75rem;
     white-space: nowrap;
+}
+
+/* The row containing marker_pc -- same background as gutter-current, so the
+   two panes read as one marker. */
+.mem-current {
+    background: #2d2d2d;
 }
 
 .mem-segment {
@@ -298,10 +446,30 @@ pre {
     letter-spacing: 0.05em;
 }
 
+.mem-byte {
+    display: inline-block;
+    width: 2.4ch;
+}
+
+/* The 4-byte instruction span within the current row -- a distinct accent
+   color layered over the row's own mem-current background. */
+.mem-current-instruction {
+    color: #dcdcaa;
+    font-weight: bold;
+}
+
 .mem-ascii {
     color: #6a9955;
 }
 
 .mem-label {
     color: #ce9178;
+}
+
+/* A thin marker between two runs in different segments, replacing the
+   implicit adjacency the single-column memory layout used to rely on. */
+.memory-separator {
+    height: 1px;
+    margin: 0.35rem 0;
+    background: #333;
 }
