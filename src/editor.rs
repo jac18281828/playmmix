@@ -40,8 +40,8 @@ pub struct Editor {
 pub enum EditorMsg {
     /// The textarea's value changed (typing, paste, cut, ...).
     Input,
-    /// Tab was pressed: a literal tab was already spliced into the
-    /// textarea's DOM value; report the new value upward.
+    /// Tab was pressed: spaces, out to the next tab stop, were already
+    /// spliced into the textarea's DOM value; report the new value upward.
     TabInserted,
     /// The textarea scrolled; transform the overlay and gutter content to
     /// match (see the module doc comment).
@@ -179,20 +179,61 @@ fn render_gutter_row(
     html! { <span {class} {onclick}>{ line }</span> }
 }
 
-/// Splice a literal tab into `textarea` at the caret, replacing any current
-/// selection, and place the caret immediately after it. Setting `.value()`
-/// this way fires no `input` event, so the caller must re-run source-change
-/// handling itself.
+/// How many columns apart the tab stops are. MMIXAL has no single enforced
+/// column standard -- Knuth's own `fib.mms` (the official MMIX home page's
+/// example) hand-spaces its operands rather than snapping them to a fixed
+/// column at all, and checksmix's bundled examples independently converge
+/// on an 8-column field width, not 4. Default to the narrower, more common
+/// editor tab-stop instead of asserting one of those as canonical: pressing
+/// Tab twice reaches the same column an 8-stop convention would in one, at
+/// the cost of two keystrokes instead of one for anyone who wants it. A
+/// plain Space, untouched by `onkeydown` below, still inserts exactly one
+/// column for pedantic hand-alignment in between.
+const TAB_STOP_COLUMNS: usize = 4;
+
+/// Splice spaces -- never a literal tab -- into `textarea` at the caret,
+/// replacing any current selection, enough to reach the next tab stop, and
+/// place the caret immediately after them. Spaces, not a `\t`, so a program
+/// copied out of the editor renders identically wherever it's pasted, and a
+/// fixed count rather than one space so instructions of different lengths
+/// (`BP`, `ADDU`) still land their operands on the same column. Setting
+/// `.value()` this way fires no `input` event, so the caller must re-run
+/// source-change handling itself.
 fn splice_tab(textarea: &HtmlTextAreaElement) {
     let value = textarea.value();
     let start = textarea.selection_start().ok().flatten().unwrap_or(0) as usize;
     let end = textarea.selection_end().ok().flatten().unwrap_or(0) as usize;
 
-    let spliced = splice_at_utf16_offsets(&value, start, end, "\t");
+    let column = column_of_utf16_offset(&value, start);
+    let spaces = TAB_STOP_COLUMNS - (column % TAB_STOP_COLUMNS);
+    let insert = " ".repeat(spaces);
+
+    let spliced = splice_at_utf16_offsets(&value, start, end, &insert);
     textarea.set_value(&spliced);
 
-    let caret = (start + 1) as u32;
+    let caret = (start + spaces) as u32;
     let _ = textarea.set_selection_range(caret, caret);
+}
+
+/// The caret's column on its own line -- characters since the line's last
+/// `'\n'` (or the start of `value`), expanding any literal tab already
+/// present to `TAB_STOP_COLUMNS` like the browser's own rendering does, so a
+/// tab inserted before this fix shipped still lines up a following one
+/// correctly. `utf16_offset` is a textarea selection endpoint (UTF-16 code
+/// units); converted to a UTF-8 byte offset before slicing, then walked in
+/// `char`s so a multibyte character still counts as one column.
+fn column_of_utf16_offset(value: &str, utf16_offset: usize) -> usize {
+    let caret_byte = utf16_offset_to_byte(value, utf16_offset);
+    let line_start_byte = value[..caret_byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    value[line_start_byte..caret_byte]
+        .chars()
+        .fold(0, |column, ch| {
+            if ch == '\t' {
+                (column / TAB_STOP_COLUMNS + 1) * TAB_STOP_COLUMNS
+            } else {
+                column + 1
+            }
+        })
 }
 
 /// Convert a UTF-16 code-unit offset — what `selectionStart`/`selectionEnd`
@@ -312,6 +353,46 @@ fn render_line(line: &str, is_current: bool) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_of_utf16_offset_is_zero_at_the_start_of_an_empty_line() {
+        assert_eq!(column_of_utf16_offset("", 0), 0);
+    }
+
+    #[test]
+    fn column_of_utf16_offset_counts_plain_characters() {
+        // "BP" is 2 characters -- the exact case that misaligned before this
+        // fix: a fixed-width tab landed its operand 2 columns short of a
+        // 4-character mnemonic's own tab-stop-aligned operand.
+        assert_eq!(column_of_utf16_offset("BP", 2), 2);
+    }
+
+    #[test]
+    fn column_of_utf16_offset_only_counts_the_current_line() {
+        // The cursor is on the second line; the first line's length must
+        // not leak into the column count.
+        let value = "ADDU $0,$0,1\nBP";
+        let caret = value.len(); // end of "BP"
+        assert_eq!(column_of_utf16_offset(value, caret), 2);
+    }
+
+    #[test]
+    fn column_of_utf16_offset_expands_an_existing_literal_tab_to_the_next_stop() {
+        // A tab already in the text (predating this fix, or pasted in)
+        // still expands to the next 4-column stop, matching the browser's
+        // own tab-size: 4 rendering, so a following splice_tab still lines
+        // its operand up with the rest of the file.
+        assert_eq!(column_of_utf16_offset("\t", 1), 4);
+        assert_eq!(column_of_utf16_offset("\tADDU", 5), 8);
+    }
+
+    #[test]
+    fn column_of_utf16_offset_counts_a_multibyte_character_as_one_column() {
+        // "café" is 4 characters but "é" is 2 UTF-16 code units, so the
+        // caret just past it is reported at UTF-16 offset 5, not 4 -- must
+        // still resolve to column 4, not 5.
+        assert_eq!(column_of_utf16_offset("café", 5), 4);
+    }
 
     #[test]
     fn splice_at_utf16_offsets_handles_multibyte_prefix() {
