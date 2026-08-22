@@ -131,13 +131,23 @@ const OUTPUT_FLOOR_PX: f64 = 96.0;
 /// preserves, pixels.
 const EDITOR_MIN_SHARE_PX: f64 = 128.0;
 
-/// The output pane's stylesheet default height, pixels -- `style.css`'s
-/// `.output-pane { max-height: 14rem }` -- used as the row splitter's
-/// drag-start baseline when no drag has set an explicit height yet
-/// (`App::output_height` is `None`). Unlike the left column's fluid
-/// `minmax(0, 1fr)` default, this default is a fixed value, so no DOM read
-/// is needed to recover it.
-const OUTPUT_DEFAULT_HEIGHT_PX: f64 = 224.0;
+/// Minimum net pointer displacement, pixels, a drag must cross before its
+/// `pointerup` commits a resize. A bare click -- zero or near-zero
+/// movement, e.g. a stray click that happens to land on a splitter -- must
+/// leave the dragged dimension exactly as it found it (the stylesheet's
+/// fluid default, if never dragged before) rather than pinning it to
+/// today's rendered pixel size.
+const DRAG_COMMIT_THRESHOLD_PX: f64 = 3.0;
+
+/// The column splitter's ceiling, expressed as the `calc()` `style.css`'s
+/// own rules would compute (the `6px` splitter track, the two `0.75rem`
+/// grid gaps either side of it, the machine column's `38rem` floor).
+/// Embedded directly into the `--left-col` value a commit writes (see
+/// `main_style`) rather than pre-computed in Rust: the browser re-evaluates
+/// this `calc()` on every reflow, so a window narrowed after a drag -- with
+/// no further drag -- still can't push the grid past this ceiling (finding
+/// 3), with no resize listener needed.
+const LEFT_COLUMN_CEILING_CALC: &str = "calc(100% - 6px - 1.5rem - 38rem)";
 
 /// Clamp the column splitter's requested left-column width to the range
 /// `style.css`'s grid can actually render without overflowing: never
@@ -194,7 +204,10 @@ struct DragState {
 /// a drag starting a text selection instead of resizing. Both properties
 /// are always built together from the same two values, whether called from
 /// `view()` or from a live drag's imperative write, so committing one drag
-/// never clobbers the other's already-set property.
+/// never clobbers the other's already-set property. `--left-col` is wrapped
+/// in `min(..., LEFT_COLUMN_CEILING_CALC)` (finding 3): the plain px value
+/// alone would go stale the moment the window narrows again without a new
+/// drag, since nothing re-clamps it but another drag.
 fn main_style(
     left_column_width: Option<f64>,
     output_height: Option<f64>,
@@ -202,7 +215,9 @@ fn main_style(
 ) -> String {
     let mut style = String::new();
     if let Some(px) = left_column_width {
-        style.push_str(&format!("--left-col:{px}px;"));
+        style.push_str(&format!(
+            "--left-col:min({px}px,{LEFT_COLUMN_CEILING_CALC});"
+        ));
     }
     if let Some(px) = output_height {
         style.push_str(&format!("--output-h:{px}px;"));
@@ -216,20 +231,38 @@ fn main_style(
 /// Write `main_style`'s result directly onto `main_ref`'s DOM node --
 /// `pointerdown`/`pointermove`/`pointerup`'s shared imperative-write path,
 /// bypassing `Component::update` so a live drag never re-renders `App`.
+/// `dragging_value_px` is the dimension `which` is adjusting -- `Some` for
+/// a live drag or a commit, `None` to revert it to "use the stylesheet's
+/// default" (a bare click, or a cancelled drag, undoing whatever
+/// `pointerdown` wrote speculatively).
 fn write_drag_style(
     main_ref: &NodeRef,
     which: Splitter,
-    dragging_value_px: f64,
+    dragging_value_px: Option<f64>,
     other_dimension_px: Option<f64>,
     dragging: bool,
 ) {
     let (left_column_width, output_height) = match which {
-        Splitter::Column => (Some(dragging_value_px), other_dimension_px),
-        Splitter::Row => (other_dimension_px, Some(dragging_value_px)),
+        Splitter::Column => (dragging_value_px, other_dimension_px),
+        Splitter::Row => (other_dimension_px, dragging_value_px),
     };
     let style = main_style(left_column_width, output_height, dragging);
     if let Some(element) = main_ref.cast::<Element>() {
         let _ = element.set_attribute("style", &style);
+    }
+}
+
+/// Map a drag's start size and net pointer displacement to the resized
+/// extent -- the one place the column and row splitters' otherwise-
+/// identical math must differ. The column splitter's pane sits left of its
+/// handle, so dragging right grows it; the row splitter's output pane sits
+/// below its handle, so dragging down (which grows the space above the
+/// handle) shrinks it. Plain and host-testable so a future sign flip is
+/// caught by `cargo test`, not just by a human dragging it in a browser.
+fn resized_extent(size_start_px: f64, delta_px: f64, splitter: Splitter) -> f64 {
+    match splitter {
+        Splitter::Column => size_start_px + delta_px,
+        Splitter::Row => size_start_px - delta_px,
     }
 }
 
@@ -241,24 +274,42 @@ fn capture_pointer(handle_ref: &NodeRef, pointer_id: i32) {
     }
 }
 
-/// Build the column splitter's `pointerdown`/`pointermove`/`pointerup`
-/// callbacks. `left_col_ref` is any element whose rendered width equals the
-/// left column's current width -- `App::row_splitter_ref` works, since the
-/// row splitter's handle lives in that same column. `output_height` is
-/// `App::output_height`, captured by value so the live style write never
-/// clobbers it.
+/// Both dimensions' current, `App`-committed values -- `None` means "use
+/// the stylesheet's default". Passed as one unit to each splitter's handler
+/// builder: a drag's `pointerup`/`pointercancel` needs both its own
+/// dimension, to revert a bare click or a cancelled drag to exactly what
+/// `<main>` had before `pointerdown` touched it, and the other, so a live
+/// style write never clobbers it.
+#[derive(Debug, Clone, Copy)]
+struct CommittedSizes {
+    left_column_width: Option<f64>,
+    output_height: Option<f64>,
+}
+
+/// Build the column splitter's `pointerdown`/`pointermove`/`pointerup`/
+/// `pointercancel` callbacks. `left_col_ref` is any element whose rendered
+/// width equals the left column's current width -- `App::row_splitter_ref`
+/// works, since the row splitter's handle lives in that same column.
+/// `committed` is `App`'s own current values for both dimensions -- see
+/// `CommittedSizes`'s doc comment.
 fn column_splitter_handlers(
     drag_state: Rc<RefCell<Option<DragState>>>,
     main_ref: NodeRef,
     handle_ref: NodeRef,
     left_col_ref: NodeRef,
-    output_height: Option<f64>,
+    committed: CommittedSizes,
     on_commit: Callback<f64>,
 ) -> (
     Callback<PointerEvent>,
     Callback<PointerEvent>,
     Callback<PointerEvent>,
+    Callback<PointerEvent>,
 ) {
+    let CommittedSizes {
+        left_column_width,
+        output_height,
+    } = committed;
+
     let onpointerdown = {
         let drag_state = drag_state.clone();
         let main_ref = main_ref.clone();
@@ -283,7 +334,7 @@ fn column_splitter_handlers(
             write_drag_style(
                 &main_ref,
                 Splitter::Column,
-                size_start_px,
+                Some(size_start_px),
                 output_height,
                 true,
             );
@@ -301,13 +352,21 @@ fn column_splitter_handlers(
                 return;
             }
             let delta = event.client_x() as f64 - state.pointer_start_client_px;
-            let clamped =
-                clamp_left_column_width(state.size_start_px + delta, state.ceiling_param_px);
-            write_drag_style(&main_ref, Splitter::Column, clamped, output_height, true);
+            let requested = resized_extent(state.size_start_px, delta, Splitter::Column);
+            let clamped = clamp_left_column_width(requested, state.ceiling_param_px);
+            write_drag_style(
+                &main_ref,
+                Splitter::Column,
+                Some(clamped),
+                output_height,
+                true,
+            );
         })
     };
 
     let onpointerup = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
         Callback::from(move |event: PointerEvent| {
             let Some(state) = drag_state.borrow_mut().take() else {
                 return;
@@ -316,45 +375,92 @@ fn column_splitter_handlers(
                 return;
             }
             let delta = event.client_x() as f64 - state.pointer_start_client_px;
-            let clamped =
-                clamp_left_column_width(state.size_start_px + delta, state.ceiling_param_px);
-            write_drag_style(&main_ref, Splitter::Column, clamped, output_height, false);
+            if delta.abs() <= DRAG_COMMIT_THRESHOLD_PX {
+                write_drag_style(
+                    &main_ref,
+                    Splitter::Column,
+                    left_column_width,
+                    output_height,
+                    false,
+                );
+                return;
+            }
+            let requested = resized_extent(state.size_start_px, delta, Splitter::Column);
+            let clamped = clamp_left_column_width(requested, state.ceiling_param_px);
+            write_drag_style(
+                &main_ref,
+                Splitter::Column,
+                Some(clamped),
+                output_height,
+                false,
+            );
             on_commit.emit(clamped);
         })
     };
 
-    (onpointerdown, onpointermove, onpointerup)
+    let onpointercancel = {
+        Callback::from(move |_event: PointerEvent| {
+            let Some(state) = drag_state.borrow_mut().take() else {
+                return;
+            };
+            if state.which != Splitter::Column {
+                return;
+            }
+            write_drag_style(
+                &main_ref,
+                Splitter::Column,
+                left_column_width,
+                output_height,
+                false,
+            );
+        })
+    };
+
+    (onpointerdown, onpointermove, onpointerup, onpointercancel)
 }
 
-/// Build the row splitter's `pointerdown`/`pointermove`/`pointerup`
-/// callbacks. `column_height_ref` is any element spanning exactly the
-/// editor, row-splitter, and output rows -- `App::col_splitter_ref` works,
-/// since the column splitter's handle spans that same range. `output_height`
-/// is `App::output_height`; unlike the column splitter's fluid default, the
-/// output pane's default height is a fixed, known value
-/// (`OUTPUT_DEFAULT_HEIGHT_PX`), so no DOM read is needed to recover a
-/// drag-start size when it's `None`.
+/// Build the row splitter's `pointerdown`/`pointermove`/`pointerup`/
+/// `pointercancel` callbacks. `column_height_ref` is any element spanning
+/// exactly the editor, row-splitter, and output rows --
+/// `App::col_splitter_ref` works, since the column splitter's handle spans
+/// that same range. `output_pane_ref` is the output pane's own element,
+/// read at `pointerdown` for the drag-start height -- unlike the column
+/// splitter's fluid `minmax(0, 1fr)` default, the output pane's rendered
+/// height when never dragged is content-driven (`.output-pane`'s `max-
+/// height` caps it, it doesn't fix it), so, exactly as the column splitter
+/// reads `left_col_ref`, this must be a live DOM read, not a constant
+/// (finding 2). `committed` is `App`'s own current values for both
+/// dimensions -- see `CommittedSizes`'s doc comment.
 fn row_splitter_handlers(
     drag_state: Rc<RefCell<Option<DragState>>>,
     main_ref: NodeRef,
     handle_ref: NodeRef,
     column_height_ref: NodeRef,
-    left_column_width: Option<f64>,
-    output_height: Option<f64>,
+    output_pane_ref: NodeRef,
+    committed: CommittedSizes,
     on_commit: Callback<f64>,
 ) -> (
     Callback<PointerEvent>,
     Callback<PointerEvent>,
     Callback<PointerEvent>,
+    Callback<PointerEvent>,
 ) {
-    let output_start_px = output_height.unwrap_or(OUTPUT_DEFAULT_HEIGHT_PX);
+    let CommittedSizes {
+        left_column_width,
+        output_height,
+    } = committed;
 
     let onpointerdown = {
         let drag_state = drag_state.clone();
         let main_ref = main_ref.clone();
         let handle_ref = handle_ref.clone();
         let column_height_ref = column_height_ref.clone();
+        let output_pane_ref = output_pane_ref.clone();
         Callback::from(move |event: PointerEvent| {
+            let size_start_px = output_pane_ref
+                .cast::<Element>()
+                .map(|element| element.client_height() as f64)
+                .unwrap_or(0.0);
             let ceiling_param_px = column_height_ref
                 .cast::<Element>()
                 .map(|element| element.client_height() as f64)
@@ -362,14 +468,14 @@ fn row_splitter_handlers(
             *drag_state.borrow_mut() = Some(DragState {
                 which: Splitter::Row,
                 pointer_start_client_px: event.client_y() as f64,
-                size_start_px: output_start_px,
+                size_start_px,
                 ceiling_param_px,
             });
             capture_pointer(&handle_ref, event.pointer_id());
             write_drag_style(
                 &main_ref,
                 Splitter::Row,
-                output_start_px,
+                Some(size_start_px),
                 left_column_width,
                 true,
             );
@@ -387,12 +493,21 @@ fn row_splitter_handlers(
                 return;
             }
             let delta = event.client_y() as f64 - state.pointer_start_client_px;
-            let clamped = clamp_output_height(state.size_start_px + delta, state.ceiling_param_px);
-            write_drag_style(&main_ref, Splitter::Row, clamped, left_column_width, true);
+            let requested = resized_extent(state.size_start_px, delta, Splitter::Row);
+            let clamped = clamp_output_height(requested, state.ceiling_param_px);
+            write_drag_style(
+                &main_ref,
+                Splitter::Row,
+                Some(clamped),
+                left_column_width,
+                true,
+            );
         })
     };
 
     let onpointerup = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
         Callback::from(move |event: PointerEvent| {
             let Some(state) = drag_state.borrow_mut().take() else {
                 return;
@@ -401,13 +516,48 @@ fn row_splitter_handlers(
                 return;
             }
             let delta = event.client_y() as f64 - state.pointer_start_client_px;
-            let clamped = clamp_output_height(state.size_start_px + delta, state.ceiling_param_px);
-            write_drag_style(&main_ref, Splitter::Row, clamped, left_column_width, false);
+            if delta.abs() <= DRAG_COMMIT_THRESHOLD_PX {
+                write_drag_style(
+                    &main_ref,
+                    Splitter::Row,
+                    output_height,
+                    left_column_width,
+                    false,
+                );
+                return;
+            }
+            let requested = resized_extent(state.size_start_px, delta, Splitter::Row);
+            let clamped = clamp_output_height(requested, state.ceiling_param_px);
+            write_drag_style(
+                &main_ref,
+                Splitter::Row,
+                Some(clamped),
+                left_column_width,
+                false,
+            );
             on_commit.emit(clamped);
         })
     };
 
-    (onpointerdown, onpointermove, onpointerup)
+    let onpointercancel = {
+        Callback::from(move |_event: PointerEvent| {
+            let Some(state) = drag_state.borrow_mut().take() else {
+                return;
+            };
+            if state.which != Splitter::Row {
+                return;
+            }
+            write_drag_style(
+                &main_ref,
+                Splitter::Row,
+                output_height,
+                left_column_width,
+                false,
+            );
+        })
+    };
+
+    (onpointerdown, onpointermove, onpointerup, onpointercancel)
 }
 
 /// The status readout's text for a chunked Run or Step Over's outcome --
@@ -490,6 +640,12 @@ pub struct App {
     /// `client_width()` is the column splitter's drag-start left-column
     /// width.
     row_splitter_ref: NodeRef,
+    /// The output pane's own root element -- its `client_height()` is the
+    /// row splitter's drag-start output height (finding 2: this must be a
+    /// live DOM read, not a stylesheet-default constant, since the output
+    /// pane's undragged height is content-driven, capped by `max-height`
+    /// rather than fixed to it).
+    output_pane_ref: NodeRef,
     /// Live drag state, shared with both splitters' pointer-event closures.
     /// A persistent field, not a value `view()` creates fresh each render:
     /// an unrelated re-render mid-drag (a `Msg::ChunkTick` from a Run in
@@ -649,6 +805,7 @@ impl Component for App {
             main_ref: NodeRef::default(),
             col_splitter_ref: NodeRef::default(),
             row_splitter_ref: NodeRef::default(),
+            output_pane_ref: NodeRef::default(),
             drag_state: Rc::new(RefCell::new(None)),
         };
         // Seed continuity and the diff baseline off the freshly loaded
@@ -828,23 +985,29 @@ impl Component for App {
             .then(|| self.control.current_line())
             .flatten();
 
-        let (col_onpointerdown, col_onpointermove, col_onpointerup) = column_splitter_handlers(
-            self.drag_state.clone(),
-            self.main_ref.clone(),
-            self.col_splitter_ref.clone(),
-            self.row_splitter_ref.clone(),
-            self.output_height,
-            ctx.link().callback(Msg::ColumnResized),
-        );
-        let (row_onpointerdown, row_onpointermove, row_onpointerup) = row_splitter_handlers(
-            self.drag_state.clone(),
-            self.main_ref.clone(),
-            self.row_splitter_ref.clone(),
-            self.col_splitter_ref.clone(),
-            self.left_column_width,
-            self.output_height,
-            ctx.link().callback(Msg::RowResized),
-        );
+        let committed_sizes = CommittedSizes {
+            left_column_width: self.left_column_width,
+            output_height: self.output_height,
+        };
+        let (col_onpointerdown, col_onpointermove, col_onpointerup, col_onpointercancel) =
+            column_splitter_handlers(
+                self.drag_state.clone(),
+                self.main_ref.clone(),
+                self.col_splitter_ref.clone(),
+                self.row_splitter_ref.clone(),
+                committed_sizes,
+                ctx.link().callback(Msg::ColumnResized),
+            );
+        let (row_onpointerdown, row_onpointermove, row_onpointerup, row_onpointercancel) =
+            row_splitter_handlers(
+                self.drag_state.clone(),
+                self.main_ref.clone(),
+                self.row_splitter_ref.clone(),
+                self.col_splitter_ref.clone(),
+                self.output_pane_ref.clone(),
+                committed_sizes,
+                ctx.link().callback(Msg::RowResized),
+            );
 
         let main_style_attr = {
             let style = main_style(self.left_column_width, self.output_height, false);
@@ -881,6 +1044,7 @@ impl Component for App {
                     onpointerdown={row_onpointerdown}
                     onpointermove={row_onpointermove}
                     onpointerup={row_onpointerup}
+                    onpointercancel={row_onpointercancel}
                 />
                 <div
                     class="col-splitter"
@@ -888,8 +1052,13 @@ impl Component for App {
                     onpointerdown={col_onpointerdown}
                     onpointermove={col_onpointermove}
                     onpointerup={col_onpointerup}
+                    onpointercancel={col_onpointercancel}
                 />
-                <OutputPane spans={self.control.output()} {exit_code} />
+                <OutputPane
+                    spans={self.control.output()}
+                    {exit_code}
+                    pane_ref={self.output_pane_ref.clone()}
+                />
                 <div class="machine-slot">{ machine_view }</div>
             </main>
         }
@@ -1057,7 +1226,10 @@ mod tests {
 
     #[test]
     fn main_style_sets_only_the_dimension_that_is_some() {
-        assert_eq!(main_style(Some(300.0), None, false), "--left-col:300px;");
+        assert_eq!(
+            main_style(Some(300.0), None, false),
+            format!("--left-col:min(300px,{LEFT_COLUMN_CEILING_CALC});")
+        );
         assert_eq!(main_style(None, Some(200.0), false), "--output-h:200px;");
     }
 
@@ -1065,7 +1237,7 @@ mod tests {
     fn main_style_writes_both_dimensions_together_without_clobbering_either() {
         assert_eq!(
             main_style(Some(300.0), Some(200.0), false),
-            "--left-col:300px;--output-h:200px;"
+            format!("--left-col:min(300px,{LEFT_COLUMN_CEILING_CALC});--output-h:200px;")
         );
     }
 
@@ -1074,7 +1246,38 @@ mod tests {
         assert_eq!(main_style(None, None, true), "user-select:none;");
         assert_eq!(
             main_style(Some(300.0), None, true),
-            "--left-col:300px;user-select:none;"
+            format!("--left-col:min(300px,{LEFT_COLUMN_CEILING_CALC});user-select:none;")
         );
+    }
+
+    #[test]
+    fn main_style_left_col_ceiling_never_lets_the_grid_overflow_a_narrower_container() {
+        // finding 3: a stale, too-wide `--left-col` (set by a drag at a
+        // wider viewport) must not out-run a `min()` ceiling recomputed at
+        // the container's current, narrower width -- the exact CSS-only
+        // backstop `grid-template-columns` relies on to never overflow
+        // regardless of when the window was last dragged.
+        let style = main_style(Some(930.0), None, false);
+        assert!(style.contains("min(930px,"));
+        assert!(style.contains(LEFT_COLUMN_CEILING_CALC));
+    }
+
+    #[test]
+    fn resized_extent_grows_the_column_splitter_pane_as_the_pointer_moves_right() {
+        // The column splitter's pane sits left of its handle: a positive
+        // delta (pointer moving right) must grow it.
+        assert_eq!(resized_extent(400.0, 50.0, Splitter::Column), 450.0);
+        assert_eq!(resized_extent(400.0, -50.0, Splitter::Column), 350.0);
+    }
+
+    #[test]
+    fn resized_extent_shrinks_the_row_splitter_pane_as_the_pointer_moves_down() {
+        // The row splitter's output pane sits below its handle: a positive
+        // delta (pointer moving down, growing the space above the handle)
+        // must shrink it -- the opposite sign from the column splitter
+        // (finding 1: this is exactly the sign the earlier implementation
+        // got backwards by copying the column case).
+        assert_eq!(resized_extent(200.0, 50.0, Splitter::Row), 150.0);
+        assert_eq!(resized_extent(200.0, -50.0, Splitter::Row), 250.0);
     }
 }

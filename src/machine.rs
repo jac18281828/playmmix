@@ -751,6 +751,12 @@ pub struct OutputPaneProps {
     /// Mirrored from the status line once halted, per `docs/layout-spec.md`'s
     /// Output pane section, so the result of a run reads in one place.
     pub exit_code: Option<u64>,
+    /// Set on the `.output-pane` root element. `App`'s row splitter reads
+    /// its `client_height()` as a drag's start size -- the pane's rendered
+    /// height is content-driven (capped, not fixed, by `max-height`), so no
+    /// constant can stand in for a live DOM read.
+    #[prop_or_default]
+    pub pane_ref: NodeRef,
 }
 
 /// The output pane: the program's captured stdout/stderr/diagnostic output,
@@ -808,7 +814,7 @@ impl Component for OutputPane {
             None => "OUTPUT".to_string(),
         };
         html! {
-            <div class="output-pane">
+            <div class="output-pane" ref={ctx.props().pane_ref.clone()}>
                 <div class="output-header">{ header }</div>
                 <div class="output-body" ref={self.container_ref.clone()} {onscroll}>
                     { for ctx.props().spans.iter().map(render_output_span) }
