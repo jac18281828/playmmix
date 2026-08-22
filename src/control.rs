@@ -166,6 +166,17 @@ pub struct Control {
     /// ran, then stopped) from `ready` (nothing has run yet) for the
     /// run-state label; never set by a halted no-op early return.
     has_advanced: bool,
+    /// The address `run_chunk` just stopped at because it was a resolved
+    /// breakpoint, or `None`. Consumed (read once, then always cleared) at
+    /// the top of the very next `run_chunk` call: if the machine's PC still
+    /// sits at this address, that call is a deliberate "continue past the
+    /// breakpoint I'm paused at," so its entry check is skipped for exactly
+    /// that one instruction. Any other address (or no value at all) means
+    /// this is a fresh start -- possibly one whose very first instruction
+    /// is itself a breakpoint, the case `run_chunk`'s own mid-chunk check
+    /// can never catch, since it only ever inspects the PC *after*
+    /// executing.
+    resumed_breakpoint: Option<u64>,
     /// The current load's captured stdout/stderr/diagnostic output, in
     /// arrival order. Rebuilt by `assemble_and_load`, so both `new` and a
     /// successful `reload` start with an empty buffer automatically.
@@ -188,6 +199,7 @@ impl Control {
             step_over_target_depth: None,
             halted: false,
             has_advanced: false,
+            resumed_breakpoint: None,
             output,
         })
     }
@@ -208,6 +220,7 @@ impl Control {
         self.assembler = assembler;
         self.halted = false;
         self.has_advanced = false;
+        self.resumed_breakpoint = None;
         self.output = output;
         self.resolve_breakpoints();
         Ok(())
@@ -401,11 +414,19 @@ impl Control {
 
     /// Execute one physical instruction, then, only if both (a) the PC was
     /// already on a mapped source line before executing and (b) executing
-    /// it didn't change `call_depth`, keep executing (bounded) until the PC
-    /// reaches another mapped line -- hiding a pseudo-op's own internal
-    /// words (`SETI`/`SET`/`LDA` compile to up to 4 physical words, tagged
-    /// with a source line only on the first) so the current-line marker
-    /// never lands mid-group.
+    /// it didn't change `call_depth`, keep executing (bounded) while the PC
+    /// stays mapped to that SAME statement -- hiding a pseudo-op's own
+    /// internal words (`SETI`/`SET`/`LDA` compile to up to 4 physical
+    /// words) so the current-line marker never lands mid-group.
+    ///
+    /// checksmix >=0.3.3 maps every address inside a multi-word statement's
+    /// expansion to that statement's own line (previously only the first
+    /// word was mapped, so "reached ANY mapped address" meant "reached the
+    /// next statement" -- that's no longer true, since the second, third,
+    /// and fourth words of the SAME group are mapped too, to the SAME
+    /// line). The loop below compares the resolved `SourceLoc` itself
+    /// (`PartialEq`), not just its presence, to tell "still inside the
+    /// statement we started on" from "reached the next one."
     ///
     /// Condition (b) existing alone would also search from an already-
     /// unmapped PC (e.g. a second Step taken from inside the `debug`
@@ -425,7 +446,7 @@ impl Control {
     /// of the last physical instruction actually executed. Callers must
     /// have already checked `self.halted`.
     fn step_instruction_group(&mut self) -> StepOutcome {
-        let pc_was_mapped = self.assembler.source_loc(self.get_pc()).is_some();
+        let head_loc = self.assembler.source_loc(self.get_pc()).cloned();
         let pre_call_depth = self.call_depth();
 
         self.has_advanced = true;
@@ -434,9 +455,9 @@ impl Control {
             return StepOutcome::Halted;
         }
 
-        if pc_was_mapped && self.call_depth() == pre_call_depth {
+        if head_loc.is_some() && self.call_depth() == pre_call_depth {
             let mut budget = 3;
-            while budget > 0 && self.assembler.source_loc(self.get_pc()).is_none() {
+            while budget > 0 && self.assembler.source_loc(self.get_pc()) == head_loc.as_ref() {
                 if !self.mmix.execute_instruction() {
                     self.halted = true;
                     return StepOutcome::Halted;
@@ -519,6 +540,20 @@ impl Control {
     /// chunk would only be caught at the chunk boundary, which is the exact
     /// granularity this loop exists to avoid.
     ///
+    /// "Execute, then check" alone only ever inspects the PC a chunk
+    /// *leaves*, never the one it *starts* on -- for every instruction but
+    /// the first, that's the same address the previous instruction's own
+    /// check already covered, so the two are equivalent. Not so for the
+    /// very first instruction of a chunk: nothing has checked its starting
+    /// PC yet, so a breakpoint sitting exactly there -- the program's entry
+    /// point with no address-consuming label before it, or any other PC a
+    /// Step/Reset/reload happened to land on -- would silently execute
+    /// before this loop ever got a chance to see it. The entry check below
+    /// closes that gap, without breaking "click Run again to continue past
+    /// the breakpoint you're paused at": `resumed_breakpoint` names
+    /// exactly the one address this call is allowed to run through
+    /// unchecked, and only while the PC still sits there.
+    ///
     /// Never returns `StepOutcome::Advanced`: a chunk that neither halts nor
     /// hits a breakpoint always exhausts its budget. Ends the run
     /// (`is_running()` becomes `false`) on `Halted` or `Breakpoint`; leaves
@@ -527,6 +562,13 @@ impl Control {
     pub fn run_chunk(&mut self, budget: usize) -> StepOutcome {
         if self.halted {
             return StepOutcome::Halted;
+        }
+        let resuming_past_this_breakpoint = self.resumed_breakpoint == Some(self.get_pc());
+        self.resumed_breakpoint = None;
+        if !resuming_past_this_breakpoint && self.resolved_breakpoints.contains(&self.get_pc()) {
+            self.running = false;
+            self.resumed_breakpoint = Some(self.get_pc());
+            return StepOutcome::Breakpoint(self.get_pc());
         }
         let mut count = 0usize;
         loop {
@@ -542,6 +584,7 @@ impl Control {
             count += 1;
             if self.resolved_breakpoints.contains(&self.get_pc()) {
                 self.running = false;
+                self.resumed_breakpoint = Some(self.get_pc());
                 return StepOutcome::Breakpoint(self.get_pc());
             }
         }
@@ -732,6 +775,51 @@ mod tests {
         // loop to completion instead, producing `Halted` here.
         assert_eq!(outcome, StepOutcome::Breakpoint(expected_addr));
         assert_eq!(control.get_pc(), expected_addr);
+    }
+
+    #[test]
+    fn a_breakpoint_on_the_entry_point_stops_run_before_executing_it() {
+        // Main's own instruction (line 2) IS the entry point: PC starts
+        // there, before any chunk has executed a single instruction. The
+        // mid-chunk check alone -- inspecting the PC a `mmix.execute_
+        // instruction()` call *leaves* -- can never catch this, since
+        // nothing has left this PC yet; only an entry check can.
+        let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
+        assert!(control.toggle_breakpoint(2), "line 2 has an address");
+        let expected_addr = expect_addr(LOOP_MMS, "loop.mms", 2);
+        assert_eq!(control.get_pc(), expected_addr, "fixture assumption");
+
+        let outcome = control.run_chunk(1_000);
+
+        assert_eq!(outcome, StepOutcome::Breakpoint(expected_addr));
+        // SETL $1,5 must not have executed: deleting the entry check would
+        // run straight through it and stop only at the next mapped
+        // breakpoint check, one instruction later than the user set.
+        assert_eq!(
+            control.machine().get_register(1),
+            0,
+            "the breakpointed instruction ran before this call ever inspected its own PC"
+        );
+    }
+
+    #[test]
+    fn running_again_from_a_breakpoint_executes_past_it_instead_of_re_stopping() {
+        // The entry-check fix above must not turn "click Run again" into a
+        // no-op that re-reports the same breakpoint forever.
+        let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
+        assert!(control.toggle_breakpoint(2), "line 2 has an address");
+        let entry_addr = expect_addr(LOOP_MMS, "loop.mms", 2);
+
+        let first = control.run_chunk(1_000);
+        assert_eq!(first, StepOutcome::Breakpoint(entry_addr));
+        assert_eq!(control.get_pc(), entry_addr);
+
+        // No further breakpoints ahead: a second call must run the rest of
+        // the program (through the loop) to completion, not immediately
+        // re-report the entry breakpoint it's still numerically sitting on.
+        let second = control.run_chunk(1_000);
+        assert_eq!(second, StepOutcome::Halted);
+        assert_eq!(control.machine().get_register(1), 0, "SETL 5, SUBI x5 -> 0");
     }
 
     #[test]
