@@ -6,17 +6,17 @@ an MMIX interpreter written in Rust. checksmix's library half compiles for
 
 playmmix splits the screen into two columns: the source editor and program
 output on the left, machine status/registers/specials/memory on the right,
-collapsing to one column below about 1100px wide. The source pane is
-editable: it loads with `examples/hello_world.mms` from checksmix, and every
+collapsing to one column below about 1100px wide. Both the column boundary
+and the boundary between the editor and the output pane are draggable
+splitters, clamped so neither pane can be resized away entirely; sizes reset
+to the default layout on reload. The source pane is editable: it loads with
+`examples/hello_world.mms` from checksmix, and every
 edit re-assembles and loads a fresh machine at the program's entry point —
 nothing runs until asked to. The pane pairs a transparent `<textarea>` with a
 syntax-highlight overlay and a line-number gutter; the current line (the last
 instruction that ran) is marked in both the gutter and a full-width band in
 the overlay.
 
-Run, Step, Step Over, Stop, and Reset control execution explicitly. Run
-executes in chunks, yielding to the browser between them, so Stop takes
-effect within about a quarter second rather than freezing the tab. Step
 advances one source-level step — a multi-word pseudo-op such as `SETI`,
 `SET`, or `LDA` executes as a single Step, not several; Step Over runs a
 whole call without descending into it; Reset reloads the current source
@@ -27,7 +27,9 @@ Stop), or `halted`; Run while halted resets and runs again in one click.
 Clicking a line number in the gutter toggles a breakpoint there — a
 standalone label line resolves to its next instruction's address; it's
 rejected as a no-op on a line with no address at all, such as a blank line,
-a comment, or a trailing label past the last instruction.
+a comment, or a trailing label past the last instruction. A brief status
+readout next to the Control Bar echoes the last action taken — `Running`,
+`Stepped`, `Breakpoint set`, and so on.
 
 The output pane, under the editor, shows the program's own stdout, stderr,
 and diagnostic output (such as the HALT notice checksmix emits), interleaved

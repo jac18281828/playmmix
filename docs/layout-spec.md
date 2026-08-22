@@ -58,6 +58,13 @@ right is the machine. CSS grid with named areas on `<main>`:
 - Each scrolling pane (`registers`, `memory`, `output`) owns its scrollbar:
   `overflow-y: auto` on the pane, never on `.machine-pane` as a whole. The
   page itself never scrolls the machine state out from under the editor.
+- The `grid-template-columns`/`grid-template-rows` values above are the
+  *default* sizing, not fixed proportions: both boundaries -- the column
+  split between the editor+output column and the machine column, and the
+  row split between the editor and the output pane -- are user-draggable,
+  clamped to floors (20rem for the left column, the machine column's own
+  38rem floor, a couple of lines plus its header for the output pane) that
+  keep every pane usable and the grid from overflowing.
 
 Registers in a column, one per row, is the load-bearing change: it makes rows
 addressable by position, which is what continuity (§ registers) and change

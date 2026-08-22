@@ -2,10 +2,19 @@
 //! highlight-colored `<pre>` overlay, with a line-number gutter to the left.
 //! `white-space: pre` and no wrap everywhere (`style.css`) keep line N of
 //! the source mapped to row N of both the overlay and the gutter.
+//!
+//! The overlay and gutter never scroll themselves: `.overlay` and `.gutter`
+//! are fixed-size `overflow: hidden` viewports, and `.overlay-content`/
+//! `.gutter-content` -- sized to their full, unclipped content -- carry a
+//! `transform: translate(...)` that `EditorMsg::Scroll` updates on every
+//! native `scroll` event on the textarea. Translating the content instead
+//! of scrolling the viewport (or translating the viewport itself, which
+//! would drag its own clip box along with it) is what keeps the two layers
+//! from visibly desyncing under fast or inertial scrolling.
 
 use std::collections::BTreeSet;
 
-use web_sys::{HtmlElement, HtmlTextAreaElement};
+use web_sys::{Element, HtmlElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
 use crate::highlight;
@@ -24,8 +33,8 @@ pub struct EditorProps {
 
 pub struct Editor {
     textarea_ref: NodeRef,
-    overlay_ref: NodeRef,
-    gutter_ref: NodeRef,
+    overlay_content_ref: NodeRef,
+    gutter_content_ref: NodeRef,
 }
 
 pub enum EditorMsg {
@@ -34,8 +43,8 @@ pub enum EditorMsg {
     /// Tab was pressed: a literal tab was already spliced into the
     /// textarea's DOM value; report the new value upward.
     TabInserted,
-    /// The textarea scrolled; mirror its position onto the overlay and
-    /// gutter.
+    /// The textarea scrolled; transform the overlay and gutter content to
+    /// match (see the module doc comment).
     Scroll,
 }
 
@@ -46,8 +55,8 @@ impl Component for Editor {
     fn create(_ctx: &Context<Self>) -> Self {
         Self {
             textarea_ref: NodeRef::default(),
-            overlay_ref: NodeRef::default(),
-            gutter_ref: NodeRef::default(),
+            overlay_content_ref: NodeRef::default(),
+            gutter_content_ref: NodeRef::default(),
         }
     }
 
@@ -65,12 +74,16 @@ impl Component for Editor {
                 };
                 let scroll_top = textarea.scroll_top();
                 let scroll_left = textarea.scroll_left();
-                if let Some(overlay) = self.overlay_ref.cast::<HtmlElement>() {
-                    overlay.set_scroll_top(scroll_top);
-                    overlay.set_scroll_left(scroll_left);
+                if let Some(overlay_content) = self.overlay_content_ref.cast::<Element>() {
+                    let style = format!(
+                        "transform: translate({}px, {}px)",
+                        -scroll_left, -scroll_top
+                    );
+                    let _ = overlay_content.set_attribute("style", &style);
                 }
-                if let Some(gutter) = self.gutter_ref.cast::<HtmlElement>() {
-                    gutter.set_scroll_top(scroll_top);
+                if let Some(gutter_content) = self.gutter_content_ref.cast::<Element>() {
+                    let style = format!("transform: translateY({}px)", -scroll_top);
+                    let _ = gutter_content.set_attribute("style", &style);
                 }
                 false
             }
@@ -118,13 +131,17 @@ impl Component for Editor {
 
         html! {
             <div class="editor">
-                <div class="gutter" ref={self.gutter_ref.clone()}>
-                    { gutter_rows }
+                <div class="gutter">
+                    <div class="gutter-content" ref={self.gutter_content_ref.clone()}>
+                        { gutter_rows }
+                    </div>
                 </div>
                 <div class="editor-surface">
-                    <pre class="overlay" ref={self.overlay_ref.clone()}>
-                        { overlay_rows }
-                    </pre>
+                    <div class="overlay">
+                        <pre class="overlay-content" ref={self.overlay_content_ref.clone()}>
+                            { overlay_rows }
+                        </pre>
+                    </div>
                     <textarea
                         class="source-input"
                         ref={self.textarea_ref.clone()}

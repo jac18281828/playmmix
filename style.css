@@ -35,16 +35,28 @@ pre {
    regions section. Header spans both columns; the editor and output pane
    share the left column, the machine pane owns the right. Under ~1100px
    the grid collapses to one column -- the machine pane's own internal
-   order is already vertical, so nothing else changes. */
+   order is already vertical, so nothing else changes.
+
+   The column boundary (left column / machine column) and the row boundary
+   (editor / output, within the left column) are user-draggable -- each has
+   its own dedicated, fixed-size grid track (.col-splitter, .row-splitter)
+   and reads its neighboring track's size from a `var(...)`, with today's
+   values as the fallback, so a page that has never been dragged renders
+   identically to before (§1.3). Driving sizing through a custom property
+   rather than a full inline `grid-template-columns`/`-rows` restatement
+   keeps the *other* track's rule (e.g. the machine column's `minmax(38rem,
+   42rem)` below) declared here once, not duplicated into Rust, and keeps
+   this rule -- not an inline style -- winning below the 1100px breakpoint. */
 
 main {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(38rem, 42rem);
-    grid-template-rows: auto 1fr auto;
+    grid-template-columns: var(--left-col, minmax(0, 1fr)) 6px minmax(38rem, 42rem);
+    grid-template-rows: auto 1fr 6px var(--output-h, auto);
     grid-template-areas:
-        "header  header"
-        "editor  machine"
-        "output  machine";
+        "header       header       header"
+        "editor       col-splitter machine"
+        "row-splitter col-splitter machine"
+        "output       col-splitter machine";
     gap: 0.75rem;
     height: calc(100vh - 2rem);
 }
@@ -59,6 +71,14 @@ main {
             "output"
             "machine";
         height: auto;
+    }
+
+    /* Resize is a desktop-only affordance: below the collapse breakpoint
+       both handles would auto-place into a stray, non-functional bar,
+       since this block doesn't reference either splitter's grid area. */
+    .col-splitter,
+    .row-splitter {
+        display: none;
     }
 }
 
@@ -108,6 +128,15 @@ main {
     color: #999;
 }
 
+/* Brief status readout, to the right of the run-state label -- echoes the
+   last action taken (§1.4). */
+.status-message {
+    margin-left: 0.5rem;
+    font-size: 0.85rem;
+    color: #777;
+    font-style: italic;
+}
+
 /* Editor pane: a transparent textarea layered over a highlight-colored
    overlay, with a line-number gutter. Every rule below is scoped to its own
    class rather than the bare `pre` selector above, whose wrapping and
@@ -129,8 +158,34 @@ main {
     min-width: 0;
 }
 
-.gutter,
-.overlay,
+/* Resize splitters (§1.3): draggable boundaries, dragging writes
+   --left-col/--output-h on `main` (read by its grid-template rule above and,
+   for --output-h, by .output-pane's own max-height below), reconciled into
+   `App` state on pointerup only -- see main.rs's `DragState`. */
+
+.col-splitter,
+.row-splitter {
+    background: #333;
+    touch-action: none;
+}
+
+.col-splitter {
+    grid-area: col-splitter;
+    cursor: col-resize;
+}
+
+.row-splitter {
+    grid-area: row-splitter;
+    cursor: row-resize;
+}
+
+.col-splitter:hover,
+.row-splitter:hover {
+    background: #4a4a4a;
+}
+
+.gutter-content,
+.overlay-content,
 .source-input {
     font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
     font-size: 0.9rem;
@@ -146,8 +201,9 @@ main {
 .gutter {
     flex: none;
     height: 100%;
-    /* Scrolled only via JS, mirroring the textarea (§1's scroll-sync rule);
-       no independent scrollbar of its own. */
+    /* A fixed clipping viewport that never itself moves; .gutter-content
+       carries the scroll-mirroring transform instead (see editor.rs's
+       module doc comment) -- no independent scrollbar of its own. */
     overflow: hidden;
     color: #666;
     text-align: right;
@@ -203,31 +259,49 @@ main {
     left: 0;
     width: 100%;
     height: 100%;
-    overflow: auto;
     resize: none;
 }
 
 .overlay {
+    /* A fixed-size viewport that never itself moves or scrolls;
+       .overlay-content carries the scroll-mirroring transform instead, so
+       translating it never drags its own clip box along with it (the bug
+       an earlier draft of this fix had). */
+    overflow: hidden;
     background: #111;
-    color: #ddd;
     border-radius: 4px;
-    /* Override the bare `pre` selector's wrap/height rules, which would
-       break the glyph-grid alignment with the textarea underneath. */
-    max-height: none;
-    word-break: normal;
     /* Cosmetic layer only; the textarea above it is what the user scrolls
        and types into. */
     pointer-events: none;
 }
 
+.overlay-content {
+    /* Sized to the full, unclipped content -- .overlay's overflow: hidden
+       is what clips it. Overrides the bare `pre` selector above, which is
+       tuned for a single scrolling preformatted block, not this layered
+       pane. */
+    background: transparent;
+    color: #ddd;
+    border-radius: 0;
+    max-height: none;
+    overflow: visible;
+    word-break: normal;
+}
+
 .source-input {
+    overflow: auto;
     background: transparent;
     color: transparent;
     caret-color: #ddd;
 }
 
 .source-input::selection {
-    background: #264f78;
+    /* Translucent, not opaque: the textarea's own text is `color:
+       transparent` (see editor.rs's module doc comment), so an opaque
+       selection paints over the overlay's syntax colors underneath
+       completely. The same color as before, with alpha added, lets it read
+       through as a tint instead of blotting it out. */
+    background: rgba(38, 79, 120, 0.55);
 }
 
 .tok-comment {
@@ -264,7 +338,10 @@ main {
     border: 1px solid #333;
     border-radius: 4px;
     background: #111;
-    max-height: 14rem;
+    /* Same custom property the row splitter's grid track reads (§1.3):
+       growing the track alone wouldn't grow the visible pane past this
+       cap, so both read the one inherited value. */
+    max-height: var(--output-h, 14rem);
 }
 
 .output-header {

@@ -627,6 +627,9 @@ pub struct ControlBarProps {
     pub on_step_over: Callback<()>,
     pub on_stop: Callback<()>,
     pub on_reset: Callback<()>,
+    /// A short (4-5 word) echo of the last action taken, rendered to the
+    /// right of the run-state label -- `App::status_message` in `main.rs`.
+    pub status: String,
 }
 
 /// Run / Step / Step Over / Stop / Reset, enabled per `control_enablement`.
@@ -646,6 +649,7 @@ pub fn control_bar(props: &ControlBarProps) -> Html {
             <span class="run-state">
                 { run_state_label(running, halted, props.has_advanced) }
             </span>
+            <span class="status-message">{ &props.status }</span>
         </div>
     }
 }

@@ -1,8 +1,11 @@
+use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use gloo_timers::callback::Timeout;
 use log::info;
-use yew::{Component, Context, Html, Renderer, html};
+use web_sys::{Element, PointerEvent};
+use yew::{Callback, Component, Context, Html, NodeRef, Renderer, html};
 
 mod control;
 mod editor;
@@ -99,6 +102,328 @@ fn describe_source_error(source: &str, error: &str) -> String {
     }
 }
 
+/// Resize splitters (§1.3): both handles' fixed grid-track size, pixels --
+/// `style.css`'s `main` grid, the `6px` column/row track each occupies.
+const SPLITTER_SIZE_PX: f64 = 6.0;
+
+/// `main`'s grid `gap`, pixels, at the stylesheet's 16px root font size --
+/// `style.css`: `gap: 0.75rem`. Inserting a dedicated splitter track means
+/// two of these separate the left column from the machine column (and,
+/// vertically, the editor row from the output row), not one.
+const GRID_GAP_PX: f64 = 12.0;
+
+/// Column splitter's floor for the left (editor+output) column, pixels --
+/// `20rem`'s worth at the 16px root font size.
+const LEFT_COLUMN_FLOOR_PX: f64 = 320.0;
+
+/// The machine column's own floor, pixels -- `style.css`'s
+/// `minmax(38rem, 42rem)`. The column splitter's ceiling must never let the
+/// left column push the machine column narrower than this: CSS grid does
+/// not shrink an over-large explicit track to protect a sibling's floor, it
+/// overflows the container instead.
+const MACHINE_COLUMN_FLOOR_PX: f64 = 608.0;
+
+/// Row splitter's floor for the output pane, pixels -- roughly its header
+/// plus a couple of lines of monospace output.
+const OUTPUT_FLOOR_PX: f64 = 96.0;
+
+/// The editor pane's own minimum share the row splitter's ceiling
+/// preserves, pixels.
+const EDITOR_MIN_SHARE_PX: f64 = 128.0;
+
+/// The output pane's stylesheet default height, pixels -- `style.css`'s
+/// `.output-pane { max-height: 14rem }` -- used as the row splitter's
+/// drag-start baseline when no drag has set an explicit height yet
+/// (`App::output_height` is `None`). Unlike the left column's fluid
+/// `minmax(0, 1fr)` default, this default is a fixed value, so no DOM read
+/// is needed to recover it.
+const OUTPUT_DEFAULT_HEIGHT_PX: f64 = 224.0;
+
+/// Clamp the column splitter's requested left-column width to the range
+/// `style.css`'s grid can actually render without overflowing: never
+/// narrower than `LEFT_COLUMN_FLOOR_PX`, and never wide enough to push the
+/// machine column below its own `minmax(38rem, 42rem)` floor.
+/// `container_width_px` is `main`'s own rendered width.
+fn clamp_left_column_width(requested_px: f64, container_width_px: f64) -> f64 {
+    let ceiling =
+        (container_width_px - SPLITTER_SIZE_PX - 2.0 * GRID_GAP_PX - MACHINE_COLUMN_FLOOR_PX)
+            .max(LEFT_COLUMN_FLOOR_PX);
+    requested_px.clamp(LEFT_COLUMN_FLOOR_PX, ceiling)
+}
+
+/// Clamp the row splitter's requested output-pane height: never shorter
+/// than `OUTPUT_FLOOR_PX` (its header plus a couple of lines), and never
+/// tall enough to leave the editor pane less than `EDITOR_MIN_SHARE_PX`.
+/// `column_height_px` is the combined height available to the editor, row
+/// splitter, and output pane together (excludes the header row).
+fn clamp_output_height(requested_px: f64, column_height_px: f64) -> f64 {
+    let ceiling = (column_height_px - SPLITTER_SIZE_PX - 2.0 * GRID_GAP_PX - EDITOR_MIN_SHARE_PX)
+        .max(OUTPUT_FLOOR_PX);
+    requested_px.clamp(OUTPUT_FLOOR_PX, ceiling)
+}
+
+/// Which boundary a resize drag is adjusting -- shared by both splitter
+/// handles so one `DragState`/`Rc<RefCell<..>>` and matching pointer-event
+/// wiring can serve both (only one drag is ever in flight at a time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Splitter {
+    Column,
+    Row,
+}
+
+/// Live drag state, captured at `pointerdown` and read by every
+/// `pointermove` until `pointerup` commits it. Kept off `App` and out of
+/// the `Msg`/`update` cycle entirely during the drag itself: a message per
+/// pointer move would re-render the whole `App`, including the machine
+/// pane's register/memory diffs, for every pixel dragged.
+#[derive(Debug, Clone, Copy)]
+struct DragState {
+    which: Splitter,
+    pointer_start_client_px: f64,
+    size_start_px: f64,
+    /// The other clamp parameter for `which` -- `main`'s width for
+    /// `Column`, the editor/splitter/output column's combined height for
+    /// `Row` -- read once at `pointerdown` rather than on every move.
+    ceiling_param_px: f64,
+}
+
+/// The inline `style` attribute for `<main>`: the resize custom properties,
+/// set only for a dimension a drag has actually touched (`None` means "use
+/// the stylesheet's default", so nothing is written for it), plus
+/// `user-select: none` for an active drag's duration -- the direct fix for
+/// a drag starting a text selection instead of resizing. Both properties
+/// are always built together from the same two values, whether called from
+/// `view()` or from a live drag's imperative write, so committing one drag
+/// never clobbers the other's already-set property.
+fn main_style(
+    left_column_width: Option<f64>,
+    output_height: Option<f64>,
+    dragging: bool,
+) -> String {
+    let mut style = String::new();
+    if let Some(px) = left_column_width {
+        style.push_str(&format!("--left-col:{px}px;"));
+    }
+    if let Some(px) = output_height {
+        style.push_str(&format!("--output-h:{px}px;"));
+    }
+    if dragging {
+        style.push_str("user-select:none;");
+    }
+    style
+}
+
+/// Write `main_style`'s result directly onto `main_ref`'s DOM node --
+/// `pointerdown`/`pointermove`/`pointerup`'s shared imperative-write path,
+/// bypassing `Component::update` so a live drag never re-renders `App`.
+fn write_drag_style(
+    main_ref: &NodeRef,
+    which: Splitter,
+    dragging_value_px: f64,
+    other_dimension_px: Option<f64>,
+    dragging: bool,
+) {
+    let (left_column_width, output_height) = match which {
+        Splitter::Column => (Some(dragging_value_px), other_dimension_px),
+        Splitter::Row => (other_dimension_px, Some(dragging_value_px)),
+    };
+    let style = main_style(left_column_width, output_height, dragging);
+    if let Some(element) = main_ref.cast::<Element>() {
+        let _ = element.set_attribute("style", &style);
+    }
+}
+
+/// Capture the pointer on `handle_ref`'s element so a drag keeps tracking
+/// once the pointer leaves the thin splitter handle.
+fn capture_pointer(handle_ref: &NodeRef, pointer_id: i32) {
+    if let Some(element) = handle_ref.cast::<Element>() {
+        let _ = element.set_pointer_capture(pointer_id);
+    }
+}
+
+/// Build the column splitter's `pointerdown`/`pointermove`/`pointerup`
+/// callbacks. `left_col_ref` is any element whose rendered width equals the
+/// left column's current width -- `App::row_splitter_ref` works, since the
+/// row splitter's handle lives in that same column. `output_height` is
+/// `App::output_height`, captured by value so the live style write never
+/// clobbers it.
+fn column_splitter_handlers(
+    drag_state: Rc<RefCell<Option<DragState>>>,
+    main_ref: NodeRef,
+    handle_ref: NodeRef,
+    left_col_ref: NodeRef,
+    output_height: Option<f64>,
+    on_commit: Callback<f64>,
+) -> (
+    Callback<PointerEvent>,
+    Callback<PointerEvent>,
+    Callback<PointerEvent>,
+) {
+    let onpointerdown = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
+        let handle_ref = handle_ref.clone();
+        let left_col_ref = left_col_ref.clone();
+        Callback::from(move |event: PointerEvent| {
+            let size_start_px = left_col_ref
+                .cast::<Element>()
+                .map(|element| element.client_width() as f64)
+                .unwrap_or(0.0);
+            let ceiling_param_px = main_ref
+                .cast::<Element>()
+                .map(|element| element.client_width() as f64)
+                .unwrap_or(0.0);
+            *drag_state.borrow_mut() = Some(DragState {
+                which: Splitter::Column,
+                pointer_start_client_px: event.client_x() as f64,
+                size_start_px,
+                ceiling_param_px,
+            });
+            capture_pointer(&handle_ref, event.pointer_id());
+            write_drag_style(
+                &main_ref,
+                Splitter::Column,
+                size_start_px,
+                output_height,
+                true,
+            );
+        })
+    };
+
+    let onpointermove = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
+        Callback::from(move |event: PointerEvent| {
+            let Some(state) = *drag_state.borrow() else {
+                return;
+            };
+            if state.which != Splitter::Column {
+                return;
+            }
+            let delta = event.client_x() as f64 - state.pointer_start_client_px;
+            let clamped =
+                clamp_left_column_width(state.size_start_px + delta, state.ceiling_param_px);
+            write_drag_style(&main_ref, Splitter::Column, clamped, output_height, true);
+        })
+    };
+
+    let onpointerup = {
+        Callback::from(move |event: PointerEvent| {
+            let Some(state) = drag_state.borrow_mut().take() else {
+                return;
+            };
+            if state.which != Splitter::Column {
+                return;
+            }
+            let delta = event.client_x() as f64 - state.pointer_start_client_px;
+            let clamped =
+                clamp_left_column_width(state.size_start_px + delta, state.ceiling_param_px);
+            write_drag_style(&main_ref, Splitter::Column, clamped, output_height, false);
+            on_commit.emit(clamped);
+        })
+    };
+
+    (onpointerdown, onpointermove, onpointerup)
+}
+
+/// Build the row splitter's `pointerdown`/`pointermove`/`pointerup`
+/// callbacks. `column_height_ref` is any element spanning exactly the
+/// editor, row-splitter, and output rows -- `App::col_splitter_ref` works,
+/// since the column splitter's handle spans that same range. `output_height`
+/// is `App::output_height`; unlike the column splitter's fluid default, the
+/// output pane's default height is a fixed, known value
+/// (`OUTPUT_DEFAULT_HEIGHT_PX`), so no DOM read is needed to recover a
+/// drag-start size when it's `None`.
+fn row_splitter_handlers(
+    drag_state: Rc<RefCell<Option<DragState>>>,
+    main_ref: NodeRef,
+    handle_ref: NodeRef,
+    column_height_ref: NodeRef,
+    left_column_width: Option<f64>,
+    output_height: Option<f64>,
+    on_commit: Callback<f64>,
+) -> (
+    Callback<PointerEvent>,
+    Callback<PointerEvent>,
+    Callback<PointerEvent>,
+) {
+    let output_start_px = output_height.unwrap_or(OUTPUT_DEFAULT_HEIGHT_PX);
+
+    let onpointerdown = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
+        let handle_ref = handle_ref.clone();
+        let column_height_ref = column_height_ref.clone();
+        Callback::from(move |event: PointerEvent| {
+            let ceiling_param_px = column_height_ref
+                .cast::<Element>()
+                .map(|element| element.client_height() as f64)
+                .unwrap_or(0.0);
+            *drag_state.borrow_mut() = Some(DragState {
+                which: Splitter::Row,
+                pointer_start_client_px: event.client_y() as f64,
+                size_start_px: output_start_px,
+                ceiling_param_px,
+            });
+            capture_pointer(&handle_ref, event.pointer_id());
+            write_drag_style(
+                &main_ref,
+                Splitter::Row,
+                output_start_px,
+                left_column_width,
+                true,
+            );
+        })
+    };
+
+    let onpointermove = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
+        Callback::from(move |event: PointerEvent| {
+            let Some(state) = *drag_state.borrow() else {
+                return;
+            };
+            if state.which != Splitter::Row {
+                return;
+            }
+            let delta = event.client_y() as f64 - state.pointer_start_client_px;
+            let clamped = clamp_output_height(state.size_start_px + delta, state.ceiling_param_px);
+            write_drag_style(&main_ref, Splitter::Row, clamped, left_column_width, true);
+        })
+    };
+
+    let onpointerup = {
+        Callback::from(move |event: PointerEvent| {
+            let Some(state) = drag_state.borrow_mut().take() else {
+                return;
+            };
+            if state.which != Splitter::Row {
+                return;
+            }
+            let delta = event.client_y() as f64 - state.pointer_start_client_px;
+            let clamped = clamp_output_height(state.size_start_px + delta, state.ceiling_param_px);
+            write_drag_style(&main_ref, Splitter::Row, clamped, left_column_width, false);
+            on_commit.emit(clamped);
+        })
+    };
+
+    (onpointerdown, onpointermove, onpointerup)
+}
+
+/// The status readout's text for a chunked Run or Step Over's outcome --
+/// shared because both drive the same chunk-yield loop
+/// (`Control::continue_chunk`) and report through the same four
+/// `StepOutcome` variants. `run_chunk` never returns `Advanced` (a chunk
+/// that neither halts nor hits a breakpoint always exhausts its budget), so
+/// "Stepped over call" only ever surfaces from a chunked Step Over.
+fn status_for(outcome: StepOutcome) -> &'static str {
+    match outcome {
+        StepOutcome::BudgetExhausted => "Running",
+        StepOutcome::Advanced => "Stepped over call",
+        StepOutcome::Halted => "Halted",
+        StepOutcome::Breakpoint(_) => "Hit breakpoint",
+    }
+}
 pub enum Msg {
     SourceChanged(String),
     ToggleBreakpoint(usize),
@@ -110,6 +435,12 @@ pub enum Msg {
     /// One chunk boundary: reschedule if the run isn't finished, or if a
     /// `Stop` landed while this tick was scheduled, do nothing.
     ChunkTick,
+    /// The column splitter's drag committed, carrying the already-clamped
+    /// left-column width.
+    ColumnResized(f64),
+    /// The row splitter's drag committed, carrying the already-clamped
+    /// output-pane height.
+    RowResized(f64),
 }
 
 pub struct App {
@@ -140,6 +471,32 @@ pub struct App {
     changed_registers: BTreeSet<u8>,
     changed_specials: BTreeSet<String>,
     changed_memory: BTreeSet<u64>,
+    /// A short echo of the last action taken, rendered next to the Control
+    /// Bar (§1.4). Left unchanged by a parse error -- the error itself is
+    /// already shown prominently elsewhere.
+    status_message: &'static str,
+    /// The drag-set left-column width and output-pane height, pixels.
+    /// `None` means "use the stylesheet's default sizing" -- a page that's
+    /// never been dragged renders identically to before (§1.3). No
+    /// persistence: both reset to the stylesheet defaults on reload.
+    left_column_width: Option<f64>,
+    output_height: Option<f64>,
+    main_ref: NodeRef,
+    /// Spans the column-splitter's own track (editor/row-splitter/output
+    /// rows, column 2) -- its `client_height()` is the row splitter's
+    /// ceiling parameter.
+    col_splitter_ref: NodeRef,
+    /// Lives in the left column (its own row, column 1) -- its
+    /// `client_width()` is the column splitter's drag-start left-column
+    /// width.
+    row_splitter_ref: NodeRef,
+    /// Live drag state, shared with both splitters' pointer-event closures.
+    /// A persistent field, not a value `view()` creates fresh each render:
+    /// an unrelated re-render mid-drag (a `Msg::ChunkTick` from a Run in
+    /// the background, say) rebuilds every closure in `view()` with a new
+    /// clone of whatever this holds, so a fresh, empty cell here would
+    /// silently drop an in-flight drag the moment that happened.
+    drag_state: Rc<RefCell<Option<DragState>>>,
 }
 
 impl App {
@@ -167,6 +524,7 @@ impl App {
         }
         let outcome = self.control.continue_chunk(control::CHUNK_BUDGET);
         self.observe_continuity();
+        self.status_message = status_for(outcome);
         match outcome {
             StepOutcome::BudgetExhausted => self.schedule_chunk_tick(ctx),
             StepOutcome::Halted | StepOutcome::Breakpoint(_) | StepOutcome::Advanced => {
@@ -285,6 +643,13 @@ impl Component for App {
             changed_registers: BTreeSet::new(),
             changed_specials: BTreeSet::new(),
             changed_memory: BTreeSet::new(),
+            status_message: "Loaded",
+            left_column_width: None,
+            output_height: None,
+            main_ref: NodeRef::default(),
+            col_splitter_ref: NodeRef::default(),
+            row_splitter_ref: NodeRef::default(),
+            drag_state: Rc::new(RefCell::new(None)),
         };
         // Seed continuity and the diff baseline off the freshly loaded
         // machine -- not about the first render (`visible_registers`
@@ -302,6 +667,7 @@ impl Component for App {
                     Ok(()) => {
                         self.error = None;
                         self.reset_view_state();
+                        self.status_message = "Loaded";
                     }
                     Err(error) => {
                         self.error = Some(describe_source_error(&source, &error));
@@ -312,7 +678,19 @@ impl Component for App {
                 true
             }
             Msg::ToggleBreakpoint(line) => {
-                self.control.toggle_breakpoint(line);
+                // `toggle_breakpoint`'s bool return only says
+                // succeeded-or-not, not which direction -- check
+                // membership first to know which of the three status texts
+                // applies.
+                let was_set = self.control.breakpoint_lines().contains(&line);
+                let toggled = self.control.toggle_breakpoint(line);
+                self.status_message = if !toggled {
+                    "No code on that line"
+                } else if was_set {
+                    "Breakpoint cleared"
+                } else {
+                    "Breakpoint set"
+                };
                 true
             }
             Msg::Run => {
@@ -330,15 +708,27 @@ impl Component for App {
                 if self.control.is_running() {
                     self.schedule_chunk_tick(ctx);
                 }
+                // Fresh or replay-from-halt both read the same: no
+                // "Restarted" status distinct from plain Running -- a
+                // Msg::Run while halted reloads and then schedules a chunk
+                // tick exactly like a fresh run, and that first tick's
+                // BudgetExhausted branch would overwrite anything more
+                // specific one event-loop turn later anyway.
+                self.status_message = "Running";
                 true
             }
             Msg::Step => {
                 if !self.control.is_running() {
                     let was_halted = self.control.is_halted();
-                    self.control.step();
+                    let outcome = self.control.step();
                     if !was_halted {
                         self.observe_continuity();
                         self.record_pause_boundary();
+                        self.status_message = if outcome == StepOutcome::Halted {
+                            "Halted"
+                        } else {
+                            "Stepped"
+                        };
                     }
                 }
                 true
@@ -346,7 +736,9 @@ impl Component for App {
             Msg::StepOver => {
                 if !self.control.is_running() {
                     self.clear_changed();
-                    match self.control.step_over_chunk(control::CHUNK_BUDGET) {
+                    let outcome = self.control.step_over_chunk(control::CHUNK_BUDGET);
+                    self.status_message = status_for(outcome);
+                    match outcome {
                         StepOutcome::BudgetExhausted => {
                             self.observe_continuity();
                             self.schedule_chunk_tick(ctx);
@@ -366,14 +758,26 @@ impl Component for App {
                 self.chunk_timeout = None;
                 self.observe_continuity();
                 self.record_pause_boundary();
+                self.status_message = "Stopped";
                 true
             }
             Msg::Reset => {
                 self.reload_source();
+                if self.error.is_none() {
+                    self.status_message = "Reset";
+                }
                 true
             }
             Msg::ChunkTick => {
                 self.advance_chunk(ctx);
+                true
+            }
+            Msg::ColumnResized(width) => {
+                self.left_column_width = Some(width);
+                true
+            }
+            Msg::RowResized(height) => {
+                self.output_height = Some(height);
                 true
             }
         }
@@ -424,8 +828,31 @@ impl Component for App {
             .then(|| self.control.current_line())
             .flatten();
 
+        let (col_onpointerdown, col_onpointermove, col_onpointerup) = column_splitter_handlers(
+            self.drag_state.clone(),
+            self.main_ref.clone(),
+            self.col_splitter_ref.clone(),
+            self.row_splitter_ref.clone(),
+            self.output_height,
+            ctx.link().callback(Msg::ColumnResized),
+        );
+        let (row_onpointerdown, row_onpointermove, row_onpointerup) = row_splitter_handlers(
+            self.drag_state.clone(),
+            self.main_ref.clone(),
+            self.row_splitter_ref.clone(),
+            self.col_splitter_ref.clone(),
+            self.left_column_width,
+            self.output_height,
+            ctx.link().callback(Msg::RowResized),
+        );
+
+        let main_style_attr = {
+            let style = main_style(self.left_column_width, self.output_height, false);
+            (!style.is_empty()).then_some(style)
+        };
+
         html! {
-            <main>
+            <main ref={self.main_ref.clone()} style={main_style_attr}>
                 <div class="app-header">
                     <h1>{ "playmmix" }</h1>
                     <ControlBar
@@ -438,6 +865,7 @@ impl Component for App {
                         {on_step_over}
                         {on_stop}
                         {on_reset}
+                        status={self.status_message.to_string()}
                     />
                 </div>
                 <Editor
@@ -446,6 +874,20 @@ impl Component for App {
                     breakpoints={self.control.breakpoint_lines().clone()}
                     {current_line}
                     {on_toggle_breakpoint}
+                />
+                <div
+                    class="row-splitter"
+                    ref={self.row_splitter_ref.clone()}
+                    onpointerdown={row_onpointerdown}
+                    onpointermove={row_onpointermove}
+                    onpointerup={row_onpointerup}
+                />
+                <div
+                    class="col-splitter"
+                    ref={self.col_splitter_ref.clone()}
+                    onpointerdown={col_onpointerdown}
+                    onpointermove={col_onpointermove}
+                    onpointerup={col_onpointerup}
                 />
                 <OutputPane spans={self.control.output()} {exit_code} />
                 <div class="machine-slot">{ machine_view }</div>
@@ -498,5 +940,141 @@ mod tests {
         // whitespace-delimited on their own) must not false-positive.
         let source = "; a comment mentioning PREORIGAMI and DECMPACT\n";
         assert!(!looks_like_mix(source));
+    }
+
+    /// A representative desktop container width/height, pixels -- large
+    /// enough that both clamps' floor and ceiling are simultaneously
+    /// reachable (i.e. ceiling > floor), so every case below tests a real
+    /// clamp rather than the `.max(floor)` degenerate fallback.
+    const CONTAINER_WIDTH_PX: f64 = 1200.0;
+    const COLUMN_HEIGHT_PX: f64 = 800.0;
+
+    #[test]
+    fn clamp_left_column_width_holds_at_the_floor() {
+        assert_eq!(
+            clamp_left_column_width(LEFT_COLUMN_FLOOR_PX, CONTAINER_WIDTH_PX),
+            LEFT_COLUMN_FLOOR_PX
+        );
+    }
+
+    #[test]
+    fn clamp_left_column_width_clamps_up_from_just_below_the_floor() {
+        assert_eq!(
+            clamp_left_column_width(LEFT_COLUMN_FLOOR_PX - 1.0, CONTAINER_WIDTH_PX),
+            LEFT_COLUMN_FLOOR_PX
+        );
+    }
+
+    #[test]
+    fn clamp_left_column_width_holds_at_the_ceiling() {
+        let ceiling =
+            CONTAINER_WIDTH_PX - SPLITTER_SIZE_PX - 2.0 * GRID_GAP_PX - MACHINE_COLUMN_FLOOR_PX;
+        assert_eq!(
+            clamp_left_column_width(ceiling, CONTAINER_WIDTH_PX),
+            ceiling
+        );
+    }
+
+    #[test]
+    fn clamp_left_column_width_clamps_down_from_just_above_the_ceiling() {
+        // A wider container raises the computed ceiling correspondingly --
+        // the opposite of assuming no ceiling is needed at all, which would
+        // let the left column overflow the grid instead of yielding to the
+        // machine column's floor.
+        let ceiling =
+            CONTAINER_WIDTH_PX - SPLITTER_SIZE_PX - 2.0 * GRID_GAP_PX - MACHINE_COLUMN_FLOOR_PX;
+        assert_eq!(
+            clamp_left_column_width(ceiling + 1.0, CONTAINER_WIDTH_PX),
+            ceiling
+        );
+    }
+
+    #[test]
+    fn clamp_left_column_width_never_lets_the_ceiling_fall_below_the_floor() {
+        // A container too small to satisfy both floors at once must still
+        // return a value at least at the floor, not panic or invert the
+        // clamp range.
+        let tiny_container = LEFT_COLUMN_FLOOR_PX;
+        assert_eq!(
+            clamp_left_column_width(LEFT_COLUMN_FLOOR_PX, tiny_container),
+            LEFT_COLUMN_FLOOR_PX
+        );
+    }
+
+    #[test]
+    fn clamp_output_height_holds_at_the_floor() {
+        assert_eq!(
+            clamp_output_height(OUTPUT_FLOOR_PX, COLUMN_HEIGHT_PX),
+            OUTPUT_FLOOR_PX
+        );
+    }
+
+    #[test]
+    fn clamp_output_height_clamps_up_from_just_below_the_floor() {
+        assert_eq!(
+            clamp_output_height(OUTPUT_FLOOR_PX - 1.0, COLUMN_HEIGHT_PX),
+            OUTPUT_FLOOR_PX
+        );
+    }
+
+    #[test]
+    fn clamp_output_height_holds_at_the_ceiling() {
+        let ceiling = COLUMN_HEIGHT_PX - SPLITTER_SIZE_PX - 2.0 * GRID_GAP_PX - EDITOR_MIN_SHARE_PX;
+        assert_eq!(clamp_output_height(ceiling, COLUMN_HEIGHT_PX), ceiling);
+    }
+
+    #[test]
+    fn clamp_output_height_clamps_down_from_just_above_the_ceiling() {
+        // A taller column raises the computed ceiling correspondingly.
+        let ceiling = COLUMN_HEIGHT_PX - SPLITTER_SIZE_PX - 2.0 * GRID_GAP_PX - EDITOR_MIN_SHARE_PX;
+        assert_eq!(
+            clamp_output_height(ceiling + 1.0, COLUMN_HEIGHT_PX),
+            ceiling
+        );
+    }
+
+    #[test]
+    fn clamp_output_height_never_lets_the_ceiling_fall_below_the_floor() {
+        let tiny_column = OUTPUT_FLOOR_PX;
+        assert_eq!(
+            clamp_output_height(OUTPUT_FLOOR_PX, tiny_column),
+            OUTPUT_FLOOR_PX
+        );
+    }
+
+    #[test]
+    fn status_for_covers_every_step_outcome() {
+        assert_eq!(status_for(StepOutcome::BudgetExhausted), "Running");
+        assert_eq!(status_for(StepOutcome::Advanced), "Stepped over call");
+        assert_eq!(status_for(StepOutcome::Halted), "Halted");
+        assert_eq!(status_for(StepOutcome::Breakpoint(0x100)), "Hit breakpoint");
+    }
+
+    #[test]
+    fn main_style_is_empty_when_nothing_is_set() {
+        assert_eq!(main_style(None, None, false), "");
+    }
+
+    #[test]
+    fn main_style_sets_only_the_dimension_that_is_some() {
+        assert_eq!(main_style(Some(300.0), None, false), "--left-col:300px;");
+        assert_eq!(main_style(None, Some(200.0), false), "--output-h:200px;");
+    }
+
+    #[test]
+    fn main_style_writes_both_dimensions_together_without_clobbering_either() {
+        assert_eq!(
+            main_style(Some(300.0), Some(200.0), false),
+            "--left-col:300px;--output-h:200px;"
+        );
+    }
+
+    #[test]
+    fn main_style_adds_user_select_none_only_while_dragging() {
+        assert_eq!(main_style(None, None, true), "user-select:none;");
+        assert_eq!(
+            main_style(Some(300.0), None, true),
+            "--left-col:300px;user-select:none;"
+        );
     }
 }
