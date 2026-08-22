@@ -23,6 +23,14 @@ use machine::{MachinePane, OutputPane, RegisterContinuity, SpecialContinuity};
 /// breakpoint/PC line lookups need the same name on every assemble.
 const SOURCE_FILENAME: &str = "source.mms";
 
+/// How long a keystroke's `SourceChanged` waits, with no further keystroke,
+/// before `Msg::ReassembleSource` actually re-assembles and (on a parse
+/// error) shows one -- so typing a line the assembler can't parse yet (e.g.
+/// `ADDI $1, ` mid-operand) doesn't flash "Assembly error" on every
+/// character. Long enough to cover ordinary inter-keystroke gaps, short
+/// enough that a genuine pause still reads as immediate.
+const SOURCE_DEBOUNCE_MS: u32 = 500;
+
 /// MIX-only opcodes: mnemonics classic MIX has but MMIXAL doesn't, so their
 /// presence as a whole token is a strong signal the pasted source is MIX,
 /// not MMIXAL. The register-sign/zero/overflow jump family (`JAN`, `JAZ`,
@@ -601,6 +609,11 @@ fn status_for(outcome: StepOutcome) -> &'static str {
 }
 pub enum Msg {
     SourceChanged(String),
+    /// Fires once `SOURCE_DEBOUNCE_MS` has passed with no further
+    /// `SourceChanged` -- re-assembles `self.source` and updates
+    /// `self.error` accordingly. Carries no payload: `self.source` is
+    /// already current by the time this arrives.
+    ReassembleSource,
     ToggleBreakpoint(usize),
     Run,
     Step,
@@ -627,6 +640,11 @@ pub struct App {
     /// run, can cancel it by dropping this (runs `clearTimeout` and frees
     /// the closure) instead of leaking one allocation per chunk boundary.
     chunk_timeout: Option<Timeout>,
+    /// The pending `Msg::ReassembleSource` timeout, if a keystroke's
+    /// re-assemble is still waiting out `SOURCE_DEBOUNCE_MS`. Held for the
+    /// same reason as `chunk_timeout`: dropping it (a further keystroke, or
+    /// unmounting) cancels the pending `setTimeout` instead of leaking it.
+    debounce_timeout: Option<Timeout>,
     /// Cross-render register/special visibility, view state owned here (not
     /// on `Control`, not derived from `&MMix` alone) per
     /// `docs/layout-spec.md`'s Registers section. Replaced wholesale on a
@@ -805,6 +823,7 @@ impl Component for App {
             control,
             error: None,
             chunk_timeout: None,
+            debounce_timeout: None,
             register_continuity: RegisterContinuity::new(),
             special_continuity: SpecialContinuity::new(),
             prev_registers: Vec::new(),
@@ -834,18 +853,34 @@ impl Component for App {
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
             Msg::SourceChanged(source) => {
-                match self.control.reload(&source) {
+                // Re-assembling (and showing a resulting parse error) is
+                // debounced to `Msg::ReassembleSource` -- see
+                // `SOURCE_DEBOUNCE_MS` -- so typing an in-progress line
+                // doesn't flash "Assembly error" on every keystroke. A run
+                // or chunked Step Over in flight still stops immediately,
+                // same as before: the source shown alongside it is already
+                // no longer the one that produced it.
+                self.source = source;
+                self.control.stop();
+                self.chunk_timeout = None;
+                let link = ctx.link().clone();
+                self.debounce_timeout = Some(Timeout::new(SOURCE_DEBOUNCE_MS, move || {
+                    link.send_message(Msg::ReassembleSource)
+                }));
+                true
+            }
+            Msg::ReassembleSource => {
+                self.debounce_timeout = None;
+                match self.control.reload(&self.source) {
                     Ok(()) => {
                         self.error = None;
                         self.reset_view_state();
                         self.status_message = "Loaded";
                     }
                     Err(error) => {
-                        self.error = Some(describe_source_error(&source, &error));
+                        self.error = Some(describe_source_error(&self.source, &error));
                     }
                 }
-                self.source = source;
-                self.chunk_timeout = None;
                 true
             }
             Msg::ToggleBreakpoint(line) => {
