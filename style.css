@@ -407,13 +407,6 @@ main {
     font-style: italic;
 }
 
-/* Changed-since-last-pause: accent text, no background, visible only while
-   paused or halted -- cleared during a Run or Step Over's intermediate
-   chunk repaints. */
-.changed {
-    color: #4ec9b0;
-}
-
 .memory-grid {
     display: flex;
     flex-direction: column;
@@ -458,7 +451,21 @@ main {
     font-weight: bold;
 }
 
+/* Changed-since-last-pause: accent text, no background, visible only while
+   paused or halted -- cleared during a Run or Step Over's intermediate
+   chunk repaints. Declared after .mem-current-instruction so a byte that is
+   both changed and part of the current instruction span keeps its changed
+   color (with mem-current-instruction's bold weight still applying, so the
+   two states stay distinguishable together rather than one silently
+   overriding the other). */
+.changed {
+    color: #4ec9b0;
+}
+
 .mem-ascii {
+    display: inline-block;
+    width: 16ch;
+    white-space: pre;
     color: #6a9955;
 }
 

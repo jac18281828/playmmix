@@ -98,7 +98,7 @@ impl Component for Editor {
         let overlay_rows: Html = lines
             .iter()
             .enumerate()
-            .map(|(i, line)| render_line(line, current_line == Some(i + 1)))
+            .map(|(i, line)| render_line(line, overlay_row_is_current(i, current_line)))
             .collect();
 
         let oninput = ctx.link().callback(|_: InputEvent| EditorMsg::Input);
@@ -255,6 +255,14 @@ fn line_pieces(line: &str) -> Vec<LinePiece<'_>> {
     pieces
 }
 
+/// Whether the overlay's zero-based row `i` (source line `i + 1`) is the
+/// paused machine's current line. Factored out of `view()` so the row-index-
+/// to-line-number mapping is testable on its own, separately from
+/// `overlay_line_class`'s CSS-class logic.
+fn overlay_row_is_current(i: usize, current_line: Option<usize>) -> bool {
+    current_line == Some(i + 1)
+}
+
 /// `.overlay-line`, plus `.overlay-current` when this line carries the
 /// paused machine's current line -- a full-width background band, additive
 /// alongside the gutter's own `gutter-current` marker (defect 4 is
@@ -353,6 +361,16 @@ mod tests {
         for line in line_numbers {
             let class = overlay_line_class(current_line == Some(line));
             assert_eq!(class.contains("overlay-current"), line == 2, "line {line}");
+        }
+    }
+
+    #[test]
+    fn overlay_row_is_current_maps_zero_based_row_to_one_based_line() {
+        // Source line 2 is overlay row index 1 -- an off-by-one here would
+        // flag row 2 (line 3) instead.
+        let current_line = Some(2);
+        for i in 0..4 {
+            assert_eq!(overlay_row_is_current(i, current_line), i == 1, "row {i}");
         }
     }
 }

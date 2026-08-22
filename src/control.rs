@@ -870,6 +870,29 @@ mod tests {
     }
 
     #[test]
+    fn marker_pc_steps_back_from_the_halted_pc_to_the_halting_instruction() {
+        // Once halted, get_pc() sits 4 bytes past the halting TRAP
+        // (handle_halt advances it before returning). marker_pc() must step
+        // back to the instruction that actually ran, and current_line() must
+        // resolve to that instruction's source line -- HELLO_WORLD_MMS's
+        // `TRAP 0,Halt,0` is line 10.
+        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let outcome = control.run_chunk(1_000_000);
+        assert_eq!(outcome, StepOutcome::Halted, "fixture must reach a halt");
+
+        assert_eq!(
+            control.marker_pc(),
+            control.get_pc() - 4,
+            "marker_pc must step back from the raw halted PC"
+        );
+        assert_eq!(
+            control.current_line(),
+            Some(10),
+            "marker_pc must resolve to the halting TRAP's source line"
+        );
+    }
+
+    #[test]
     fn running_to_halt_then_stepping_or_running_again_is_a_no_op() {
         let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
         control.start_run();

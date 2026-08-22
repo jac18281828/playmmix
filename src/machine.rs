@@ -486,11 +486,13 @@ pub fn memory_row_instruction_span(row: &MemoryRow, marker_pc: u64) -> Vec<usize
         .collect()
 }
 
-/// Every index's known value across `rows`: an individually-rendered
-/// register's explicit value, or `0` for every index folded into an
-/// unallocated-range collapse (the collapse only ever holds zero registers).
-/// An index absent from both source and result was invisible in this
-/// snapshot, with no recoverable value.
+/// Every individually-rendered or collapsed index's value across `rows`. An
+/// index absent from the result is not itself unknown: per the visibility
+/// rules governing what `rows` holds, an index that renders neither
+/// individually nor via the collapse necessarily has value `0` -- the
+/// 3-clause predicate would have rendered it individually otherwise. Callers
+/// comparing two snapshots (e.g. a diff) must treat an absent index as `0`,
+/// not as unknown.
 fn register_value_map(rows: &[RegisterRow]) -> BTreeMap<u8, u64> {
     let mut map = BTreeMap::new();
     for row in rows {
@@ -508,20 +510,19 @@ fn register_value_map(rows: &[RegisterRow]) -> BTreeMap<u8, u64> {
     map
 }
 
-/// The register indices whose value differs between `prev` and `curr`,
-/// where both snapshots have a known value for that index (an index that
-/// merely appears or disappears -- e.g. moving in or out of the collapse --
-/// is unaffected unless its value actually changed).
+/// The register indices whose value differs between `prev` and `curr`. An
+/// index absent from `prev` (not yet individually visible or collapsed --
+/// see [`register_value_map`]) is treated as value `0`, its actual value per
+/// the visibility rules, so an index's first appearance at a nonzero value
+/// -- e.g. a sticky register or a `GREG`-widened range becoming individually
+/// visible -- is flagged. An index that merely appears or disappears with an
+/// unchanged value (moving in or out of the collapse) is unaffected.
 pub fn diff_registers(prev: &[RegisterRow], curr: &[RegisterRow]) -> BTreeSet<u8> {
     let prev_map = register_value_map(prev);
     let curr_map = register_value_map(curr);
     curr_map
         .into_iter()
-        .filter(|(index, value)| {
-            prev_map
-                .get(index)
-                .is_some_and(|prev_value| prev_value != value)
-        })
+        .filter(|(index, value)| prev_map.get(index).copied().unwrap_or(0) != *value)
         .map(|(index, _)| index)
         .collect()
 }
@@ -533,15 +534,14 @@ fn special_value_map(rows: &[SpecialRegisterRow]) -> BTreeMap<&str, u64> {
 }
 
 /// The special-register names whose value differs between `prev` and
-/// `curr`, same rule as [`diff_registers`].
+/// `curr`, same rule as [`diff_registers`]: a name absent from `prev` is
+/// treated as value `0` -- the only value a non-pinned special can have
+/// before it first satisfies the sticky predicate -- not as unknown, so a
+/// special's first nonzero appearance is flagged.
 pub fn diff_specials(prev: &[SpecialRegisterRow], curr: &[SpecialRegisterRow]) -> BTreeSet<String> {
     let prev_map = special_value_map(prev);
     curr.iter()
-        .filter(|row| {
-            prev_map
-                .get(row.name.as_str())
-                .is_some_and(|&prev_value| prev_value != row.value)
-        })
+        .filter(|row| prev_map.get(row.name.as_str()).copied().unwrap_or(0) != row.value)
         .map(|row| row.name.clone())
         .collect()
 }
@@ -1208,15 +1208,9 @@ mod tests {
         let rows = memory_rows(&[run_a, run_b]);
         assert_eq!(rows.len(), 1, "both runs fit in one merged 16-byte row");
 
-        let MemoryRow::Data { addr, cells, .. } = &rows[0] else {
+        let MemoryRow::Data { cells, .. } = &rows[0] else {
             panic!("expected a data row");
         };
-        let addrs: BTreeSet<u64> = [*addr].into_iter().collect();
-        assert_eq!(
-            addrs.len(),
-            1,
-            "merged runs must not produce colliding row addresses"
-        );
         assert_eq!(cells[0], Some(1));
         assert_eq!(
             cells[3], None,
@@ -1308,6 +1302,51 @@ mod tests {
 
         let diff = diff_registers(&prev, &curr);
         assert_eq!(diff, BTreeSet::from([2]));
+    }
+
+    #[test]
+    fn diff_registers_flags_a_nonzero_value_s_first_appearance() {
+        // Index 50 is absent from prev entirely -- not individually
+        // rendered, and not covered by the collapse (e.g. rG != 32, so the
+        // no-GREG collapse gate doesn't fire for it). Per the visibility
+        // rules, an index absent this way was value 0; becoming sticky at a
+        // nonzero value is exactly the transition a user watching the diff
+        // cares about, and must be flagged, not treated as unknown/skip.
+        let prev = vec![RegisterRow::Register { index: 1, value: 5 }];
+        let curr = vec![
+            RegisterRow::Register { index: 1, value: 5 }, // unchanged
+            RegisterRow::Register {
+                index: 50,
+                value: 7,
+            }, // first appearance, nonzero
+        ];
+
+        let diff = diff_registers(&prev, &curr);
+        assert_eq!(diff, BTreeSet::from([50]));
+    }
+
+    #[test]
+    fn diff_specials_flags_a_nonzero_value_s_first_appearance() {
+        // "rX" is absent from prev -- not yet individually visible. Per the
+        // visibility rules its prior value was 0; a later nonzero value
+        // (the sticky transition) must be flagged.
+        let prev = vec![SpecialRegisterRow {
+            name: "rJ".to_string(),
+            value: 5,
+        }];
+        let curr = vec![
+            SpecialRegisterRow {
+                name: "rJ".to_string(),
+                value: 5,
+            }, // unchanged
+            SpecialRegisterRow {
+                name: "rX".to_string(),
+                value: 3,
+            }, // first appearance, nonzero
+        ];
+
+        let diff = diff_specials(&prev, &curr);
+        assert_eq!(diff, BTreeSet::from(["rX".to_string()]));
     }
 
     #[test]
