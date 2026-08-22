@@ -46,12 +46,20 @@ pre {
    rather than a full inline `grid-template-columns`/`-rows` restatement
    keeps the *other* track's rule (e.g. the machine column's `minmax(38rem,
    42rem)` below) declared here once, not duplicated into Rust, and keeps
-   this rule -- not an inline style -- winning below the 1100px breakpoint. */
+   this rule -- not an inline style -- winning below the 1100px breakpoint.
+
+   The editor row's `minmax(8rem, 1fr)` (matching `EDITOR_MIN_SHARE_PX` in
+   `main.rs`) is a hard floor: `--output-h`'s own `min(..., calc(...))`
+   ceiling can't subtract this row's `auto`-height header sibling (its
+   height isn't knowable in a static calc()), so it's a conservative bound,
+   not an exact one. This floor is what actually guarantees the editor pane
+   never collapses when a shortened window revisits a tall committed
+   `--output-h` with no new drag. */
 
 main {
     display: grid;
     grid-template-columns: var(--left-col, minmax(0, 1fr)) 6px minmax(38rem, 42rem);
-    grid-template-rows: auto 1fr 6px var(--output-h, auto);
+    grid-template-rows: auto minmax(8rem, 1fr) 6px var(--output-h, auto);
     grid-template-areas:
         "header       header       header"
         "editor       col-splitter machine"

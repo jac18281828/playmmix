@@ -50,8 +50,8 @@ right is the machine. CSS grid with named areas on `<main>`:
 - `grid-template-columns: minmax(0, 1fr) minmax(38rem, 42rem)` — the machine
   column is sized by its content (fixed-width rows, below); the editor takes
   the rest.
-- Left column: editor above, output below, `grid-template-rows: 1fr auto`
-  with the output pane at `max-height: 14rem`.
+- Left column: editor above, output below, `grid-template-rows: minmax(8rem,
+  1fr) auto` with the output pane at `max-height: 14rem`.
 - Under ~1100px the grid collapses to one column: header, editor, output,
   machine. The machine column's own order is already vertical, so nothing
   else changes.
@@ -64,7 +64,15 @@ right is the machine. CSS grid with named areas on `<main>`:
   row split between the editor and the output pane -- are user-draggable,
   clamped to floors (20rem for the left column, the machine column's own
   38rem floor, a couple of lines plus its header for the output pane) that
-  keep every pane usable and the grid from overflowing.
+  keep every pane usable. A committed drag also carries a `min(px,
+  calc(...))` CSS ceiling so a later window resize, with no further drag,
+  re-clamps it on every reflow rather than overflowing at the stale pixel
+  value. Horizontally this ceiling is exact; vertically it can't account for
+  the header row's own (`auto`, wrappable) height, so the editor's `minmax(
+  8rem, 1fr)` floor is what actually guarantees the editor pane stays
+  visible -- a very short window can still show a small residual overflow
+  bounded to roughly the header's height, not the grid overflowing without
+  limit.
 
 Registers in a column, one per row, is the load-bearing change: it makes rows
 addressable by position, which is what continuity (§ registers) and change

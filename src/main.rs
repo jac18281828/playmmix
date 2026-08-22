@@ -149,6 +149,25 @@ const DRAG_COMMIT_THRESHOLD_PX: f64 = 3.0;
 /// 3), with no resize listener needed.
 const LEFT_COLUMN_CEILING_CALC: &str = "calc(100% - 6px - 1.5rem - 38rem)";
 
+/// The row splitter's vertical twin of `LEFT_COLUMN_CEILING_CALC`: the same
+/// `min(px, calc(...))` backstop, embedded in `--output-h` (see
+/// `main_style`), so a window shortened after a drag -- with no further
+/// drag -- can't push the output pane tall enough to starve the editor,
+/// mirroring finding 3's horizontal fix for the vertical axis.
+///
+/// Unlike the horizontal ceiling, this can't subtract the header row's own
+/// height: `style.css`'s `main` grid sizes it `auto` (`.app-header` can wrap
+/// onto a second line), which a static `calc()` has no way to read. The
+/// `100%` here is `main`'s full height, header included, so this ceiling is
+/// conservative rather than exact -- it can still let `--output-h` claim a
+/// few dozen px more than the header strictly leaves free. `style.css`'s
+/// `minmax(8rem, 1fr)` on the editor row (`EDITOR_MIN_SHARE_PX`, matched
+/// below) is the actual floor guarantee: together, the editor's rendered
+/// height never drops below its share, and any residual overflow this
+/// ceiling misses is bounded to the header's own height rather than growing
+/// without limit as the viewport shrinks (the unfixed behavior).
+const OUTPUT_HEIGHT_CEILING_CALC: &str = "calc(100% - 6px - 1.5rem - 8rem)";
+
 /// Clamp the column splitter's requested left-column width to the range
 /// `style.css`'s grid can actually render without overflowing: never
 /// narrower than `LEFT_COLUMN_FLOOR_PX`, and never wide enough to push the
@@ -204,10 +223,11 @@ struct DragState {
 /// a drag starting a text selection instead of resizing. Both properties
 /// are always built together from the same two values, whether called from
 /// `view()` or from a live drag's imperative write, so committing one drag
-/// never clobbers the other's already-set property. `--left-col` is wrapped
-/// in `min(..., LEFT_COLUMN_CEILING_CALC)` (finding 3): the plain px value
-/// alone would go stale the moment the window narrows again without a new
-/// drag, since nothing re-clamps it but another drag.
+/// never clobbers the other's already-set property. Both `--left-col` and
+/// `--output-h` are wrapped in `min(..., ...CEILING_CALC)` (finding 3 and
+/// its vertical twin): the plain px value alone would go stale the moment
+/// the window resizes again without a new drag, since nothing re-clamps it
+/// but another drag.
 fn main_style(
     left_column_width: Option<f64>,
     output_height: Option<f64>,
@@ -220,7 +240,9 @@ fn main_style(
         ));
     }
     if let Some(px) = output_height {
-        style.push_str(&format!("--output-h:{px}px;"));
+        style.push_str(&format!(
+            "--output-h:min({px}px,{OUTPUT_HEIGHT_CEILING_CALC});"
+        ));
     }
     if dragging {
         style.push_str("user-select:none;");
@@ -1230,14 +1252,19 @@ mod tests {
             main_style(Some(300.0), None, false),
             format!("--left-col:min(300px,{LEFT_COLUMN_CEILING_CALC});")
         );
-        assert_eq!(main_style(None, Some(200.0), false), "--output-h:200px;");
+        assert_eq!(
+            main_style(None, Some(200.0), false),
+            format!("--output-h:min(200px,{OUTPUT_HEIGHT_CEILING_CALC});")
+        );
     }
 
     #[test]
     fn main_style_writes_both_dimensions_together_without_clobbering_either() {
         assert_eq!(
             main_style(Some(300.0), Some(200.0), false),
-            format!("--left-col:min(300px,{LEFT_COLUMN_CEILING_CALC});--output-h:200px;")
+            format!(
+                "--left-col:min(300px,{LEFT_COLUMN_CEILING_CALC});--output-h:min(200px,{OUTPUT_HEIGHT_CEILING_CALC});"
+            )
         );
     }
 
@@ -1260,6 +1287,48 @@ mod tests {
         let style = main_style(Some(930.0), None, false);
         assert!(style.contains("min(930px,"));
         assert!(style.contains(LEFT_COLUMN_CEILING_CALC));
+    }
+
+    #[test]
+    fn main_style_output_h_ceiling_never_lets_the_grid_overflow_a_shorter_container() {
+        // The vertical twin of the test above: a stale, too-tall
+        // `--output-h` (set by a drag at a taller viewport) must not out-run
+        // a `min()` ceiling recomputed at the container's current, shorter
+        // height.
+        let style = main_style(None, Some(445.0), false);
+        assert!(style.contains("min(445px,"));
+        assert!(style.contains(OUTPUT_HEIGHT_CEILING_CALC));
+    }
+
+    #[test]
+    fn left_column_ceiling_calc_matches_the_floor_constants_it_names() {
+        // `LEFT_COLUMN_CEILING_CALC` is a literal string, not derived from
+        // `SPLITTER_SIZE_PX`/`GRID_GAP_PX`/`MACHINE_COLUMN_FLOOR_PX` at
+        // compile time -- nothing stops it drifting out of sync with them.
+        // Asserting containment of the constant against itself (as the test
+        // above does) can't catch that: it passes even if the constant's
+        // numbers are wrong, since it only checks the constant was copied
+        // verbatim into the style string. This test instead rebuilds the
+        // expected calc() from the same floor constants `clamp_left_column_
+        // width` uses, so the two can't silently disagree.
+        let expected = format!(
+            "calc(100% - {}px - {}rem - {}rem)",
+            SPLITTER_SIZE_PX as u32,
+            (2.0 * GRID_GAP_PX) / 16.0,
+            MACHINE_COLUMN_FLOOR_PX / 16.0
+        );
+        assert_eq!(LEFT_COLUMN_CEILING_CALC, expected);
+    }
+
+    #[test]
+    fn output_height_ceiling_calc_matches_the_floor_constants_it_names() {
+        let expected = format!(
+            "calc(100% - {}px - {}rem - {}rem)",
+            SPLITTER_SIZE_PX as u32,
+            (2.0 * GRID_GAP_PX) / 16.0,
+            EDITOR_MIN_SHARE_PX / 16.0
+        );
+        assert_eq!(OUTPUT_HEIGHT_CEILING_CALC, expected);
     }
 
     #[test]
