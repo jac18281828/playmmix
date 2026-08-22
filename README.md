@@ -10,13 +10,16 @@ collapsing to one column below about 1100px wide. Both the column boundary
 and the boundary between the editor and the output pane are draggable
 splitters, clamped so neither pane can be resized away entirely; sizes reset
 to the default layout on reload. The source pane is editable: it loads with
-`examples/hello_world.mms` from checksmix, and every
-edit re-assembles and loads a fresh machine at the program's entry point —
-nothing runs until asked to. The pane pairs a transparent `<textarea>` with a
-syntax-highlight overlay and a line-number gutter; the current line (the last
-instruction that ran) is marked in both the gutter and a full-width band in
-the overlay.
+a minimal starting skeleton — an entry point that halts cleanly and an empty
+data segment, ready to build on — and every edit re-assembles and loads a
+fresh machine at the program's entry point — nothing runs until asked to.
+The pane pairs a transparent `<textarea>` with a syntax-highlight overlay
+and a line-number gutter; the current line (the last instruction that ran)
+is marked in both the gutter and a full-width band in the overlay.
 
+Run, Step, Step Over, Stop, and Reset control execution explicitly. Run
+executes in chunks, yielding to the browser between them, so Stop takes
+effect within about a quarter second rather than freezing the tab. Step
 advances one source-level step — a multi-word pseudo-op such as `SETI`,
 `SET`, or `LDA` executes as a single Step, not several; Step Over runs a
 whole call without descending into it; Reset reloads the current source

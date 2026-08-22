@@ -42,7 +42,7 @@ right is the machine. CSS grid with named areas on `<main>`:
 |                                |   rA  0x…  0                |
 +--------------------------------+   …one per row…             |
 | output                (scroll) |-----------------------------|
-|   Hello world!                 | memory           (scroll)   |
+|   (program's stdout/stderr)    | memory           (scroll)   |
 |                                |   text 0x…100  f2 00 …      |
 +--------------------------------+-----------------------------+
 ```
