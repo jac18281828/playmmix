@@ -1326,6 +1326,30 @@ mod tests {
     }
 
     #[test]
+    fn diff_registers_treats_an_absent_index_as_zero_not_unknown() {
+        // Index 50 is again absent from prev, but this time its first
+        // appearance in curr is at value 0 -- e.g. a global register
+        // entering visibility via `i >= rG` while still unwritten. If an
+        // absent index were treated as some other sentinel (unknown, or a
+        // nonzero placeholder) rather than the actual value 0 the
+        // visibility rules guarantee, this would wrongly flag it as
+        // changed. Pins the specific default, not just "isn't skipped" --
+        // `diff_registers_flags_a_nonzero_value_s_first_appearance` above
+        // only proves the latter.
+        let prev = vec![RegisterRow::Register { index: 1, value: 5 }];
+        let curr = vec![
+            RegisterRow::Register { index: 1, value: 5 }, // unchanged
+            RegisterRow::Register {
+                index: 50,
+                value: 0,
+            }, // first appearance, still zero
+        ];
+
+        let diff = diff_registers(&prev, &curr);
+        assert_eq!(diff, BTreeSet::new());
+    }
+
+    #[test]
     fn diff_specials_flags_a_nonzero_value_s_first_appearance() {
         // "rX" is absent from prev -- not yet individually visible. Per the
         // visibility rules its prior value was 0; a later nonzero value
@@ -1347,6 +1371,31 @@ mod tests {
 
         let diff = diff_specials(&prev, &curr);
         assert_eq!(diff, BTreeSet::from(["rX".to_string()]));
+    }
+
+    #[test]
+    fn diff_specials_treats_an_absent_name_as_zero_not_unknown() {
+        // Same pin as diff_registers_treats_an_absent_index_as_zero_not_unknown,
+        // for specials: "rX"'s first appearance in curr is at value 0, so it
+        // must not be flagged -- proving the default is specifically 0, not
+        // just "not skipped".
+        let prev = vec![SpecialRegisterRow {
+            name: "rJ".to_string(),
+            value: 5,
+        }];
+        let curr = vec![
+            SpecialRegisterRow {
+                name: "rJ".to_string(),
+                value: 5,
+            }, // unchanged
+            SpecialRegisterRow {
+                name: "rX".to_string(),
+                value: 0,
+            }, // first appearance, still zero
+        ];
+
+        let diff = diff_specials(&prev, &curr);
+        assert_eq!(diff, BTreeSet::new());
     }
 
     #[test]

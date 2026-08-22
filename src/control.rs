@@ -893,6 +893,26 @@ mod tests {
     }
 
     #[test]
+    fn marker_pc_equals_the_live_pc_while_not_halted() {
+        // Not halted: marker_pc must equal get_pc() directly, with no
+        // backward adjustment -- that only applies once actually halted.
+        // Checked at the fresh-load PC and again after one step, so a
+        // mutation that subtracts 4 unconditionally (not just when halted)
+        // fails both.
+        let mut control = Control::new(crate::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        assert!(!control.is_halted());
+        assert_eq!(control.marker_pc(), control.get_pc());
+
+        assert_eq!(
+            control.step(),
+            StepOutcome::Advanced,
+            "fixture's entry instruction must not halt"
+        );
+        assert!(!control.is_halted());
+        assert_eq!(control.marker_pc(), control.get_pc());
+    }
+
+    #[test]
     fn running_to_halt_then_stepping_or_running_again_is_a_no_op() {
         let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
         control.start_run();
