@@ -167,9 +167,10 @@ main {
 }
 
 /* Resize splitters (§1.3): draggable boundaries, dragging writes
-   --left-col/--output-h on `main` (read by its grid-template rule above and,
-   for --output-h, by .output-pane's own max-height below), reconciled into
-   `App` state on pointerup only -- see main.rs's `DragState`. */
+   --left-col/--output-h on `main` (read by its own grid-template rule
+   above) plus --output-pane-cap (read by .output-pane's own max-height
+   below), reconciled into `App` state on pointerup only -- see main.rs's
+   `DragState`. */
 
 .col-splitter,
 .row-splitter {
@@ -356,13 +357,37 @@ main {
        track on every drag. --output-pane-cap is a second, simpler property
        written only alongside a committed --output-h (main.rs's
        main_style): "100%" is unambiguous once the track itself is a
-       definite size, which is exactly when this is set. Left unset (falls
-       back to 14rem, a fixed length, never a percentage) for the
-       undragged default, where the row is `auto` -- an indefinite
-       containing block, against which a percentage max-height computes to
-       "none" per the CSS box spec, silently removing the cap rather than
-       resolving to 0. */
+       definite size, which is exactly when this is set on `main` -- while
+       `main` stays in the two-column grid below. Left unset (falls back to
+       14rem, a fixed length, never a percentage) for the undragged
+       default, where the row is `auto` -- an indefinite containing block,
+       against which a percentage max-height computes to "none" per the CSS
+       box spec, silently removing the cap rather than resolving to 0.
+
+       --output-pane-cap is an inline property on `main`: it does NOT stop
+       applying below the @media (max-width: 1100px) breakpoint just
+       because the two-column grid does. If a drag committed it at a wide
+       viewport and the window is later narrowed past the breakpoint,
+       `main` becomes height: auto -- the same indefinite containing block
+       as the undragged case above, so "100%" resolves to "none" there too,
+       silently uncapping the pane. The override below is the backstop:
+       same specificity as this rule, declared after it, so it wins
+       whenever the breakpoint applies regardless of what --output-pane-cap
+       says. */
     max-height: var(--output-pane-cap, 14rem);
+}
+
+/* Backstop for the leak described above: a plain 14rem, immune to the
+   percentage-resolution question entirely, wins by source order once the
+   grid collapses. Deliberately its own rule rather than folded into the
+   @media block near .col-splitter/.row-splitter above (same specificity,
+   earlier in the file -- verified losing to the bare rule above: measured
+   the pane still uncapped at a narrow width after a wide-viewport drag
+   when placed there). */
+@media (max-width: 1100px) {
+    .output-pane {
+        max-height: 14rem;
+    }
 }
 
 .output-header {
