@@ -480,7 +480,7 @@ main {
 
 .machine-pane {
     font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-    font-size: 0.9rem;
+    font-size: 0.8rem;
     background: #111;
     color: #ddd;
     border: 1px solid #333;
@@ -493,7 +493,7 @@ main {
 }
 
 .machine-pane h2 {
-    font-size: 0.85rem;
+    font-size: 0.75rem;
     margin: 0.75rem 0 0.4rem;
     color: #999;
     text-transform: uppercase;
