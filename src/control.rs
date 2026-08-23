@@ -147,9 +147,12 @@ pub struct Control {
     breakpoints: BTreeSet<usize>,
     /// `breakpoints` resolved to addresses against the current `assembler`.
     /// Kept in sync on load, reload, and every breakpoint toggle, so a run
-    /// or step never re-walks the debug-info map per instruction. Always
-    /// one address per surviving line, since the two sets are recomputed
-    /// together.
+    /// or step never re-walks the debug-info map per instruction. One
+    /// address per surviving line, but not necessarily a distinct one per
+    /// line: a label-only line and the instruction line beneath it can
+    /// both resolve to the same address via the label fallback (see
+    /// `resolve_breakpoint_line`), so two entries in `breakpoints` may
+    /// collapse to one entry here.
     resolved_breakpoints: BTreeSet<u64>,
     /// Set while a chunked Run or a chunked Step Over is in flight; both
     /// share this flag, since only one can be in flight at a time and both

@@ -133,8 +133,8 @@ in order, ascending index, one register per row:
    but now only ever covers `$32..=$255`.
 3. **Sticky:** any register observed rendering individually keeps its row for
    the life of the load, whatever its value does later. The sticky set lives
-   in `App` (it is view state, not machine state) and clears on Reset and
-   reload.
+   in `machine::ViewState`, owned by `App` (it is view state, not machine
+   state) and clears on Reset and reload.
 
    Stickiness is *sampled*, not tracked continuously: the visible set is
    observed at each pause boundary and each chunk yield, never per

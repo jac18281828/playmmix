@@ -1427,10 +1427,27 @@ mod tests {
         view.record_pause_boundary(&control);
         assert!(view.changed_registers().is_empty());
         assert!(view.changed_specials().is_empty());
+    }
 
+    #[test]
+    fn view_state_clear_changed_empties_every_set() {
+        let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
+        let mut view = ViewState::new();
+        view.reset(&control);
+        assert_eq!(
+            control.run_chunk(1_000_000),
+            crate::control::StepOutcome::Halted
+        );
         view.observe(&control);
         view.record_pause_boundary(&control);
+        assert!(
+            !view.changed_registers().is_empty() && !view.changed_specials().is_empty(),
+            "fixture assumption: CALL_MMS's run changes both a register and a special"
+        );
+
         view.clear_changed();
+        assert!(view.changed_registers().is_empty());
+        assert!(view.changed_specials().is_empty());
         assert!(view.changed_memory().is_empty());
     }
 
@@ -1488,6 +1505,62 @@ mod tests {
             view.changed_registers().is_empty(),
             "a load-time value is not a change: {:?}",
             view.changed_registers()
+        );
+    }
+
+    #[test]
+    fn view_state_reset_seeds_register_sticky_set_from_the_fresh_load() {
+        // `G2 GREG @` initializes $253 to a nonzero address at load time,
+        // before anything executes. A GREG-allocated register is always
+        // individually visible on its own too (it's always >= rG, by how
+        // rG is derived), so checking render output can't isolate what
+        // `reset`'s own seeding `observe` call does -- check the sticky
+        // set's membership directly instead.
+        let control =
+            crate::control::Control::new(TWO_GREG_MMS, "two_greg.mms").expect("assembles");
+        assert_ne!(
+            control.machine().get_register(253),
+            0,
+            "fixture must load with a nonzero register"
+        );
+
+        let mut view = ViewState::new();
+        view.reset(&control);
+
+        assert!(
+            view.register_continuity.contains(253),
+            "reset's own seeding observe must mark a load-time-nonzero \
+             register sticky, not just leave it visible by coincidence"
+        );
+    }
+
+    #[test]
+    fn view_state_observe_tracks_special_register_continuity_too() {
+        // rQ is not one of the always-shown PINNED_SPECIALS, so it only
+        // ever renders via the sticky set -- isolates the special-register
+        // half of `ViewState::observe` from the register half the other
+        // `ViewState` tests already cover.
+        assert!(
+            !PINNED_SPECIALS.contains(&SpecialReg::RQ),
+            "fixture assumption"
+        );
+        const PUT_RQ_MMS: &str = "\tLOC\t#100\nMain\tPUTI\trQ,7\n\tPUTI\trQ,0\n\tTRAP\t0,Halt,0\n";
+        let mut control =
+            crate::control::Control::new(PUT_RQ_MMS, "put_rq.mms").expect("assembles");
+        let mut view = ViewState::new();
+        view.reset(&control);
+
+        control.step(); // PUTI rQ,7 -- rQ now nonzero
+        view.observe(&control);
+        control.step(); // PUTI rQ,0 -- rQ reverts to zero
+
+        let (_, specials, _) = view.machine_rows(&control);
+        assert!(
+            specials
+                .iter()
+                .any(|row| row.name == "rQ" && row.value == 0),
+            "ViewState::observe must wire through to SpecialContinuity::observe \
+             so rQ stays visible after reverting to zero: {specials:?}"
         );
     }
 
