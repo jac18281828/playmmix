@@ -1440,9 +1440,23 @@ mod tests {
     }
 
     #[test]
+    fn set_with_an_immediate_operand_assembles_and_runs() {
+        // `SET $X,imm` is MMIXAL's alias for `SETL $X,imm` -- distinct from
+        // `SET $X,$Y` (register-to-register, already covered by CALL_MMS
+        // above). A checksmix grammar that only accepts the register form
+        // rejects this at parse time.
+        const SET_IMMEDIATE_MMS: &str = "\tLOC\t#100\nMain\tSET\t$1,40\n\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(SET_IMMEDIATE_MMS, "set-imm.mms").expect("assembles");
+
+        assert_eq!(control.run_chunk(1_000), StepOutcome::Halted);
+        assert_eq!(control.machine().get_register(1), 40);
+    }
+
+    #[test]
     fn step_crosses_a_multiword_pseudo_op_group_in_one_call() {
-        // SETI compiles to exactly 4 physical words (SETH/SETMH/SETML/
-        // SETL), tagged with a source line only on the first.
+        // SETI compiles to exactly 4 physical words (SETH/INCMH/INCML/
+        // INCL), each tagged with the statement's own source line, not
+        // just the first.
         const SETI_MMS: &str = "\tLOC\t#100\nMain\tSETI\t$1,40\n\tTRAP\t0,Halt,0\n";
         let mut control = Control::new(SETI_MMS, "seti.mms").expect("assembles");
 

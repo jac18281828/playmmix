@@ -40,9 +40,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "checksmix"
-version = "0.3.3"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c53a2927d511d1667c9c4a4deb11aa00af548e27e95e13cef96d76d2410f4ce1"
+checksum = "b251897128a3a986271dc8bda12c37793a26435616cb62201ccb453f28f441f9"
 dependencies = [
  "lyn",
  "pest",
