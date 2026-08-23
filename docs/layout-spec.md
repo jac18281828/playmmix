@@ -201,4 +201,5 @@ autoscroll in the memory pane (revisit after the aligned rows land).
   consumes the host, so the shared buffer handle is the only way back to the
   output — hold the `Rc` in `Control`.
 - Reset reuses `reload` verbatim; the only new control-plane state is the
-  sticky sets and the previous-render snapshot, both in `App`.
+  sticky sets and the previous-render snapshot, both in `machine::
+  ViewState`, owned by `App`.

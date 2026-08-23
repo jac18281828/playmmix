@@ -1253,6 +1253,17 @@ mod tests {
     /// no-GREG collapse floor before `TRAP 0,Halt,0`.
     const CALL_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,40\n\tSETL\t$2,2\n\tPUSHJ\t$0,AddFunc\n\tSET\t$255,$0\n\tTRAP\t0,Halt,0\nAddFunc\tADDU\t$0,$0,$1\n\tPOP\t1,0\n";
 
+    /// Writes a register (so `rL` grows too, changing a special), then
+    /// stores a byte into the data segment -- a real memory write, unlike
+    /// `CALL_MMS`, which only ever touches registers and specials.
+    const STORE_MMS: &str = "\tLOC\tData_Segment\n\tGREG\t@\nText\tBYTE\t\"ab\",0\n\tLOC\t#100\nMain\tLDA\t$1,Text\n\tSETL\t$2,88\n\tSTB\t$2,$1,0\n\tTRAP\t0,Halt,0\n";
+
+    /// `rQ` is not one of the always-shown `PINNED_SPECIALS`, so it only
+    /// ever renders via the sticky set -- isolates the special-register
+    /// half of `ViewState::observe` from the register half other
+    /// `ViewState` tests already cover.
+    const PUT_RQ_MMS: &str = "\tLOC\t#100\nMain\tPUTI\trQ,7\n\tPUTI\trQ,0\n\tTRAP\t0,Halt,0\n";
+
     #[test]
     fn visible_registers_show_a_nonzero_global_written_with_no_greg() {
         let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
@@ -1431,7 +1442,7 @@ mod tests {
 
     #[test]
     fn view_state_clear_changed_empties_every_set() {
-        let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
+        let mut control = crate::control::Control::new(STORE_MMS, "store.mms").expect("assembles");
         let mut view = ViewState::new();
         view.reset(&control);
         assert_eq!(
@@ -1441,8 +1452,14 @@ mod tests {
         view.observe(&control);
         view.record_pause_boundary(&control);
         assert!(
-            !view.changed_registers().is_empty() && !view.changed_specials().is_empty(),
-            "fixture assumption: CALL_MMS's run changes both a register and a special"
+            !view.changed_registers().is_empty()
+                && !view.changed_specials().is_empty()
+                && !view.changed_memory().is_empty(),
+            "fixture assumption: STORE_MMS's run changes a register, a \
+             special (rL grows), and memory (the STB write): {:?} {:?} {:?}",
+            view.changed_registers(),
+            view.changed_specials(),
+            view.changed_memory()
         );
 
         view.clear_changed();
@@ -1511,11 +1528,12 @@ mod tests {
     #[test]
     fn view_state_reset_seeds_register_sticky_set_from_the_fresh_load() {
         // `G2 GREG @` initializes $253 to a nonzero address at load time,
-        // before anything executes. A GREG-allocated register is always
-        // individually visible on its own too (it's always >= rG, by how
-        // rG is derived), so checking render output can't isolate what
-        // `reset`'s own seeding `observe` call does -- check the sticky
-        // set's membership directly instead.
+        // before anything executes. For this fixture $253 stays >= rG for
+        // the whole run (nothing moves rG afterward), so it would also
+        // render individually via `register_included` alone -- checking
+        // render output wouldn't isolate what `reset`'s own seeding
+        // `observe` call does here. Check the sticky set's membership
+        // directly instead.
         let control =
             crate::control::Control::new(TWO_GREG_MMS, "two_greg.mms").expect("assembles");
         assert_ne!(
@@ -1536,15 +1554,10 @@ mod tests {
 
     #[test]
     fn view_state_observe_tracks_special_register_continuity_too() {
-        // rQ is not one of the always-shown PINNED_SPECIALS, so it only
-        // ever renders via the sticky set -- isolates the special-register
-        // half of `ViewState::observe` from the register half the other
-        // `ViewState` tests already cover.
         assert!(
             !PINNED_SPECIALS.contains(&SpecialReg::RQ),
             "fixture assumption"
         );
-        const PUT_RQ_MMS: &str = "\tLOC\t#100\nMain\tPUTI\trQ,7\n\tPUTI\trQ,0\n\tTRAP\t0,Halt,0\n";
         let mut control =
             crate::control::Control::new(PUT_RQ_MMS, "put_rq.mms").expect("assembles");
         let mut view = ViewState::new();
