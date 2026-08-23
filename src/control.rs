@@ -138,13 +138,18 @@ pub struct Control {
     mmix: MMix,
     assembler: MMixAssembler,
     filename: String,
-    /// User-facing breakpoints, by source line. Survive a `reload` that
-    /// re-assembles the same file, because a line number still means the
-    /// same thing to the user even after addresses move.
+    /// User-facing breakpoints, by source line. A line survives a `reload`
+    /// that re-assembles the same file as long as it still resolves --
+    /// a line number means the same thing to the user even after addresses
+    /// move. A line the edit left unresolvable is dropped by
+    /// `resolve_breakpoints`, so the gutter never marks a breakpoint that
+    /// could not fire.
     breakpoints: BTreeSet<usize>,
     /// `breakpoints` resolved to addresses against the current `assembler`.
     /// Kept in sync on load, reload, and every breakpoint toggle, so a run
-    /// or step never re-walks the debug-info map per instruction.
+    /// or step never re-walks the debug-info map per instruction. Always
+    /// one address per surviving line, since the two sets are recomputed
+    /// together.
     resolved_breakpoints: BTreeSet<u64>,
     /// Set while a chunked Run or a chunked Step Over is in flight; both
     /// share this flag, since only one can be in flight at a time and both
@@ -205,11 +210,13 @@ impl Control {
     }
 
     /// Re-assemble `source` and load a fresh machine -- what an edit does.
-    /// Breakpoint line numbers survive; their resolved addresses are
+    /// A breakpoint line that still resolves survives with its address
     /// recomputed against the new assembly, since re-assembling moves
-    /// addresses. On a parse error the previous machine and breakpoints are
-    /// left untouched, same as today's error surfacing -- but a run or
-    /// chunked Step Over in flight still stops, because the source shown
+    /// addresses; one the edit left unresolvable is dropped entirely, so no
+    /// gutter marker outlives the code it sat on. On a parse error the
+    /// previous machine and breakpoints are left untouched (no pruning
+    /// either), same as today's error surfacing -- but a run or chunked
+    /// Step Over in flight still stops, because the source shown
     /// alongside it is no longer the one that produced it, whether the
     /// re-assemble succeeds or fails.
     pub fn reload(&mut self, source: &str) -> Result<(), String> {
@@ -242,12 +249,24 @@ impl Control {
         Ok((mmix, assembler, output))
     }
 
+    /// Recompute `resolved_breakpoints` from `breakpoints` against the
+    /// current assembly, dropping any line that no longer resolves from
+    /// both sets at once -- otherwise a line whose code an edit deleted
+    /// keeps its gutter marker while its breakpoint is permanently dead.
+    ///
+    /// Called from `reload` and from both of `toggle_breakpoint`'s arms.
+    /// Only the `reload` call can ever prune: resolvability changes only
+    /// when the assembly does, `toggle_breakpoint` refuses to store a line
+    /// that doesn't resolve, and every reload prunes -- so by the time a
+    /// toggle runs, every stored line already resolves.
     fn resolve_breakpoints(&mut self) {
-        self.resolved_breakpoints = self
+        let resolved: Vec<(usize, u64)> = self
             .breakpoints
             .iter()
-            .filter_map(|&line| self.resolve_breakpoint_line(line))
+            .filter_map(|&line| Some((line, self.resolve_breakpoint_line(line)?)))
             .collect();
+        self.breakpoints = resolved.iter().map(|&(line, _)| line).collect();
+        self.resolved_breakpoints = resolved.into_iter().map(|(_, addr)| addr).collect();
     }
 
     /// Resolve `line` to an address a breakpoint can actually fire at, or
@@ -302,6 +321,17 @@ impl Control {
     /// life, re-set on every `reload`.
     pub fn labels(&self) -> &HashMap<String, u64> {
         &self.assembler.labels
+    }
+
+    /// Whether the current assembly allocated any global register with
+    /// `GREG`. `rG` alone cannot answer this: `GREG` allocates downward from
+    /// `$254`, so 223 directives leave `rG` at exactly `32`, the same value
+    /// an untouched machine has -- and `PUT`/`PUTI` can move `rG` off `32`
+    /// with no `GREG` involved at all. `machine.rs`'s unallocated-range
+    /// collapse needs both signals to tell a genuinely empty global range
+    /// from either coincidence.
+    pub fn has_greg_allocations(&self) -> bool {
+        !self.assembler.greg_inits.is_empty()
     }
 
     /// Whether a chunked Run or chunked Step Over is in flight.
@@ -364,14 +394,17 @@ impl Control {
     }
 
     /// Toggle a breakpoint on `line`. Removing an already-set breakpoint
-    /// always succeeds, even if `line` no longer resolves against the
-    /// current assembly (source edited since it was set) -- otherwise a
-    /// stale breakpoint could never be cleared. Setting a new one is gated
-    /// on `resolve_breakpoint_line`: returns `false`, a no-op, if `line` has
-    /// no address in the current assembly (a blank line, a comment, or some
-    /// directives), or if its address falls in the data segment -- the
-    /// program counter never reaches data, so a breakpoint there could
-    /// never fire. Never silently sets a breakpoint that can't fire.
+    /// always succeeds, ungated on whether `line` still resolves. Normal
+    /// use can no longer reach that case -- `resolve_breakpoints` prunes an
+    /// unresolvable line on every reload, so one can never be sitting there
+    /// to clear -- but removal stays ungated on principle: nothing about
+    /// forgetting a line should depend on the assembly. Setting a new one
+    /// is gated on `resolve_breakpoint_line`: returns `false`, a no-op, if
+    /// `line` has no address in the current assembly (a blank line, a
+    /// comment, or some directives), or if its address falls in the data
+    /// segment -- the program counter never reaches data, so a breakpoint
+    /// there could never fire. Never silently sets a breakpoint that can't
+    /// fire.
     pub fn toggle_breakpoint(&mut self, line: usize) -> bool {
         if self.breakpoints.remove(&line) {
             self.resolve_breakpoints();
@@ -1416,27 +1449,48 @@ mod tests {
     }
 
     #[test]
-    fn a_breakpoint_that_no_longer_resolves_can_still_be_cleared() {
-        const SHORT_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
+    fn a_breakpoint_whose_line_no_longer_resolves_is_pruned_on_reload() {
+        // The loop body is gone: line 2 still holds an instruction, line 3
+        // is now blank, and line 4 holds the halt.
+        const EDITED_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,5\n\n\tTRAP\t0,Halt,0\n";
 
         let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
+        assert!(control.toggle_breakpoint(2), "line 2 has an address");
         assert!(control.toggle_breakpoint(3), "line 3 has an address");
 
-        control.reload(SHORT_MMS).expect("still assembles");
+        let mut oracle = MMixAssembler::new(EDITED_MMS, "loop.mms");
+        oracle.parse().expect("test program assembles");
         assert!(
-            control.breakpoint_lines().contains(&3),
-            "the breakpoint's line number survives reload even though it no \
-             longer resolves against the new source"
+            oracle.addr_for_line("loop.mms", 3).is_none(),
+            "the edit must actually leave line 3 unresolvable"
         );
 
-        // Reverting the fix (gating removal on resolvability, same as
-        // adding) would return `false` here instead, leaving line 3 stuck
-        // forever.
-        assert!(
-            control.toggle_breakpoint(3),
-            "clearing a breakpoint must never be gated on resolvability"
+        control.reload(EDITED_MMS).expect("still assembles");
+
+        // Without pruning, line 3 keeps its gutter marker forever while
+        // `resolved_breakpoints` silently drops it -- a dot that can never
+        // fire again.
+        assert_eq!(
+            control
+                .breakpoint_lines()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2],
+            "the unresolvable line must be pruned; the resolvable one must stay"
         );
-        assert!(!control.breakpoint_lines().contains(&3));
+
+        // Pruning runs inside `resolve_breakpoints`, which `toggle_breakpoint`
+        // also calls -- a toggle must leave every other stored line alone.
+        assert!(control.toggle_breakpoint(4), "line 4 has an address");
+        assert_eq!(
+            control
+                .breakpoint_lines()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2, 4]
+        );
     }
 
     #[test]

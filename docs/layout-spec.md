@@ -131,10 +131,19 @@ in order, ascending index, one register per row:
 2. **Globals:** every `$i >= rG` renders, as today. The no-`GREG` collapse
    row (`$32–$254 · 223 unallocated (0)`) survives for the untouched middle,
    but now only ever covers `$32..=$255`.
-3. **Sticky:** any register that has rendered individually keeps its row for
+3. **Sticky:** any register observed rendering individually keeps its row for
    the life of the load, whatever its value does later. The sticky set lives
    in `App` (it is view state, not machine state) and clears on Reset and
    reload.
+
+   Stickiness is *sampled*, not tracked continuously: the visible set is
+   observed at each pause boundary and each chunk yield, never per
+   instruction while a chunked Run is in flight. A register that goes
+   nonzero and reverts to zero entirely inside one chunk is therefore not
+   guaranteed to be caught by Run. Step, which observes after every
+   instruction, always catches it. This is an accepted consequence of
+   chunked execution — sampling finer would trade away the responsiveness
+   chunking exists for — not a defect in the rule.
 
 A row never moves once shown; new rows insert in index order. Fixed column
 widths in `ch` so a value updates in place without reflow: name 5ch

@@ -5,9 +5,10 @@
 //! table (`AGENTS.md`'s rule that logic not needing browser APIs stays
 //! host-testable); [`MachinePane`] only renders their *owned* output --
 //! `Properties` must be `'static`, so a borrowed `&MMix` can't cross that
-//! boundary. [`RegisterContinuity`]/[`SpecialContinuity`] and the `diff_*`
-//! functions are the same kind of plain, testable state: cross-render view
-//! state `App` owns, not machine state.
+//! boundary. [`ViewState`] -- the continuity trackers, the pause-boundary
+//! snapshot, and the `diff_*` functions over it -- is the same kind of
+//! plain, testable state: cross-render view state `App` owns, not machine
+//! state.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -15,13 +16,17 @@ use checksmix::{MMix, SpecialReg};
 use web_sys::Element;
 use yew::prelude::*;
 
-use crate::control::{OutputSpan, OutputStream};
+use crate::control::{Control, OutputSpan, OutputStream};
 
 /// `rG`'s value with no `GREG` directive at all: `MMix::initialize`'s
 /// default. `write_image` only ever raises `rG` above this floor, and only
-/// when a program uses `GREG`, so this value uniquely identifies (modulo
-/// the documented edge case where the lowest `GREG` lands exactly on `$32`)
-/// a program with no global register allocated at all.
+/// when a program uses `GREG` -- but neither direction of that implication
+/// is exact, so this value never stands alone as "nothing was allocated".
+/// 223 `GREG` directives allocate downward from `$254` to exactly `$32` and
+/// leave `rG` here for a real allocation, and `PUT`/`PUTI` write `rG`
+/// unvalidated, moving it off this default with no `GREG` at all. See
+/// [`register_collapses`], which pairs this check with
+/// `Control::has_greg_allocations`.
 const NO_GREG_RG: u64 = 32;
 
 /// The six special registers always shown, regardless of value -- how the
@@ -46,12 +51,13 @@ pub enum RegisterRow {
     /// Register `$index`, individually visible under the full ISA rule.
     Register { index: u8, value: u64 },
     /// A contiguous, all-zero sub-range of `$32..=$255` (inclusive bounds),
-    /// collapsed into one row: no `GREG` directive ran, so this stretch is
-    /// genuinely unallocated (never gated on value alone -- `Control` has
-    /// no way to tell an allocated-but-zero global from a never-allocated
-    /// one, so only registers already known zero ever fold in here). A
-    /// nonzero register inside `$32..=$255` still renders individually and
-    /// splits the collapse around it.
+    /// collapsed into one row: no `GREG` directive ran *and* `rG` still
+    /// holds its untouched default, so this stretch is genuinely
+    /// unallocated (never gated on value alone -- an allocated-but-zero
+    /// global is indistinguishable from a never-allocated one by value, so
+    /// only registers already known zero ever fold in here). A nonzero
+    /// register inside `$32..=$255` still renders individually and splits
+    /// the collapse around it.
     UnallocatedGlobalRange { start: u8, end: u8 },
 }
 
@@ -65,18 +71,29 @@ fn register_included(index: u8, value: u64, rl: u64, rg: u64) -> bool {
     value != 0 || addr < rl || addr >= rg
 }
 
-/// Whether index `index` folds into the no-`GREG` collapse row rather than
-/// rendering (or being remembered as sticky) individually: `rG` still holds
+/// Whether index `index` folds into the unallocated collapse row rather
+/// than rendering (or being remembered as sticky) individually: no `GREG`
+/// ran (`has_greg`, from `Control::has_greg_allocations`), `rG` still holds
 /// `initialize()`'s untouched default, `index` sits in the range that
 /// default would otherwise mark global via `register_included`'s `i >= rG`
-/// clause, and its value is zero. Shared by `visible_registers`'s collapse
-/// branch and `RegisterContinuity::observe`, for the same reason
-/// `register_included` itself is shared: without this gate, `i >= rG`
-/// trivially holds for every index in `$32..=$255` whenever `rG == 32`, so
-/// `observe` would mark the entire range sticky on its very first call and
-/// permanently defeat the collapse.
-fn register_collapses(index: u8, value: u64, rg: u64) -> bool {
-    rg == NO_GREG_RG && u64::from(index) >= NO_GREG_RG && value == 0
+/// clause, and its value is zero.
+///
+/// Both signals are required, because each alone admits a case the other
+/// rules out. `rG == 32` also holds after 223 real `GREG` directives, which
+/// allocate downward from `$254` to exactly `$32` -- folding a genuinely
+/// allocated range under an "unallocated" label. `!has_greg` also holds
+/// after a `PUT`/`PUTI` moves `rG` with no `GREG` anywhere in the program --
+/// folding away a range `register_included`'s `i >= rG` clause has already
+/// decided is global.
+///
+/// Shared by `visible_registers`'s collapse branch and
+/// `RegisterContinuity::observe`, for the same reason `register_included`
+/// itself is shared: without this gate, `i >= rG` trivially holds for every
+/// index in `$32..=$255` whenever `rG == 32`, so `observe` would mark the
+/// entire range sticky on its very first call and permanently defeat the
+/// collapse.
+fn register_collapses(index: u8, value: u64, rg: u64, has_greg: bool) -> bool {
+    !has_greg && rg == NO_GREG_RG && u64::from(index) >= NO_GREG_RG && value == 0
 }
 
 /// A sticky key set, keyed by a small `u8` code -- the shared implementation
@@ -113,17 +130,20 @@ impl RegisterContinuity {
     }
 
     /// Union in every currently-visible index under the 3-clause predicate
-    /// -- skipping an index the no-`GREG` collapse currently folds away, so
-    /// this can never mark the whole collapsed range sticky on one
+    /// -- skipping an index the unallocated collapse currently folds away,
+    /// so this can never mark the whole collapsed range sticky on one
     /// observation (`register_included`'s `i >= rG` clause trivially holds
-    /// for all of `$32..=$255` whenever `rG == 32`).
-    pub fn observe(&mut self, mmix: &MMix) {
+    /// for all of `$32..=$255` whenever `rG == 32`). `has_greg` comes from
+    /// `Control::has_greg_allocations`, and must match what the caller
+    /// passes [`visible_registers`]: the two share [`register_collapses`]
+    /// precisely so they cannot disagree about what folds away.
+    pub fn observe(&mut self, mmix: &MMix, has_greg: bool) {
         let rg = mmix.get_special(SpecialReg::RG);
         let rl = mmix.get_special(SpecialReg::RL);
         for i in 0u16..256 {
             let index = i as u8;
             let value = mmix.get_register(index);
-            if register_collapses(index, value, rg) {
+            if register_collapses(index, value, rg, has_greg) {
                 continue;
             }
             if register_included(index, value, rl, rg) {
@@ -170,10 +190,16 @@ impl SpecialContinuity {
 /// register floor), any register satisfying [`register_included`] renders,
 /// and any register that has ever satisfied it since the last load renders
 /// too (`continuity`'s sticky set) -- ascending order, a row never moves
-/// once shown. When `rG` still holds `initialize()`'s default (no `GREG`
-/// directive ran), the all-zero, non-sticky run within `$32..=$255`
-/// collapses into one summary row per contiguous stretch.
-pub fn visible_registers(mmix: &MMix, continuity: &RegisterContinuity) -> Vec<RegisterRow> {
+/// once shown. When no `GREG` ran (`has_greg`, from
+/// `Control::has_greg_allocations`) *and* `rG` still holds `initialize()`'s
+/// default, the all-zero, non-sticky run within `$32..=$255` collapses into
+/// one summary row per contiguous stretch; see [`register_collapses`] for
+/// why neither signal suffices alone.
+pub fn visible_registers(
+    mmix: &MMix,
+    continuity: &RegisterContinuity,
+    has_greg: bool,
+) -> Vec<RegisterRow> {
     let rg = mmix.get_special(SpecialReg::RG);
     let rl = mmix.get_special(SpecialReg::RL);
     let mut rows = Vec::new();
@@ -184,7 +210,7 @@ pub fn visible_registers(mmix: &MMix, continuity: &RegisterContinuity) -> Vec<Re
         let value = mmix.get_register(index);
         let sticky = continuity.contains(index);
 
-        if register_collapses(index, value, rg) && !sticky {
+        if register_collapses(index, value, rg, has_greg) && !sticky {
             collapse_start.get_or_insert(index);
             continue;
         }
@@ -577,6 +603,126 @@ pub fn diff_memory(prev: &[MemoryRow], curr: &[MemoryRow]) -> BTreeSet<u64> {
         .collect()
 }
 
+/// Everything the machine pane renders from that isn't machine state:
+/// which registers and specials stay visible ([`RegisterContinuity`],
+/// [`SpecialContinuity`]), the previous pause boundary's snapshot, and the
+/// changed-since-that-boundary sets. `App` owns one and drives it from its
+/// `Msg` handlers.
+///
+/// Plain and `Control`-driven rather than Yew-coupled -- the same
+/// extraction `Control` itself is, for the same reason (`AGENTS.md`'s rule
+/// that logic not needing browser APIs stays host-testable). One `&Control`
+/// supplies everything these methods need: `machine()`, `labels()`, and
+/// `has_greg_allocations()`.
+#[derive(Debug, Default)]
+pub struct ViewState {
+    register_continuity: RegisterContinuity,
+    special_continuity: SpecialContinuity,
+    /// The registers/specials/memory as of the previous pause boundary --
+    /// what the `diff_*` functions compare the current state against.
+    /// Seeded by [`ViewState::reset`], advanced only by
+    /// [`ViewState::record_pause_boundary`].
+    prev_registers: Vec<RegisterRow>,
+    prev_specials: Vec<SpecialRegisterRow>,
+    prev_memory: Vec<MemoryRow>,
+    changed_registers: BTreeSet<u8>,
+    changed_specials: BTreeSet<String>,
+    changed_memory: BTreeSet<u64>,
+}
+
+impl ViewState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Union the currently-visible registers and specials into both sticky
+    /// sets. Sampling, not tracking: a register that goes nonzero and back
+    /// to zero entirely between two calls is never seen. `App` calls this
+    /// at every pause boundary and every chunk yield, which is what
+    /// `docs/layout-spec.md`'s Sticky rule documents.
+    pub fn observe(&mut self, control: &Control) {
+        self.register_continuity
+            .observe(control.machine(), control.has_greg_allocations());
+        self.special_continuity.observe(control.machine());
+    }
+
+    /// The register, special, and memory rows to render, computed fresh
+    /// from `control` against the current sticky sets. The render path and
+    /// both snapshot points share this, so a rendered row and a diffed row
+    /// can never be computed different ways.
+    pub fn machine_rows(
+        &self,
+        control: &Control,
+    ) -> (Vec<RegisterRow>, Vec<SpecialRegisterRow>, Vec<MemoryRow>) {
+        let mmix = control.machine();
+        let registers = visible_registers(
+            mmix,
+            &self.register_continuity,
+            control.has_greg_allocations(),
+        );
+        let specials = visible_specials(mmix, &self.special_continuity);
+        let memory = memory_rows(&memory_runs(mmix, control.labels()));
+        (registers, specials, memory)
+    }
+
+    /// Recompute the changed-since-last-pause sets against the previous
+    /// pause boundary's snapshot, then advance the snapshot to the current
+    /// state -- called only at an actual pause boundary (a Step that
+    /// executed, a Step Over's or Run's terminal outcome, or an explicit
+    /// Stop), never on an intermediate chunk repaint.
+    pub fn record_pause_boundary(&mut self, control: &Control) {
+        let (registers, specials, memory) = self.machine_rows(control);
+
+        self.changed_registers = diff_registers(&self.prev_registers, &registers);
+        self.changed_specials = diff_specials(&self.prev_specials, &specials);
+        self.changed_memory = diff_memory(&self.prev_memory, &memory);
+
+        self.prev_registers = registers;
+        self.prev_specials = specials;
+        self.prev_memory = memory;
+    }
+
+    /// Establish a fresh baseline after a successful load/reload: drop both
+    /// continuity trackers, seed them from the freshly loaded machine (so a
+    /// register visible only at load isn't lost on the very first step),
+    /// and capture the fresh state as the "previous" snapshot so the first
+    /// real pause boundary diffs against actual fresh-load values, not an
+    /// empty snapshot that would flag every already-nonzero register as
+    /// changed. Not a pause boundary itself -- `changed_*` stays empty.
+    pub fn reset(&mut self, control: &Control) {
+        self.register_continuity = RegisterContinuity::new();
+        self.special_continuity = SpecialContinuity::new();
+        self.observe(control);
+
+        let (registers, specials, memory) = self.machine_rows(control);
+        self.prev_registers = registers;
+        self.prev_specials = specials;
+        self.prev_memory = memory;
+
+        self.clear_changed();
+    }
+
+    /// Clear the changed-since-last-pause sets -- the moment a Run or Step
+    /// Over resumes advancing, per `docs/layout-spec.md`'s Highlights §3.
+    pub fn clear_changed(&mut self) {
+        self.changed_registers.clear();
+        self.changed_specials.clear();
+        self.changed_memory.clear();
+    }
+
+    pub fn changed_registers(&self) -> &BTreeSet<u8> {
+        &self.changed_registers
+    }
+
+    pub fn changed_specials(&self) -> &BTreeSet<String> {
+        &self.changed_specials
+    }
+
+    pub fn changed_memory(&self) -> &BTreeSet<u64> {
+        &self.changed_memory
+    }
+}
+
 #[derive(Properties, PartialEq)]
 pub struct MachinePaneProps {
     pub registers: Vec<RegisterRow>,
@@ -639,6 +785,18 @@ pub fn machine_pane(props: &MachinePaneProps) -> Html {
     }
 }
 
+/// A collapsed range's name cell: `$32-$254` (en-dash) for a real range,
+/// plain `$41` when the range is one register, where the dash form would
+/// read as a typo. Plain and `String`-returning so it is testable without
+/// rendering `Html`.
+fn collapsed_range_label(start: u8, end: u8) -> String {
+    if start == end {
+        format!("${start}")
+    } else {
+        format!("${start}\u{2013}${end}")
+    }
+}
+
 fn render_register_row(row: &RegisterRow, changed: &BTreeSet<u8>) -> Html {
     match row {
         RegisterRow::Register { index, value } => {
@@ -661,7 +819,7 @@ fn render_register_row(row: &RegisterRow, changed: &BTreeSet<u8>) -> Html {
             let count = u32::from(*end) - u32::from(*start) + 1;
             html! {
                 <div class="register-row register-collapsed">
-                    <span class="reg-name">{ format!("${start}\u{2013}${end}") }</span>
+                    <span class="reg-name">{ collapsed_range_label(*start, *end) }</span>
                     <span class="reg-note">{ format!("{count} unallocated (0)") }</span>
                 </div>
             }
@@ -840,14 +998,17 @@ mod tests {
 
     /// Assemble `source` and load it, unexecuted -- the same shape
     /// `Control::assemble_and_load` uses, restated here so these tests
-    /// don't need a `Control`.
-    fn assemble(source: &str, filename: &str) -> MMix {
+    /// don't need a `Control`. Returns the collapse's `has_greg` signal
+    /// alongside, read from the same `greg_inits` list
+    /// `Control::has_greg_allocations` reads, since the assembler itself
+    /// doesn't outlive this call.
+    fn assemble(source: &str, filename: &str) -> (MMix, bool) {
         let mut assembler = MMixAssembler::new(source, filename);
         assembler.parse().expect("test program assembles");
         let mut mmix = MMix::new();
         write_image(&mut mmix, &assembler);
         mmix.set_pc(entry_point(&assembler));
-        mmix
+        (mmix, !assembler.greg_inits.is_empty())
     }
 
     /// Two `GREG`s, one initialized to a literal zero -- verified against
@@ -859,7 +1020,7 @@ mod tests {
 
     #[test]
     fn visible_registers_include_allocated_zero_globals_via_i_ge_rg() {
-        let mmix = assemble(TWO_GREG_MMS, "two_greg.mms");
+        let (mmix, has_greg) = assemble(TWO_GREG_MMS, "two_greg.mms");
         assert_eq!(
             mmix.get_special(SpecialReg::RG),
             253,
@@ -868,7 +1029,7 @@ mod tests {
         assert_eq!(mmix.get_special(SpecialReg::RL), 0);
 
         let continuity = RegisterContinuity::new();
-        let indices: Vec<u8> = visible_registers(&mmix, &continuity)
+        let indices: Vec<u8> = visible_registers(&mmix, &continuity, has_greg)
             .into_iter()
             .map(|row| match row {
                 RegisterRow::Register { index, .. } => index,
@@ -894,7 +1055,7 @@ mod tests {
 
     #[test]
     fn visible_registers_include_untouched_locals_via_i_lt_rl() {
-        let mut mmix = assemble(GREG_AND_LOCAL_MMS, "local.mms");
+        let (mut mmix, has_greg) = assemble(GREG_AND_LOCAL_MMS, "local.mms");
         assert!(mmix.execute_instruction(), "SETL must execute, not halt");
 
         let rg = mmix.get_special(SpecialReg::RG);
@@ -911,15 +1072,17 @@ mod tests {
         let continuity = RegisterContinuity::new();
         // $35 is zero-valued, 32 <= 35 < rL -- the pinned floor doesn't
         // cover it ($0-$31) and the collapse can't reach it (rG != 32).
-        let has_35 = visible_registers(&mmix, &continuity).iter().any(|row| {
-            matches!(
-                row,
-                RegisterRow::Register {
-                    index: 35,
-                    value: 0
-                }
-            )
-        });
+        let has_35 = visible_registers(&mmix, &continuity, has_greg)
+            .iter()
+            .any(|row| {
+                matches!(
+                    row,
+                    RegisterRow::Register {
+                        index: 35,
+                        value: 0
+                    }
+                )
+            });
         assert!(has_35, "$35 must be visible via the i < rL clause");
     }
 
@@ -931,7 +1094,8 @@ mod tests {
 
     #[test]
     fn visible_registers_collapse_the_unallocated_global_range() {
-        let mmix = assemble(NO_GREG_LOOP_MMS, "loop.mms");
+        let (mmix, has_greg) = assemble(NO_GREG_LOOP_MMS, "loop.mms");
+        assert!(!has_greg, "no GREG directive: greg_inits must be empty");
         assert_eq!(
             mmix.get_special(SpecialReg::RG),
             32,
@@ -939,7 +1103,7 @@ mod tests {
         );
 
         let continuity = RegisterContinuity::new();
-        let rows = visible_registers(&mmix, &continuity);
+        let rows = visible_registers(&mmix, &continuity, has_greg);
         let collapsed: Vec<&RegisterRow> = rows
             .iter()
             .filter(|row| matches!(row, RegisterRow::UnallocatedGlobalRange { .. }))
@@ -961,6 +1125,127 @@ mod tests {
             .filter(|row| matches!(row, RegisterRow::Register { index, .. } if *index >= 32))
             .count();
         assert_eq!(individual_globals, 0);
+    }
+
+    /// `count` `GREG` directives, each initialized to zero, then an entry
+    /// point. `GREG` allocates downward from `$254`, so the count picks the
+    /// lowest register allocated -- built here rather than hand-typed
+    /// because the count that matters (223, landing exactly on `$32`) is
+    /// far too long to read as a literal.
+    fn many_gregs(count: usize) -> String {
+        let mut source = String::from("\tLOC\t#100\n");
+        for i in 0..count {
+            source.push_str(&format!("G{i}\tGREG\t0\n"));
+        }
+        source.push_str("Main\tTRAP\t0,Halt,0\n");
+        source
+    }
+
+    #[test]
+    fn allocated_zero_globals_never_collapse_when_greg_lands_exactly_on_32() {
+        // 223 GREGs allocate $254 down to $32, so rG matches
+        // initialize()'s untouched default for a real allocation -- the
+        // one case where rG alone cannot tell allocated from unallocated.
+        let control =
+            crate::control::Control::new(&many_gregs(223), "many_greg.mms").expect("assembles");
+        assert_eq!(
+            control.machine().get_special(SpecialReg::RG),
+            NO_GREG_RG,
+            "223 GREGs must drive rG down to exactly the no-GREG default"
+        );
+        assert!(
+            control.has_greg_allocations(),
+            "the fixture's GREGs must register as a real allocation"
+        );
+
+        let continuity = RegisterContinuity::new();
+        let rows = visible_registers(
+            control.machine(),
+            &continuity,
+            control.has_greg_allocations(),
+        );
+
+        // Dropping the `!has_greg` conjunct folds all 224 of these
+        // genuinely allocated, zero-valued globals into one row labelled
+        // "unallocated".
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row, RegisterRow::UnallocatedGlobalRange { .. })),
+            "GREG-allocated registers must never render as unallocated"
+        );
+        let individual: Vec<u8> = rows
+            .iter()
+            .filter_map(|row| match row {
+                RegisterRow::Register { index, .. } => Some(*index),
+                RegisterRow::UnallocatedGlobalRange { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            individual,
+            (0u16..256).map(|i| i as u8).collect::<Vec<u8>>(),
+            "every register must render individually: $0-$31 pinned, \
+             $32-$255 global via the i >= rG clause"
+        );
+    }
+
+    /// No `GREG` anywhere, but `PUTI rG,100` moves `rG` at runtime --
+    /// `set_special` is a bare store with no validation, so `has_greg` and
+    /// `rG` disagree in the opposite direction from `many_gregs(223)`.
+    const PUT_RG_MMS: &str = "\tLOC\t#100\nMain\tPUTI\trG,100\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn a_runtime_moved_rg_never_collapses_the_range_it_marks_global() {
+        let mut control =
+            crate::control::Control::new(PUT_RG_MMS, "put_rg.mms").expect("assembles");
+        assert_eq!(
+            control.run_chunk(1_000),
+            crate::control::StepOutcome::Halted
+        );
+        assert!(
+            !control.has_greg_allocations(),
+            "the fixture must declare no GREG at all"
+        );
+        assert_eq!(
+            control.machine().get_special(SpecialReg::RG),
+            100,
+            "PUTI must move rG off its default with no GREG involved"
+        );
+
+        let continuity = RegisterContinuity::new();
+        let rows = visible_registers(
+            control.machine(),
+            &continuity,
+            control.has_greg_allocations(),
+        );
+
+        // Replacing the `rG == 32` check with `!has_greg` (rather than
+        // conjoining them) folds $32-$255 into one collapse row here.
+        // Under the conjoined check there is no collapse row at all:
+        // $100-$255 render individually via `i >= rG`, and $32-$99 render
+        // nothing -- the same empty middle range any rG > 32 produces,
+        // pinned by `visible_registers_include_allocated_zero_globals_via_
+        // i_ge_rg`.
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row, RegisterRow::UnallocatedGlobalRange { .. })),
+            "a runtime-moved rG must produce no unallocated-range row"
+        );
+        let individual: Vec<u8> = rows
+            .iter()
+            .filter_map(|row| match row {
+                RegisterRow::Register { index, .. } => Some(*index),
+                RegisterRow::UnallocatedGlobalRange { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            individual,
+            (0u16..32)
+                .chain(100..256)
+                .map(|i| i as u8)
+                .collect::<Vec<u8>>()
+        );
     }
 
     /// Same fixture as `control.rs`'s `CALL_MMS`: no `GREG` at all, but
@@ -986,7 +1271,11 @@ mod tests {
         // Deleting the fix would collapse $255 into the unallocated-range
         // summary row, hiding its real value behind a false "(0)" label.
         let continuity = RegisterContinuity::new();
-        let rows = visible_registers(control.machine(), &continuity);
+        let rows = visible_registers(
+            control.machine(),
+            &continuity,
+            control.has_greg_allocations(),
+        );
         let has_individual_255 = rows.iter().any(
             |row| matches!(row, RegisterRow::Register { index: 255, value } if *value == value255),
         );
@@ -1000,12 +1289,13 @@ mod tests {
     #[test]
     fn register_continuity_keeps_a_once_visible_register_after_it_reverts() {
         let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
+        let has_greg = control.has_greg_allocations();
         let mut continuity = RegisterContinuity::new();
-        continuity.observe(control.machine());
+        continuity.observe(control.machine(), has_greg);
 
         let outcome = control.run_chunk(1_000_000);
         assert_eq!(outcome, crate::control::StepOutcome::Halted);
-        continuity.observe(control.machine());
+        continuity.observe(control.machine(), has_greg);
         assert_ne!(
             control.machine().get_register(255),
             0,
@@ -1022,7 +1312,7 @@ mod tests {
             "fresh load starts at 0 again"
         );
 
-        let rows = visible_registers(control.machine(), &continuity);
+        let rows = visible_registers(control.machine(), &continuity, has_greg);
         assert!(
             rows.iter().any(|row| matches!(
                 row,
@@ -1047,7 +1337,7 @@ mod tests {
         // construct on a successful reload, starts with an empty sticky
         // set.
         let fresh = RegisterContinuity::new();
-        let fresh_rows = visible_registers(control.machine(), &fresh);
+        let fresh_rows = visible_registers(control.machine(), &fresh, has_greg);
         assert!(
             !fresh_rows
                 .iter()
@@ -1087,6 +1377,180 @@ mod tests {
             !fresh_rows.iter().any(|row| row.name == "rQ"),
             "a fresh SpecialContinuity must start with an empty sticky set"
         );
+    }
+
+    /// Whether `$index` renders individually under `view`'s current sticky
+    /// set -- the question every `ViewState` test below actually asks.
+    fn renders_individually(
+        view: &ViewState,
+        control: &crate::control::Control,
+        index: u8,
+    ) -> bool {
+        let (registers, _, _) = view.machine_rows(control);
+        registers
+            .iter()
+            .any(|row| matches!(row, RegisterRow::Register { index: i, .. } if *i == index))
+    }
+
+    #[test]
+    fn view_state_records_what_changed_across_a_pause_boundary() {
+        let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
+        let mut view = ViewState::new();
+        view.reset(&control);
+        assert!(
+            view.changed_registers().is_empty(),
+            "a fresh baseline is not a pause boundary"
+        );
+
+        assert_eq!(
+            control.run_chunk(1_000_000),
+            crate::control::StepOutcome::Halted
+        );
+        view.observe(&control);
+        view.record_pause_boundary(&control);
+
+        // CALL_MMS leaves $1 = 40, $2 = 2, $255 = 42; rL grows past its
+        // load-time value too.
+        assert!(
+            view.changed_registers().contains(&1) && view.changed_registers().contains(&255),
+            "registers the run wrote must be flagged: {:?}",
+            view.changed_registers()
+        );
+        assert!(
+            view.changed_specials().contains("rL"),
+            "rL grew across the run: {:?}",
+            view.changed_specials()
+        );
+
+        // A second boundary with nothing executed in between diffs against
+        // the snapshot the first one just advanced to, so nothing changed.
+        view.record_pause_boundary(&control);
+        assert!(view.changed_registers().is_empty());
+        assert!(view.changed_specials().is_empty());
+
+        view.observe(&control);
+        view.record_pause_boundary(&control);
+        view.clear_changed();
+        assert!(view.changed_memory().is_empty());
+    }
+
+    #[test]
+    fn view_state_reset_drops_the_sticky_set_from_the_previous_load() {
+        let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
+        let mut view = ViewState::new();
+        view.reset(&control);
+
+        assert_eq!(
+            control.run_chunk(1_000_000),
+            crate::control::StepOutcome::Halted
+        );
+        view.observe(&control);
+        assert_ne!(control.machine().get_register(255), 0);
+
+        // Reload alone leaves the sticky set intact -- $255 is back to zero
+        // but keeps its row, which is the whole point of continuity.
+        control.reload(CALL_MMS).expect("still assembles");
+        assert_eq!(control.machine().get_register(255), 0);
+        assert!(
+            renders_individually(&view, &control, 255),
+            "$255 must still be sticky before the reset"
+        );
+
+        // Deleting either continuity-clearing line in `reset` leaves $255
+        // sticky here, across a load it was never visible in.
+        view.reset(&control);
+        assert!(
+            !renders_individually(&view, &control, 255),
+            "reset must drop the previous load's sticky set"
+        );
+    }
+
+    #[test]
+    fn view_state_reset_seeds_the_diff_baseline_from_the_fresh_load() {
+        // `G2 GREG @` initializes $253 to a nonzero address at load time,
+        // before anything executes.
+        let control =
+            crate::control::Control::new(TWO_GREG_MMS, "two_greg.mms").expect("assembles");
+        assert_ne!(
+            control.machine().get_register(253),
+            0,
+            "the fixture must load with a nonzero register"
+        );
+
+        let mut view = ViewState::new();
+        view.reset(&control);
+        view.record_pause_boundary(&control);
+
+        // Without the snapshot seeding in `reset`, the first pause boundary
+        // diffs against an empty snapshot and flags every already-nonzero
+        // register as freshly changed.
+        assert!(
+            view.changed_registers().is_empty(),
+            "a load-time value is not a change: {:?}",
+            view.changed_registers()
+        );
+    }
+
+    /// No `GREG` at all, and the only register it touches is `$40` -- above
+    /// `rG`'s default of 32, so `set_register` never grows `rL` and
+    /// `register_included`'s `i < rL` clause can't keep `$40` visible on
+    /// its own. `$40` goes nonzero and reverts within three instructions,
+    /// far inside one `CHUNK_BUDGET`.
+    const REVERTING_GLOBAL_MMS: &str =
+        "\tLOC\t#100\nMain\tSETL\t$40,7\n\tSETL\t$40,0\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn sticky_continuity_samples_per_chunk_under_run_and_per_instruction_under_step() {
+        // Observed once, after the whole chunk -- how `Msg::Run` samples.
+        let mut chunked =
+            crate::control::Control::new(REVERTING_GLOBAL_MMS, "revert.mms").expect("assembles");
+        let mut chunk_view = ViewState::new();
+        chunk_view.reset(&chunked);
+        assert_eq!(
+            chunked.run_chunk(crate::control::CHUNK_BUDGET),
+            crate::control::StepOutcome::Halted
+        );
+        chunk_view.observe(&chunked);
+
+        // Observed after every instruction -- how `Msg::Step` samples.
+        let mut stepped =
+            crate::control::Control::new(REVERTING_GLOBAL_MMS, "revert.mms").expect("assembles");
+        let mut step_view = ViewState::new();
+        step_view.reset(&stepped);
+        for _ in 0..16 {
+            if stepped.is_halted() {
+                break;
+            }
+            stepped.step();
+            step_view.observe(&stepped);
+        }
+        assert!(stepped.is_halted(), "the stepped run must reach the halt");
+
+        // Identical programs, identical end states: the only difference is
+        // when the visible set was sampled.
+        assert_eq!(chunked.machine().get_register(40), 0);
+        assert_eq!(stepped.machine().get_register(40), 0);
+        assert_eq!(
+            chunked.machine().get_special(SpecialReg::RL),
+            stepped.machine().get_special(SpecialReg::RL),
+            "$40 sits above rG, so neither path may grow rL"
+        );
+
+        assert!(
+            !renders_individually(&chunk_view, &chunked, 40),
+            "chunk-granularity sampling cannot see a value that reverted \
+             inside the chunk"
+        );
+        assert!(
+            renders_individually(&step_view, &stepped, 40),
+            "per-instruction sampling catches it, and stickiness keeps the row"
+        );
+    }
+
+    #[test]
+    fn a_singleton_collapse_range_reads_as_one_register_not_a_range() {
+        assert_eq!(collapsed_range_label(41, 41), "$41");
+        assert_eq!(collapsed_range_label(32, 255), "$32\u{2013}$255");
     }
 
     #[test]

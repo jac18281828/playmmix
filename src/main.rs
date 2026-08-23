@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use gloo_timers::callback::Timeout;
@@ -16,7 +15,7 @@ mod machine;
 use control::{Control, ControlBar, StepOutcome, yield_to_event_loop};
 use editor::Editor;
 use examples::DEFAULT_MMS;
-use machine::{MachinePane, OutputPane, RegisterContinuity, SpecialContinuity};
+use machine::{MachinePane, OutputPane, ViewState};
 
 /// The filename `Control` assembles the editor's buffer under. Fixed:
 /// playmmix edits a single in-memory buffer, not a multi-file project, and
@@ -645,25 +644,10 @@ pub struct App {
     /// same reason as `chunk_timeout`: dropping it (a further keystroke, or
     /// unmounting) cancels the pending `setTimeout` instead of leaking it.
     debounce_timeout: Option<Timeout>,
-    /// Cross-render register/special visibility, view state owned here (not
-    /// on `Control`, not derived from `&MMix` alone) per
-    /// `docs/layout-spec.md`'s Registers section. Replaced wholesale on a
-    /// successful Reset/reload.
-    register_continuity: RegisterContinuity,
-    special_continuity: SpecialContinuity,
-    /// The registers/specials/memory as of the previous pause boundary --
-    /// the comparison snapshot `diff_registers`/`diff_specials`/
-    /// `diff_memory` diff the current render against. Seeded on load,
-    /// updated only at the pause boundaries `record_pause_boundary`
-    /// documents.
-    prev_registers: Vec<machine::RegisterRow>,
-    prev_specials: Vec<machine::SpecialRegisterRow>,
-    prev_memory: Vec<machine::MemoryRow>,
-    /// The most recently computed changed-since-last-pause sets, empty
-    /// while a Run or Step Over is advancing.
-    changed_registers: BTreeSet<u8>,
-    changed_specials: BTreeSet<String>,
-    changed_memory: BTreeSet<u64>,
+    /// Cross-render register/special visibility and the pause-boundary diff
+    /// snapshot -- view state owned here (not on `Control`, not derived
+    /// from `&MMix` alone) per `docs/layout-spec.md`'s Registers section.
+    view_state: ViewState,
     /// A short echo of the last action taken, rendered next to the Control
     /// Bar (§1.4). Left unchanged by a parse error -- the error itself is
     /// already shown prominently elsewhere.
@@ -722,92 +706,48 @@ impl App {
             return;
         }
         let outcome = self.control.continue_chunk(control::CHUNK_BUDGET);
-        self.observe_continuity();
+        self.view_state.observe(&self.control);
         self.status_message = status_for(outcome);
         match outcome {
             StepOutcome::BudgetExhausted => self.schedule_chunk_tick(ctx),
             StepOutcome::Halted | StepOutcome::Breakpoint(_) | StepOutcome::Advanced => {
-                self.record_pause_boundary();
+                self.view_state.record_pause_boundary(&self.control);
             }
         }
     }
 
-    /// Union the currently-visible registers/specials into both continuity
-    /// trackers' sticky sets. Called at every point that mutates
-    /// `self.control` -- see `docs/layout-spec.md`'s Settled decisions for
-    /// the exact call sites.
-    fn observe_continuity(&mut self) {
-        self.register_continuity.observe(self.control.machine());
-        self.special_continuity.observe(self.control.machine());
-    }
-
-    /// Recompute the changed-since-last-pause sets against the previous
-    /// pause boundary's snapshot, then advance the snapshot to the current
-    /// state -- called only at an actual pause boundary (a Step that
-    /// executed, a Step Over's or Run's terminal outcome, or an explicit
-    /// Stop), never on an intermediate chunk repaint.
-    fn record_pause_boundary(&mut self) {
-        let mmix = self.control.machine();
-        let registers = machine::visible_registers(mmix, &self.register_continuity);
-        let specials = machine::visible_specials(mmix, &self.special_continuity);
-        let runs = machine::memory_runs(mmix, self.control.labels());
-        let memory = machine::memory_rows(&runs);
-
-        self.changed_registers = machine::diff_registers(&self.prev_registers, &registers);
-        self.changed_specials = machine::diff_specials(&self.prev_specials, &specials);
-        self.changed_memory = machine::diff_memory(&self.prev_memory, &memory);
-
-        self.prev_registers = registers;
-        self.prev_specials = specials;
-        self.prev_memory = memory;
-    }
-
-    /// Establish a fresh baseline after a successful load/reload: reset
-    /// both continuity trackers, seed them from the freshly loaded machine
-    /// (so a register visible only at load isn't lost on the very first
-    /// step -- see `docs/layout-spec.md`'s Settled decisions), and capture
-    /// the fresh state as the "previous" snapshot so the first real pause
-    /// boundary diffs against actual fresh-load values, not an empty
-    /// snapshot that would flag every already-nonzero register as changed.
-    /// Not a pause boundary itself -- `changed_*` stays empty.
-    fn reset_view_state(&mut self) {
-        self.register_continuity = RegisterContinuity::new();
-        self.special_continuity = SpecialContinuity::new();
-        self.observe_continuity();
-
-        let mmix = self.control.machine();
-        self.prev_registers = machine::visible_registers(mmix, &self.register_continuity);
-        self.prev_specials = machine::visible_specials(mmix, &self.special_continuity);
-        let runs = machine::memory_runs(mmix, self.control.labels());
-        self.prev_memory = machine::memory_rows(&runs);
-
-        self.clear_changed();
-    }
-
-    /// Clear the changed-since-last-pause sets -- the moment a Run or Step
-    /// Over resumes advancing, per `docs/layout-spec.md`'s Highlights §3.
-    fn clear_changed(&mut self) {
-        self.changed_registers.clear();
-        self.changed_specials.clear();
-        self.changed_memory.clear();
-    }
-
     /// Reload the current source (Reset's and halted-Run's shared "play
-    /// again" step): cancel any pending chunk tick, re-run
+    /// again" step): cancel any pending chunk tick and any pending
+    /// debounced re-assemble (this reload supersedes both), re-run
     /// `Control::reload`, and on success reseed the continuity/snapshot
     /// state. On a parse error, `reload` already leaves the previous
     /// machine and everything else untouched, so only `self.error` moves.
     fn reload_source(&mut self) {
         self.chunk_timeout = None;
+        self.debounce_timeout = None;
         match self.control.reload(&self.source) {
             Ok(()) => {
                 self.error = None;
-                self.reset_view_state();
+                self.view_state.reset(&self.control);
             }
             Err(error) => {
                 self.error = Some(describe_source_error(&self.source, &error));
             }
         }
+    }
+
+    /// Flush a debounced re-assemble that hasn't fired yet, so Run, Step,
+    /// and Step Over can never execute a program older than `self.source`
+    /// -- `SOURCE_DEBOUNCE_MS` otherwise leaves up to half a second where
+    /// every control still reads enabled against the stale prior program.
+    /// Returns whether the caller may proceed: `false` once the flush
+    /// surfaces a parse error, since the edit that is pending is not a
+    /// program that can run.
+    fn flush_pending_reassemble(&mut self) -> bool {
+        if self.debounce_timeout.is_some() {
+            self.reload_source();
+        }
+        self.error.is_none()
     }
 }
 
@@ -824,14 +764,7 @@ impl Component for App {
             error: None,
             chunk_timeout: None,
             debounce_timeout: None,
-            register_continuity: RegisterContinuity::new(),
-            special_continuity: SpecialContinuity::new(),
-            prev_registers: Vec::new(),
-            prev_specials: Vec::new(),
-            prev_memory: Vec::new(),
-            changed_registers: BTreeSet::new(),
-            changed_specials: BTreeSet::new(),
-            changed_memory: BTreeSet::new(),
+            view_state: ViewState::new(),
             status_message: "Loaded",
             left_column_width: None,
             output_height: None,
@@ -846,7 +779,7 @@ impl Component for App {
         // already computes the correct set live), but about stickiness: a
         // register visible only at load must already be in the sticky set
         // before the first `step()` runs.
-        app.reset_view_state();
+        app.view_state.reset(&app.control);
         app
     }
 
@@ -874,7 +807,7 @@ impl Component for App {
                 match self.control.reload(&self.source) {
                     Ok(()) => {
                         self.error = None;
-                        self.reset_view_state();
+                        self.view_state.reset(&self.control);
                         self.status_message = "Loaded";
                     }
                     Err(error) => {
@@ -900,6 +833,12 @@ impl Component for App {
                 true
             }
             Msg::Run => {
+                // A pending debounce means `self.control` still holds a
+                // program older than `self.source`; flush it rather than
+                // run the stale one.
+                if !self.flush_pending_reassemble() {
+                    return true;
+                }
                 // Run while halted is Reset then Run -- the "play again"
                 // affordance, one click to replay from the top.
                 if self.control.is_halted() {
@@ -908,9 +847,9 @@ impl Component for App {
                         return true;
                     }
                 }
-                self.clear_changed();
+                self.view_state.clear_changed();
                 self.control.start_run();
-                self.observe_continuity();
+                self.view_state.observe(&self.control);
                 if self.control.is_running() {
                     self.schedule_chunk_tick(ctx);
                 }
@@ -924,12 +863,15 @@ impl Component for App {
                 true
             }
             Msg::Step => {
+                if !self.flush_pending_reassemble() {
+                    return true;
+                }
                 if !self.control.is_running() {
                     let was_halted = self.control.is_halted();
                     let outcome = self.control.step();
                     if !was_halted {
-                        self.observe_continuity();
-                        self.record_pause_boundary();
+                        self.view_state.observe(&self.control);
+                        self.view_state.record_pause_boundary(&self.control);
                         self.status_message = if outcome == StepOutcome::Halted {
                             "Halted"
                         } else {
@@ -940,20 +882,23 @@ impl Component for App {
                 true
             }
             Msg::StepOver => {
+                if !self.flush_pending_reassemble() {
+                    return true;
+                }
                 if !self.control.is_running() {
-                    self.clear_changed();
+                    self.view_state.clear_changed();
                     let outcome = self.control.step_over_chunk(control::CHUNK_BUDGET);
                     self.status_message = status_for(outcome);
                     match outcome {
                         StepOutcome::BudgetExhausted => {
-                            self.observe_continuity();
+                            self.view_state.observe(&self.control);
                             self.schedule_chunk_tick(ctx);
                         }
                         StepOutcome::Advanced
                         | StepOutcome::Halted
                         | StepOutcome::Breakpoint(_) => {
-                            self.observe_continuity();
-                            self.record_pause_boundary();
+                            self.view_state.observe(&self.control);
+                            self.view_state.record_pause_boundary(&self.control);
                         }
                     }
                 }
@@ -962,8 +907,8 @@ impl Component for App {
             Msg::Stop => {
                 self.control.stop();
                 self.chunk_timeout = None;
-                self.observe_continuity();
-                self.record_pause_boundary();
+                self.view_state.observe(&self.control);
+                self.view_state.record_pause_boundary(&self.control);
                 self.status_message = "Stopped";
                 true
             }
@@ -998,11 +943,7 @@ impl Component for App {
         let machine_view = match &self.error {
             Some(error) => html! { <pre>{ error.clone() }</pre> },
             None => {
-                let mmix = self.control.machine();
-                let registers = machine::visible_registers(mmix, &self.register_continuity);
-                let specials = machine::visible_specials(mmix, &self.special_continuity);
-                let runs = machine::memory_runs(mmix, self.control.labels());
-                let memory = machine::memory_rows(&runs);
+                let (registers, specials, memory) = self.view_state.machine_rows(&self.control);
                 html! {
                     <MachinePane
                         {registers}
@@ -1012,9 +953,9 @@ impl Component for App {
                         marker_pc={self.control.marker_pc()}
                         {exit_code}
                         call_depth={self.control.call_depth()}
-                        changed_registers={self.changed_registers.clone()}
-                        changed_specials={self.changed_specials.clone()}
-                        changed_memory={self.changed_memory.clone()}
+                        changed_registers={self.view_state.changed_registers().clone()}
+                        changed_specials={self.view_state.changed_specials().clone()}
+                        changed_memory={self.view_state.changed_memory().clone()}
                     />
                 }
             }
