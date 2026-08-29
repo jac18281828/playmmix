@@ -3,7 +3,9 @@ use std::rc::Rc;
 
 use gloo_timers::callback::Timeout;
 use log::info;
-use web_sys::{Element, PointerEvent};
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
+use web_sys::{BeforeUnloadEvent, Element, Event, PointerEvent};
 use yew::{Callback, Component, Context, Html, NodeRef, Renderer, html};
 
 mod control;
@@ -89,13 +91,62 @@ fn looks_like_mix(source: &str) -> bool {
 /// user-supplied source: the bare MIX sentence if `source` looks like MIX
 /// (see `looks_like_mix`), or the normal "Assembly error: ..." otherwise --
 /// decided once, here, so `view()` can render `self.error` verbatim with no
-/// formatting of its own.
+/// formatting of its own. Either way, every literal `"{SOURCE_FILENAME}:"`
+/// is stripped from `error` first (see `strip_source_filename`) -- the
+/// phantom filename is checksmix's own error text, not something the user
+/// ever named.
 fn describe_source_error(source: &str, error: &str) -> String {
     if looks_like_mix(source) {
         "This looks like MIX, not MMIX.".to_string()
     } else {
-        format!("Assembly error: {error}")
+        format!("Assembly error: {}", strip_source_filename(error))
     }
+}
+
+/// Every literal occurrence of `"{SOURCE_FILENAME}:"` removed from `error` --
+/// not just a leading prefix, since the symbol-redefinition shape embeds a
+/// *second* `{SOURCE_FILENAME}:{line}` reference inside the message body
+/// (`"... redefined (first defined at source.mms:2)"`), which a
+/// prefix-only strip would leave untouched.
+fn strip_source_filename(error: &str) -> String {
+    error.replace(&format!("{SOURCE_FILENAME}:"), "")
+}
+
+/// Parses checksmix's raw error text for a `(line, column)` source
+/// location, defensively -- checksmix's error shapes are not uniform:
+///
+/// - The common `pest`-parser syntax error:
+///   `"{SOURCE_FILENAME}:{line}:{col}: {message}"` -- both a line and a
+///   column.
+/// - A symbol-redefinition error: `"{SOURCE_FILENAME}:{line}: symbol
+///   '{name}' redefined (first defined at {SOURCE_FILENAME}:{line})"` --
+///   a line only, no column, and a second, embedded
+///   `{SOURCE_FILENAME}:{line}` reference later in the message that must
+///   not be mistaken for this one.
+/// - Everything else (e.g. `"Invalid opcode: {value}"`) -- no location at
+///   all.
+///
+/// Tries the line-and-column prefix first, then the line-only prefix,
+/// returning `None` if neither matches -- there is genuinely nothing to
+/// point at. Only ever looks at a leading `"{SOURCE_FILENAME}:"` prefix, so
+/// the redefinition shape's second, embedded reference is never mistaken
+/// for the primary location.
+fn parse_error_location(error: &str) -> Option<(usize, Option<usize>)> {
+    let rest = error.strip_prefix(&format!("{SOURCE_FILENAME}:"))?;
+    let (line_str, after_line) = rest.split_once(':')?;
+
+    if let Some((col_str, after_col)) = after_line.split_once(':')
+        && after_col.starts_with(' ')
+        && let (Ok(line), Ok(col)) = (line_str.parse(), col_str.parse())
+    {
+        return Some((line, Some(col)));
+    }
+    if after_line.starts_with(' ')
+        && let Ok(line) = line_str.parse()
+    {
+        return Some((line, None));
+    }
+    None
 }
 
 /// Resize splitters (§1.3): both handles' fixed grid-track size, pixels --
@@ -606,6 +657,57 @@ fn status_for(outcome: StepOutcome) -> &'static str {
         StepOutcome::Breakpoint(_) => "Hit breakpoint",
     }
 }
+
+/// The JS closure backing `window.onbeforeunload` -- must stay alive for as
+/// long as the handler should stay registered; dropping it frees the JS
+/// function `onbeforeunload` points at.
+type BeforeUnloadHandler = Closure<dyn FnMut(Event)>;
+
+/// Registers `window.onbeforeunload`: when `dirty` (shared with `App`) is
+/// set at unload time, calls `Event::prevent_default` and sets
+/// `BeforeUnloadEvent`'s `returnValue` -- the modern and legacy triggers,
+/// respectively, for a browser's native "leave this page? changes may not
+/// be saved" prompt, since browsers vary in which one they still honor.
+/// Returns the shared flag alongside the `Closure` backing the handler; the
+/// caller must keep it alive (see [`BeforeUnloadHandler`]).
+fn install_beforeunload_handler() -> (Rc<RefCell<bool>>, BeforeUnloadHandler) {
+    let dirty = Rc::new(RefCell::new(false));
+    let dirty_for_handler = dirty.clone();
+    let handler = Closure::wrap(Box::new(move |event: Event| {
+        if !*dirty_for_handler.borrow() {
+            return;
+        }
+        event.prevent_default();
+        if let Ok(event) = event.dyn_into::<BeforeUnloadEvent>() {
+            event.set_return_value("Changes you made may not be saved.");
+        }
+    }) as Box<dyn FnMut(Event)>);
+
+    if let Some(window) = web_sys::window() {
+        window.set_onbeforeunload(Some(handler.as_ref().unchecked_ref()));
+    }
+
+    (dirty, handler)
+}
+
+/// `Msg::Stop`'s core logic, factored out of `App::update` so it is
+/// testable without a live `Context`: interrupts a chunked Run or Step
+/// Over in flight and records the resulting pause boundary. A true no-op
+/// otherwise -- `ready`/`paused` have nothing left to interrupt, and
+/// recording a boundary with nothing having moved since the last one would
+/// diff the current state against itself and silently clear the
+/// changed-value highlights that boundary already set. Returns whether
+/// anything actually happened.
+fn stop_if_running(control: &mut Control, view_state: &mut ViewState) -> bool {
+    if !control.is_running() {
+        return false;
+    }
+    control.stop();
+    view_state.observe(control);
+    view_state.record_pause_boundary(control);
+    true
+}
+
 pub enum Msg {
     SourceChanged(String),
     /// Fires once `SOURCE_DEBOUNCE_MS` has passed with no further
@@ -634,6 +736,12 @@ pub struct App {
     source: String,
     control: Control,
     error: Option<String>,
+    /// The 1-based source line a parsed `self.error` location names, if the
+    /// raw error text carried one (see `parse_error_location`). Updated at
+    /// the same points `self.error` itself is; stale during the same
+    /// debounce window `self.error` is already accepted to be stale in
+    /// (`Msg::SourceChanged` clears neither).
+    error_line: Option<usize>,
     /// The pending chunk-tick timeout, if a chunked Run or Step Over is in
     /// flight. Held rather than `.forget()`-ten so Stop, or a `reload` mid-
     /// run, can cancel it by dropping this (runs `clearTimeout` and frees
@@ -680,6 +788,18 @@ pub struct App {
     /// clone of whatever this holds, so a fresh, empty cell here would
     /// silently drop an in-flight drag the moment that happened.
     drag_state: Rc<RefCell<Option<DragState>>>,
+    /// Whether `window.onbeforeunload`'s handler (`_beforeunload_handler`)
+    /// currently arms the native confirmation dialog -- `self.source !=
+    /// DEFAULT_MMS`, re-evaluated at the same point `self.source` itself
+    /// changes. Shared with that handler rather than read from `self`
+    /// directly: the handler is a `'static` JS closure, registered once at
+    /// `create` and outliving any single `view()`/`update()` call.
+    source_dirty: Rc<RefCell<bool>>,
+    /// Kept alive for as long as `App` is -- dropping a `Closure` frees the
+    /// JS function it backs, which would leave `window.onbeforeunload`
+    /// pointing at freed memory. Never read directly; `source_dirty` is the
+    /// live channel to it.
+    _beforeunload_handler: BeforeUnloadHandler,
 }
 
 impl App {
@@ -716,6 +836,14 @@ impl App {
         }
     }
 
+    /// Whether `window.onbeforeunload` should arm the native leave-this-
+    /// page confirmation: there is something the user typed that a silent
+    /// reload would lose. `false` for the untouched default program, so a
+    /// visitor who loads the page and changes nothing is never nagged.
+    fn should_confirm_before_leaving(&self) -> bool {
+        self.source != DEFAULT_MMS
+    }
+
     /// Reload the current source (Reset's and halted-Run's shared "play
     /// again" step): cancel any pending chunk tick and any pending
     /// debounced re-assemble (this reload supersedes both), re-run
@@ -728,9 +856,11 @@ impl App {
         match self.control.reload(&self.source) {
             Ok(()) => {
                 self.error = None;
+                self.error_line = None;
                 self.view_state.reset(&self.control);
             }
             Err(error) => {
+                self.error_line = parse_error_location(&error).map(|(line, _)| line);
                 self.error = Some(describe_source_error(&self.source, &error));
             }
         }
@@ -758,10 +888,12 @@ impl Component for App {
     fn create(_ctx: &Context<Self>) -> Self {
         let control = Control::new(DEFAULT_MMS, SOURCE_FILENAME)
             .expect("DEFAULT_MMS assembles; pinned by examples::tests::default_mms_assembles");
+        let (source_dirty, beforeunload_handler) = install_beforeunload_handler();
         let mut app = Self {
             source: DEFAULT_MMS.to_string(),
             control,
             error: None,
+            error_line: None,
             chunk_timeout: None,
             debounce_timeout: None,
             view_state: ViewState::new(),
@@ -773,6 +905,8 @@ impl Component for App {
             row_splitter_ref: NodeRef::default(),
             output_pane_ref: NodeRef::default(),
             drag_state: Rc::new(RefCell::new(None)),
+            source_dirty,
+            _beforeunload_handler: beforeunload_handler,
         };
         // Seed continuity and the diff baseline off the freshly loaded
         // machine -- not about the first render (`visible_registers`
@@ -794,6 +928,7 @@ impl Component for App {
                 // same as before: the source shown alongside it is already
                 // no longer the one that produced it.
                 self.source = source;
+                *self.source_dirty.borrow_mut() = self.should_confirm_before_leaving();
                 self.control.stop();
                 self.chunk_timeout = None;
                 let link = ctx.link().clone();
@@ -807,10 +942,12 @@ impl Component for App {
                 match self.control.reload(&self.source) {
                     Ok(()) => {
                         self.error = None;
+                        self.error_line = None;
                         self.view_state.reset(&self.control);
                         self.status_message = "Loaded";
                     }
                     Err(error) => {
+                        self.error_line = parse_error_location(&error).map(|(line, _)| line);
                         self.error = Some(describe_source_error(&self.source, &error));
                     }
                 }
@@ -905,12 +1042,13 @@ impl Component for App {
                 true
             }
             Msg::Stop => {
-                self.control.stop();
-                self.chunk_timeout = None;
-                self.view_state.observe(&self.control);
-                self.view_state.record_pause_boundary(&self.control);
-                self.status_message = "Stopped";
-                true
+                if stop_if_running(&mut self.control, &mut self.view_state) {
+                    self.chunk_timeout = None;
+                    self.status_message = "Stopped";
+                    true
+                } else {
+                    false
+                }
             }
             Msg::Reset => {
                 self.reload_source();
@@ -1026,6 +1164,7 @@ impl Component for App {
                     {on_change}
                     breakpoints={self.control.breakpoint_lines().clone()}
                     {current_line}
+                    error_line={self.error_line}
                     {on_toggle_breakpoint}
                 />
                 <div
@@ -1091,6 +1230,60 @@ mod tests {
     #[test]
     fn looks_like_mix_is_false_for_ordinary_mmixal() {
         assert!(!looks_like_mix(DEFAULT_MMS));
+    }
+
+    #[test]
+    fn parse_error_location_recovers_line_and_column_from_the_common_shape() {
+        let error = "source.mms:3:13: syntax error: expected one of: ...";
+        assert_eq!(parse_error_location(error), Some((3, Some(13))));
+    }
+
+    #[test]
+    fn parse_error_location_recovers_line_only_from_the_redefinition_shape() {
+        // No column in this shape, and a *second* `filename:line` reference
+        // embedded later in the message -- must not be mistaken for the
+        // primary location.
+        let error = "source.mms:5: symbol 'Foo' redefined (first defined at source.mms:2)";
+        assert_eq!(parse_error_location(error), Some((5, None)));
+    }
+
+    #[test]
+    fn parse_error_location_is_none_for_a_location_less_message() {
+        let error = "Invalid opcode: 0x1a";
+        assert_eq!(parse_error_location(error), None);
+    }
+
+    #[test]
+    fn parse_error_location_recovers_a_location_for_real_mix_looking_source() {
+        // checksmix's *raw* error for MIX-shaped input, not the friendly
+        // "This looks like MIX" display string the parser never sees --
+        // `looks_like_mix` only changes what text the user reads, not what
+        // checksmix actually returned, so a location genuinely exists here
+        // too.
+        let mix_source = "\tORIG\t3000\nSTART\tLDA\t0\n";
+        assert!(looks_like_mix(mix_source), "fixture must look like MIX");
+        let error = match Control::new(mix_source, SOURCE_FILENAME) {
+            Ok(_) => panic!("MIX-shaped source must fail MMIXAL assembly"),
+            Err(error) => error,
+        };
+        assert!(
+            parse_error_location(&error).is_some(),
+            "a real checksmix parse failure must still yield a location: {error:?}"
+        );
+    }
+
+    #[test]
+    fn strip_source_filename_removes_every_occurrence() {
+        let error = "source.mms:5: symbol 'Foo' redefined (first defined at source.mms:2)";
+        let stripped = strip_source_filename(error);
+        assert!(!stripped.contains(SOURCE_FILENAME));
+    }
+
+    #[test]
+    fn describe_source_error_strips_the_phantom_filename() {
+        let error = "source.mms:3:13: syntax error: ...";
+        let message = describe_source_error("\tADDD\t$1,$2,$3\n", error);
+        assert!(!message.contains(SOURCE_FILENAME), "{message}");
     }
 
     #[test]
@@ -1207,6 +1400,39 @@ mod tests {
         assert_eq!(status_for(StepOutcome::Advanced), "Stepped over call");
         assert_eq!(status_for(StepOutcome::Halted), "Halted");
         assert_eq!(status_for(StepOutcome::Breakpoint(0x100)), "Hit breakpoint");
+    }
+
+    #[test]
+    fn stop_if_running_is_a_true_no_op_while_paused() {
+        const WRITES_REGISTER_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(WRITES_REGISTER_MMS, "stop.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        // An explicit Step, not a chunked Run/Step Over: `is_running()`
+        // stays false throughout, exactly the `paused` state Stop is newly
+        // enabled in.
+        assert_eq!(control.step(), StepOutcome::Advanced);
+        assert!(!control.is_running(), "a plain Step never sets running");
+        view_state.observe(&control);
+        view_state.record_pause_boundary(&control);
+        let changed_after_step = view_state.changed_registers().clone();
+        assert!(
+            changed_after_step.contains(&1),
+            "the step must flag $1 as changed: {changed_after_step:?}"
+        );
+
+        // Stop, while paused with nothing having moved since that boundary,
+        // must leave the changed set exactly as it was -- reverting the
+        // `is_running()` guard would re-diff the current state against
+        // itself (the snapshot `record_pause_boundary` just advanced to)
+        // and silently clear it to empty.
+        assert!(!stop_if_running(&mut control, &mut view_state));
+        assert_eq!(
+            view_state.changed_registers(),
+            &changed_after_step,
+            "an inert Stop must not touch the changed-registers set"
+        );
     }
 
     #[test]

@@ -88,6 +88,20 @@ main {
     .row-splitter {
         display: none;
     }
+
+    /* `.editor`'s base rule (line 154) sets no height property, so in this
+       single-column layout (a grid row sized `auto`) its height comes from
+       in-flow content -- `.gutter-content`'s line-number spans -- rather
+       than from `.source-input` itself, which is absolutely positioned and
+       so contributes no height of its own. A bounded height here gives
+       `.source-input`'s `overflow: auto` (line 300) something definite to
+       scroll within, so a long program scrolls inside the editor instead
+       of growing the whole page. `min-height` keeps a short viewport from
+       squeezing the editor down to a couple of visible lines. */
+    .editor {
+        height: 50vh;
+        min-height: 14rem;
+    }
 }
 
 .app-header {
@@ -261,6 +275,21 @@ main {
     background: #2d2d2d;
 }
 
+/* A parsed assembly-error location (finding 7). Declared after
+   `.gutter-current`/`.overlay-current` so it wins the tie when the error
+   line and the paused current line coincide -- an error is the more
+   urgent signal, so it must read as a distinct color, not the same grey
+   band both `-current` classes share. */
+.gutter-error {
+    background: #4b1f1f;
+    color: #f14c4c;
+    font-weight: bold;
+}
+
+.overlay-error {
+    background: rgba(241, 76, 76, 0.18);
+}
+
 .overlay,
 .source-input {
     position: absolute;
@@ -335,6 +364,14 @@ main {
 
 .tok-keyword {
     color: #569cd6;
+}
+
+/* An unrecognized mnemonic (the token right after a label) -- distinct
+   from every other token class and from unstyled text, so a misspelling
+   reads as wrong rather than merely uncolored. */
+.tok-unknown-mnemonic {
+    color: #f14c4c;
+    text-decoration: underline wavy;
 }
 
 /* Output pane: the program's captured stdout/stderr/diagnostic output,

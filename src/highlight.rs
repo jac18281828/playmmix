@@ -17,6 +17,12 @@ pub enum TokenKind {
     Register,
     Label,
     Keyword,
+    /// A non-keyword token in the mnemonic slot -- immediately after a
+    /// recognized label, with nothing else between -- so a misspelled
+    /// mnemonic reads as distinctly wrong rather than losing its
+    /// syntax-highlight color like a legitimate unstyled operand. See
+    /// `classify`'s `mnemonic_slot` tracking.
+    UnknownMnemonic,
 }
 
 impl TokenKind {
@@ -29,6 +35,7 @@ impl TokenKind {
             TokenKind::Register => "tok-register",
             TokenKind::Label => "tok-label",
             TokenKind::Keyword => "tok-keyword",
+            TokenKind::UnknownMnemonic => "tok-unknown-mnemonic",
         }
     }
 }
@@ -72,12 +79,12 @@ static KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "cswapi", "csz", "cszi", "debug", "div", "divi", "divu", "divui", "fadd", "fcmp", "fcmpe",
         "fdiv", "feql", "feqle", "fint", "fix", "fixu", "flot", "floti", "flotu", "flotui", "fmul",
         "frem", "fsqrt", "fsub", "fun", "fune", "get", "geta", "getab", "go", "goi", "greg",
-        "halt", "inch", "incl", "incmh", "incml", "is", "je", "jg", "jl", "jmp", "jne", "lda",
-        "ldai", "ldb", "ldbi", "ldbu", "ldbui", "ldht", "ldhti", "ldo", "ldoi", "ldou", "ldoui",
-        "ldsf", "ldsfi", "ldt", "ldti", "ldtu", "ldtui", "ldunc", "ldunci", "ldvts", "ldvtsi",
-        "ldw", "ldwi", "ldwu", "ldwui", "loc", "mor", "mori", "mul", "muli", "mulu", "mului",
-        "mux", "muxi", "mxor", "mxori", "nand", "nandi", "neg", "negi", "negu", "negui", "nor",
-        "nori", "nxor", "nxori", "octa", "odif", "odifi", "or", "orh", "ori", "orl", "ormh",
+        "halt", "inch", "incl", "incmh", "incml", "is", "je", "jg", "jl", "jmp", "jmpb", "jne",
+        "lda", "ldai", "ldb", "ldbi", "ldbu", "ldbui", "ldht", "ldhti", "ldo", "ldoi", "ldou",
+        "ldoui", "ldsf", "ldsfi", "ldt", "ldti", "ldtu", "ldtui", "ldunc", "ldunci", "ldvts",
+        "ldvtsi", "ldw", "ldwi", "ldwu", "ldwui", "loc", "mor", "mori", "mul", "muli", "mulu",
+        "mului", "mux", "muxi", "mxor", "mxori", "nand", "nandi", "neg", "negi", "negu", "negui",
+        "nor", "nori", "nxor", "nxori", "octa", "odif", "odifi", "or", "orh", "ori", "orl", "ormh",
         "orml", "orn", "orni", "pbev", "pbevb", "pbn", "pbnb", "pbnn", "pbnnb", "pbnp", "pbnpb",
         "pbnz", "pbnzb", "pbod", "pbodb", "pbp", "pbpb", "pbz", "pbzb", "pop", "prefix", "prego",
         "pregoi", "preld", "preldi", "prest", "presti", "pushgo", "pushgoi", "pushj", "pushjb",
@@ -104,6 +111,13 @@ pub fn classify(line: &str) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut chars = line.char_indices().peekable();
     let mut first_token_seen = false;
+    // Set when a `Label` span was just pushed, with nothing else between it
+    // and here: the one unambiguous slot an unrecognized mnemonic can be
+    // flagged in. Cleared by any other span (string, char, register,
+    // comment) or by consuming the next identifier, whichever comes first
+    // -- so a string, char, or register token between a label and the next
+    // identifier correctly takes the mnemonic slot away.
+    let mut mnemonic_slot = false;
 
     while let Some((i, c)) = chars.next() {
         match c {
@@ -133,6 +147,7 @@ pub fn classify(line: &str) -> Vec<Span> {
                     end,
                     kind: TokenKind::String,
                 });
+                mnemonic_slot = false;
             }
             // char_literal: 'x' or '\n' | '\r' | '\t' | '\0' | '\\' | '\''.
             // The grammar requires a closing '\''; without one this is not
@@ -159,6 +174,7 @@ pub fn classify(line: &str) -> Vec<Span> {
                         end,
                         kind: TokenKind::Char,
                     });
+                    mnemonic_slot = false;
                 }
             }
             // register_num: '$' followed by one or more digits.
@@ -179,6 +195,7 @@ pub fn classify(line: &str) -> Vec<Span> {
                         end,
                         kind: TokenKind::Register,
                     });
+                    mnemonic_slot = false;
                 }
             }
             // Identifier-shaped token: a directive keyword may carry a
@@ -198,19 +215,38 @@ pub fn classify(line: &str) -> Vec<Span> {
                 // instruction, then label_def: the first token on a line is
                 // a label unless it names a keyword. Every later keyword
                 // match (the mnemonic after a label, or a directive name)
-                // still gets `.tok-keyword`; later non-keyword identifiers
-                // (operands, symbolic register names) are left unstyled.
+                // still gets `.tok-keyword`; a non-keyword identifier right
+                // after a label is the unrecognized-mnemonic slot; any
+                // other later non-keyword identifier (an operand, a
+                // symbolic register name) is left unstyled, exactly as
+                // before.
                 if !first_token_seen {
                     first_token_seen = true;
+                    if keyword {
+                        spans.push(Span {
+                            start: i,
+                            end,
+                            kind: TokenKind::Keyword,
+                        });
+                    } else {
+                        spans.push(Span {
+                            start: i,
+                            end,
+                            kind: TokenKind::Label,
+                        });
+                        mnemonic_slot = true;
+                    }
+                } else if mnemonic_slot {
                     spans.push(Span {
                         start: i,
                         end,
                         kind: if keyword {
                             TokenKind::Keyword
                         } else {
-                            TokenKind::Label
+                            TokenKind::UnknownMnemonic
                         },
                     });
+                    mnemonic_slot = false;
                 } else if keyword {
                     spans.push(Span {
                         start: i,
@@ -354,5 +390,56 @@ mod tests {
                 .map(|s| span_text(line, s)),
             Some(".BYTE")
         );
+    }
+
+    #[test]
+    fn jmpb_is_a_recognized_keyword_after_a_label() {
+        // A real, working mnemonic (verified against the pinned checksmix)
+        // that was missing from KEYWORDS -- without this entry, finding
+        // 10's new UnknownMnemonic branch would flag valid code.
+        let line = "Main\tJMPB\tLoop";
+        let spans = classify(line);
+        assert_eq!(
+            spans
+                .iter()
+                .find(|s| s.kind == TokenKind::Keyword)
+                .map(|s| span_text(line, s)),
+            Some("JMPB")
+        );
+        assert!(!spans.iter().any(|s| s.kind == TokenKind::UnknownMnemonic));
+    }
+
+    #[test]
+    fn unrecognized_mnemonic_right_after_a_label_is_flagged() {
+        let line = "Main\tADDD\t$1,$2,$3";
+        let spans = classify(line);
+        assert_eq!(
+            spans
+                .iter()
+                .find(|s| s.kind == TokenKind::UnknownMnemonic)
+                .map(|s| span_text(line, s)),
+            Some("ADDD")
+        );
+    }
+
+    #[test]
+    fn unrecognized_word_deep_in_operand_position_is_unstyled() {
+        // The same unrecognized word, three tokens in -- a plain operand
+        // position, not the mnemonic slot -- must produce no span at all,
+        // unchanged from before finding 10's fix.
+        let line = "Main\tSET\t$1,ADDD";
+        let spans = classify(line);
+        assert!(!spans.iter().any(|s| s.kind == TokenKind::UnknownMnemonic));
+        assert!(!spans.iter().any(|s| span_text(line, s) == "ADDD"));
+    }
+
+    #[test]
+    fn a_string_between_a_label_and_the_next_word_clears_the_mnemonic_slot() {
+        // A label, then a quoted string, then an unrecognized word: the
+        // word is not actually in the mnemonic slot, so it must not be
+        // flagged.
+        let line = r#"Main "foo" ADDD"#;
+        let spans = classify(line);
+        assert!(!spans.iter().any(|s| s.kind == TokenKind::UnknownMnemonic));
     }
 }

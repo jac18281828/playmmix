@@ -28,6 +28,11 @@ pub struct EditorProps {
     /// The line the paused machine's PC maps to, if any. `None` while
     /// running, since nothing should visibly track a moving PC mid-chunk.
     pub current_line: Option<usize>,
+    /// The line a parsed assembly-error location names, if the error text
+    /// carried one (`main.rs`'s `parse_error_location`). Independent of
+    /// `current_line`: an error can exist whether or not the machine has
+    /// ever run.
+    pub error_line: Option<usize>,
     pub on_toggle_breakpoint: Callback<usize>,
 }
 
@@ -98,20 +103,33 @@ impl Component for Editor {
 
         let breakpoints = ctx.props().breakpoints.clone();
         let current_line = ctx.props().current_line;
+        let error_line = ctx.props().error_line;
         let on_toggle_breakpoint = ctx.props().on_toggle_breakpoint.clone();
 
         let gutter_rows: Html = lines
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                render_gutter_row(i + 1, &breakpoints, current_line, &on_toggle_breakpoint)
+                render_gutter_row(
+                    i + 1,
+                    &breakpoints,
+                    current_line,
+                    error_line,
+                    &on_toggle_breakpoint,
+                )
             })
             .collect();
 
         let overlay_rows: Html = lines
             .iter()
             .enumerate()
-            .map(|(i, line)| render_line(line, overlay_row_is_current(i, current_line)))
+            .map(|(i, line)| {
+                render_line(
+                    line,
+                    overlay_row_is_current(i, current_line),
+                    overlay_row_is_error(i, error_line),
+                )
+            })
             .collect();
 
         let oninput = ctx.link().callback(|_: InputEvent| EditorMsg::Input);
@@ -165,6 +183,7 @@ fn render_gutter_row(
     line: usize,
     breakpoints: &BTreeSet<usize>,
     current_line: Option<usize>,
+    error_line: Option<usize>,
     on_toggle_breakpoint: &Callback<usize>,
 ) -> Html {
     let mut class = classes!("gutter-line");
@@ -173,6 +192,9 @@ fn render_gutter_row(
     }
     if current_line == Some(line) {
         class.push("gutter-current");
+    }
+    if error_line == Some(line) {
+        class.push("gutter-error");
     }
     let on_toggle_breakpoint = on_toggle_breakpoint.clone();
     let onclick = Callback::from(move |_: MouseEvent| on_toggle_breakpoint.emit(line));
@@ -321,21 +343,35 @@ fn overlay_row_is_current(i: usize, current_line: Option<usize>) -> bool {
     current_line == Some(i + 1)
 }
 
+/// Whether the overlay's zero-based row `i` (source line `i + 1`) carries a
+/// parsed assembly-error location -- `overlay_row_is_current`'s twin for
+/// `error_line`.
+fn overlay_row_is_error(i: usize, error_line: Option<usize>) -> bool {
+    error_line == Some(i + 1)
+}
+
 /// `.overlay-line`, plus `.overlay-current` when this line carries the
 /// paused machine's current line -- a full-width background band, additive
 /// alongside the gutter's own `gutter-current` marker (defect 4 is
-/// specifically that the gutter-only marker is too easy to miss).
-fn overlay_line_class(is_current: bool) -> Classes {
+/// specifically that the gutter-only marker is too easy to miss) -- and
+/// `.overlay-error` when it carries a parsed error location. Both classes
+/// can apply to the same line; `.overlay-error`'s own rule (`style.css`,
+/// declared after `.overlay-current`) wins that tie, since an error is the
+/// more urgent signal.
+fn overlay_line_class(is_current: bool, is_error: bool) -> Classes {
     let mut class = classes!("overlay-line");
     if is_current {
         class.push("overlay-current");
+    }
+    if is_error {
+        class.push("overlay-error");
     }
     class
 }
 
 /// Render one source line as the overlay's colored spans. Untagged gaps
 /// between spans render in the overlay's default text color.
-fn render_line(line: &str, is_current: bool) -> Html {
+fn render_line(line: &str, is_current: bool, is_error: bool) -> Html {
     let children: Vec<Html> = line_pieces(line)
         .into_iter()
         .map(|piece| {
@@ -347,7 +383,7 @@ fn render_line(line: &str, is_current: bool) -> Html {
         })
         .collect();
 
-    html! { <span class={overlay_line_class(is_current)}>{ for children }</span> }
+    html! { <span class={overlay_line_class(is_current, is_error)}>{ for children }</span> }
 }
 
 #[cfg(test)]
@@ -457,9 +493,25 @@ mod tests {
         let current_line = Some(2);
         let line_numbers = [1, 2, 3];
         for line in line_numbers {
-            let class = overlay_line_class(current_line == Some(line));
+            let class = overlay_line_class(current_line == Some(line), false);
             assert_eq!(class.contains("overlay-current"), line == 2, "line {line}");
         }
+    }
+
+    #[test]
+    fn overlay_error_line_gets_the_class_only_on_that_line() {
+        let error_line = Some(3);
+        let line_numbers = [1, 2, 3];
+        for line in line_numbers {
+            let class = overlay_line_class(false, error_line == Some(line));
+            assert_eq!(class.contains("overlay-error"), line == 3, "line {line}");
+        }
+    }
+
+    #[test]
+    fn overlay_line_class_carries_both_when_current_and_error_coincide() {
+        let class = overlay_line_class(true, true);
+        assert!(class.contains("overlay-current") && class.contains("overlay-error"));
     }
 
     #[test]
@@ -469,6 +521,14 @@ mod tests {
         let current_line = Some(2);
         for i in 0..4 {
             assert_eq!(overlay_row_is_current(i, current_line), i == 1, "row {i}");
+        }
+    }
+
+    #[test]
+    fn overlay_row_is_error_maps_zero_based_row_to_one_based_line() {
+        let error_line = Some(2);
+        for i in 0..4 {
+            assert_eq!(overlay_row_is_error(i, error_line), i == 1, "row {i}");
         }
     }
 }

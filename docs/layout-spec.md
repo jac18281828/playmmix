@@ -88,9 +88,9 @@ Reset:
 
 | state    | Run | Step | Step Over | Stop | Reset | label     |
 |----------|-----|------|-----------|------|-------|-----------|
-| ready    | ✓   | ✓    | ✓         | –    | ✓     | `stopped` |
+| ready    | ✓   | ✓    | ✓         | ✓    | ✓     | `stopped` |
 | running  | –   | –    | –         | ✓    | –     | `running` |
-| paused   | ✓   | ✓    | ✓         | –    | ✓     | `paused`  |
+| paused   | ✓   | ✓    | ✓         | ✓    | ✓     | `paused`  |
 | halted   | ✓   | –    | –         | –    | ✓     | `halted`  |
 
 - **Reset** re-runs `Control::reload` on the current source: fresh machine at
@@ -104,6 +104,13 @@ Reset:
   label so the state line distinguishes "never ran" from "stopped mid-run".
 - The halted state additionally shows `exit N` in the machine status line,
   as today.
+- **Stop** is clickable in every state but `halted` — there is nothing left
+  to interrupt once halted, but `ready`/`paused` (nothing running yet, or a
+  run paused mid-program) are exactly the states a user is most likely to
+  want to bail from. It is a no-op in `ready`/`paused`: only `running` has
+  anything to actually interrupt. Stop and Reset overlap in `ready`/
+  `paused`; each is the sole live control in exactly one state (Stop in
+  `running`, Reset in `halted`).
 
 ## Output pane
 

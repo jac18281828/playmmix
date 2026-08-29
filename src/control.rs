@@ -682,10 +682,14 @@ pub fn control_enablement(running: bool, halted: bool, has_error: bool) -> Contr
         run_disabled: running,
         step_disabled: running || halted,
         step_over_disabled: running || halted,
-        stop_disabled: !running,
-        // Reset shares Run's running-only gate, so it is available in
-        // every state Stop is not -- the "play again" control stays
-        // reachable whether the machine is ready, paused, or halted.
+        // Stop stays clickable in `ready` and `paused` too, not just
+        // `running`: there is nothing left to interrupt once halted, but a
+        // paused run is exactly the state a user is most likely to want to
+        // bail from. Reset shares this same gate on the other side --
+        // `ready`/`paused`/`halted` -- so the two overlap in `ready`/
+        // `paused` and each is the sole live control in exactly one state:
+        // Stop alone in `running`, Reset alone in `halted`.
+        stop_disabled: halted,
         reset_disabled: running,
     }
 }
@@ -1334,8 +1338,8 @@ mod tests {
         // (running, halted, has_error) -> disabled state for every control.
         let cases = [
             // (running, halted, has_error, run, step, step_over, stop, reset)
-            (false, false, false, false, false, false, true, false), // ready
-            (true, false, false, true, true, true, false, true),     // running
+            (false, false, false, false, false, false, false, false), // ready
+            (true, false, false, true, true, true, false, true),      // running
             // paused is (running=false, halted=false) after having advanced --
             // has_advanced doesn't affect enablement, only the label, so
             // "ready" and "paused" share one row here.

@@ -757,19 +757,19 @@ pub fn machine_pane(props: &MachinePaneProps) -> Html {
     html! {
         <div class="machine-pane">
             <div class="machine-status">
-                <span>{ format!("PC 0x{:016X}", props.pc) }</span>
-                <span>{ format!("call depth {}", props.call_depth) }</span>
-                { for props.exit_code.map(|code| html! { <span>{ format!("exit {code}") }</span> }) }
+                <span title="Program counter: the address of the next instruction to execute.">{ format!("PC 0x{:016X}", props.pc) }</span>
+                <span title="How many nested subroutine calls (PUSHJ) are active. Each call gets its own window onto the local registers -- $0 inside a call is not the same storage as $0 before it, by design.">{ format!("call depth {}", props.call_depth) }</span>
+                { for props.exit_code.map(|code| html! { <span title="The value TRAP 0,Halt,0 reads from $255 when the program halts -- not from the instruction's own written operand.">{ format!("exit {code}") }</span> }) }
             </div>
             <div class="registers-scroll">
                 <section class="registers">
-                    <h2>{ "Registers" }</h2>
+                    <h2 title="General-purpose registers. $0 up to rL are local to the current call frame; rG upward are global.">{ "Registers" }</h2>
                     <div class="register-grid">
                         { for props.registers.iter().map(|row| render_register_row(row, &props.changed_registers)) }
                     </div>
                 </section>
                 <section class="specials">
-                    <h2>{ "Special registers" }</h2>
+                    <h2 title="CPU state registers -- see each one's own name below.">{ "Special registers" }</h2>
                     <div class="register-grid">
                         { for props.specials.iter().map(|row| render_special_row(row, &props.changed_specials)) }
                     </div>
@@ -827,6 +827,24 @@ fn render_register_row(row: &RegisterRow, changed: &BTreeSet<u8>) -> Html {
     }
 }
 
+/// Hover text for each of the six [`PINNED_SPECIALS`], keyed by their
+/// `rX` display name. `None` for any other special (`visible_specials`
+/// only ever adds a name here for a pinned one, so this never needs to
+/// answer for the rest of the ~30 MMIX specials).
+fn pinned_special_title(name: &str) -> Option<&'static str> {
+    match name {
+        "rA" => Some("Arithmetic status: sticky exception flags."),
+        "rG" => Some(
+            "Global threshold: registers at or above this number are global, not local to a call.",
+        ),
+        "rL" => Some("Local register count: how many of the current frame's registers are in use."),
+        "rO" => Some("Register stack offset."),
+        "rS" => Some("Register stack pointer."),
+        "rJ" => Some("Return address: where the matching POP will jump to."),
+        _ => None,
+    }
+}
+
 fn render_special_row(row: &SpecialRegisterRow, changed: &BTreeSet<String>) -> Html {
     let is_changed = changed.contains(&row.name);
     let mut hex_class = classes!("reg-hex");
@@ -835,9 +853,10 @@ fn render_special_row(row: &SpecialRegisterRow, changed: &BTreeSet<String>) -> H
         hex_class.push("changed");
         dec_class.push("changed");
     }
+    let title = pinned_special_title(&row.name);
     html! {
         <div class="register-row">
-            <span class="reg-name">{ &row.name }</span>
+            <span class="reg-name" title={title}>{ &row.name }</span>
             <span class={hex_class}>{ format!("0x{:016X}", row.value) }</span>
             <span class={dec_class}>{ (row.value as i64).to_string() }</span>
         </div>
