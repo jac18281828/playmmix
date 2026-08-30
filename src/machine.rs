@@ -1596,6 +1596,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_pinned_special_has_a_hover_title_keyed_by_its_display_name() {
+        for reg in PINNED_SPECIALS {
+            let name = special_reg_name(reg);
+            assert!(
+                pinned_special_title(&name).is_some(),
+                "pinned_special_title has no entry for {name:?} ({reg:?}) -- \
+                 a rename of special_reg_name's output would silently drop \
+                 this register's tooltip with no compile error"
+            );
+        }
+    }
+
     /// No `GREG` at all, and the only register it touches is `$40` -- above
     /// `rG`'s default of 32, so `set_register` never grows `rL` and
     /// `register_included`'s `i < rL` clause can't keep `$40` visible on

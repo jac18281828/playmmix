@@ -553,7 +553,6 @@ version = "0.1.6"
 dependencies = [
  "checksmix",
  "gloo-timers",
- "js-sys",
  "log",
  "wasm-bindgen",
  "wasm-logger",

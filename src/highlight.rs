@@ -113,10 +113,12 @@ pub fn classify(line: &str) -> Vec<Span> {
     let mut first_token_seen = false;
     // Set when a `Label` span was just pushed, with nothing else between it
     // and here: the one unambiguous slot an unrecognized mnemonic can be
-    // flagged in. Cleared by any other span (string, char, register,
-    // comment) or by consuming the next identifier, whichever comes first
-    // -- so a string, char, or register token between a label and the next
-    // identifier correctly takes the mnemonic slot away.
+    // flagged in. Cleared by any other span (string, char, register) or by
+    // consuming the next identifier, whichever comes first -- so a string,
+    // char, or register token between a label and the next identifier
+    // correctly takes the mnemonic slot away. A comment ends the line
+    // outright (the loop `break`s), so there is no later span for the flag
+    // to affect either way.
     let mut mnemonic_slot = false;
 
     while let Some((i, c)) = chars.next() {
@@ -439,6 +441,20 @@ mod tests {
         // word is not actually in the mnemonic slot, so it must not be
         // flagged.
         let line = r#"Main "foo" ADDD"#;
+        let spans = classify(line);
+        assert!(!spans.iter().any(|s| s.kind == TokenKind::UnknownMnemonic));
+    }
+
+    #[test]
+    fn a_char_literal_between_a_label_and_the_next_word_clears_the_mnemonic_slot() {
+        let line = "Main 'a' ADDD";
+        let spans = classify(line);
+        assert!(!spans.iter().any(|s| s.kind == TokenKind::UnknownMnemonic));
+    }
+
+    #[test]
+    fn a_register_between_a_label_and_the_next_word_clears_the_mnemonic_slot() {
+        let line = "Main $1 ADDD";
         let spans = classify(line);
         assert!(!spans.iter().any(|s| s.kind == TokenKind::UnknownMnemonic));
     }

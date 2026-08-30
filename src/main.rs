@@ -1421,6 +1421,13 @@ mod tests {
             changed_after_step.contains(&1),
             "the step must flag $1 as changed: {changed_after_step:?}"
         );
+        // `SETL $1,7` also grows `rL` (from `$1 < rG`'s default of 32), so
+        // this fixture exercises the specials side of the diff too.
+        let changed_specials_after_step = view_state.changed_specials().clone();
+        assert!(
+            changed_specials_after_step.contains("rL"),
+            "the step must flag rL as changed: {changed_specials_after_step:?}"
+        );
 
         // Stop, while paused with nothing having moved since that boundary,
         // must leave the changed set exactly as it was -- reverting the
@@ -1432,6 +1439,11 @@ mod tests {
             view_state.changed_registers(),
             &changed_after_step,
             "an inert Stop must not touch the changed-registers set"
+        );
+        assert_eq!(
+            view_state.changed_specials(),
+            &changed_specials_after_step,
+            "an inert Stop must not touch the changed-specials set"
         );
     }
 
