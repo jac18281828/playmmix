@@ -1040,27 +1040,29 @@ impl Component for App {
                 if !self.flush_pending_reassemble() {
                     return true;
                 }
-                // Run while halted is Reset then Run -- the "play again"
-                // affordance, one click to replay from the top.
-                if self.control.is_halted() {
-                    self.reload_source();
-                    if self.error.is_some() {
-                        return true;
+                if !self.control.is_running() {
+                    // Run while halted is Reset then Run -- the "play again"
+                    // affordance, one click to replay from the top.
+                    if self.control.is_halted() {
+                        self.reload_source();
+                        if self.error.is_some() {
+                            return true;
+                        }
                     }
+                    self.view_state.clear_changed();
+                    self.control.start_run();
+                    self.view_state.observe(&self.control);
+                    if self.control.is_running() {
+                        self.schedule_chunk_tick(ctx);
+                    }
+                    // Fresh or replay-from-halt both read the same: no
+                    // "Restarted" status distinct from plain Running -- a
+                    // Msg::Run while halted reloads and then schedules a
+                    // chunk tick exactly like a fresh run, and that first
+                    // tick's BudgetExhausted branch would overwrite anything
+                    // more specific one event-loop turn later anyway.
+                    self.status_message = "Running";
                 }
-                self.view_state.clear_changed();
-                self.control.start_run();
-                self.view_state.observe(&self.control);
-                if self.control.is_running() {
-                    self.schedule_chunk_tick(ctx);
-                }
-                // Fresh or replay-from-halt both read the same: no
-                // "Restarted" status distinct from plain Running -- a
-                // Msg::Run while halted reloads and then schedules a chunk
-                // tick exactly like a fresh run, and that first tick's
-                // BudgetExhausted branch would overwrite anything more
-                // specific one event-loop turn later anyway.
-                self.status_message = "Running";
                 true
             }
             Msg::Step => {

@@ -1487,6 +1487,14 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_shortcut_for_does_not_lowercase_shift_held_keys() {
+        // `key()` reports Shift-held letters in uppercase; matching only the
+        // lowercase form is what keeps Shift+S from firing Step Over.
+        let enablement = control_enablement(false, false, false);
+        assert_eq!(keyboard_shortcut_for("S", false, false, enablement), None);
+    }
+
+    #[test]
     fn run_state_label_matches_every_reachable_state() {
         // running && halted cannot occur.
         let cases = [
