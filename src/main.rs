@@ -715,10 +715,11 @@ fn install_keyboard_shortcuts(
     let enablement = Rc::new(Cell::new(control_enablement(false, false, false)));
     let enablement_for_handler = enablement.clone();
     let handler = Closure::wrap(Box::new(move |event: KeyboardEvent| {
+        let key = event.key();
         // Checked before the text-input bail-out below, unlike the other
         // four shortcuts: Ctrl-S's only realistic use is while typing in
         // the source editor, so it must fire regardless of focus.
-        if save_shortcut(&event.key(), event.ctrl_key() || event.meta_key()) {
+        if save_shortcut(&key, event.ctrl_key() || event.meta_key()) {
             event.prevent_default();
             link.send_message(Msg::FlushSource);
             return;
@@ -730,7 +731,7 @@ fn install_keyboard_shortcuts(
             .map(|element| matches!(element.tag_name().as_str(), "TEXTAREA" | "INPUT"))
             .unwrap_or(false);
         let shortcut = keyboard_shortcut_for(
-            &event.key(),
+            &key,
             modifier_held,
             focused_element_is_text_input,
             enablement_for_handler.get(),
