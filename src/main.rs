@@ -806,10 +806,16 @@ fn reload_and_record(
 /// before reloading, so `Msg::ReassembleSource` cannot also fire afterward
 /// and reset `view_state` a second time. Returns whether anything was
 /// pending; a `false` return is a genuine no-op, not a failure.
+///
+/// `debounce_timeout` and `chunk_timeout` are deliberately not adjacent
+/// parameters -- both are `&mut Option<Timeout>`, and a swap between two
+/// same-typed neighbors compiles silently. A real `Timeout` can't be
+/// constructed off the wasm target to test this directly (`Timeout::new`
+/// aborts the process on the host), so this ordering is the mitigation.
 fn flush_pending_source(
     debounce_timeout: &mut Option<Timeout>,
-    chunk_timeout: &mut Option<Timeout>,
     control: &mut Control,
+    chunk_timeout: &mut Option<Timeout>,
     source: &str,
     error: &mut Option<String>,
     error_line: &mut Option<usize>,
@@ -1195,8 +1201,8 @@ impl Component for App {
             Msg::FlushSource => {
                 let flushed = flush_pending_source(
                     &mut self.debounce_timeout,
-                    &mut self.chunk_timeout,
                     &mut self.control,
+                    &mut self.chunk_timeout,
                     &self.source,
                     &mut self.error,
                     &mut self.error_line,
@@ -1620,7 +1626,31 @@ mod tests {
         let mut control = Control::new(WRITES_REGISTER_MMS, "flush.mms").expect("assembles");
         let mut view_state = ViewState::new();
         view_state.reset(&control);
+
+        // Advance the machine and record a pause boundary first, so the
+        // baseline below is provably non-empty -- mirrors
+        // `stop_if_running_is_a_true_no_op_while_paused`, and for the same
+        // reason: a freshly-reset empty baseline can't distinguish "nothing
+        // happened" from "view_state got reset a second time", which is
+        // exactly the bug this function exists to prevent (a swallowed
+        // second `view_state.reset()` if the pending debounce timer weren't
+        // dropped).
+        assert_eq!(control.step(), StepOutcome::Advanced);
+        assert!(!control.is_running(), "a plain Step never sets running");
+        view_state.observe(&control);
+        view_state.record_pause_boundary(&control);
         let changed_registers_before = view_state.changed_registers().clone();
+        assert!(
+            changed_registers_before.contains(&1),
+            "the step must flag $1 as changed: {changed_registers_before:?}"
+        );
+        // `SETL $1,7` also grows `rL` (from `$1 < rG`'s default of 32), so
+        // this fixture exercises the specials side of the diff too.
+        let changed_specials_before = view_state.changed_specials().clone();
+        assert!(
+            changed_specials_before.contains("rL"),
+            "the step must flag rL as changed: {changed_specials_before:?}"
+        );
 
         // Nothing pending, the case `save_shortcut`'s unit test alone
         // cannot cover since it never sees `debounce_timeout`: this must
@@ -1632,8 +1662,8 @@ mod tests {
         let mut error_line: Option<usize> = None;
         assert!(!flush_pending_source(
             &mut debounce_timeout,
-            &mut chunk_timeout,
             &mut control,
+            &mut chunk_timeout,
             WRITES_REGISTER_MMS,
             &mut error,
             &mut error_line,
@@ -1647,7 +1677,12 @@ mod tests {
         assert_eq!(
             view_state.changed_registers(),
             &changed_registers_before,
-            "a no-op flush must not touch view_state"
+            "a no-op flush must not touch the changed-registers set"
+        );
+        assert_eq!(
+            view_state.changed_specials(),
+            &changed_specials_before,
+            "a no-op flush must not touch the changed-specials set"
         );
     }
 
