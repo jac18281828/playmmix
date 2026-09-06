@@ -16,7 +16,7 @@ mod machine;
 
 use control::{
     Control, ControlBar, ControlEnablement, KeyboardShortcut, StepOutcome, control_enablement,
-    keyboard_shortcut_for, yield_to_event_loop,
+    keyboard_shortcut_for, save_shortcut, yield_to_event_loop,
 };
 use editor::Editor;
 use examples::DEFAULT_MMS;
@@ -33,7 +33,7 @@ const SOURCE_FILENAME: &str = "source.mms";
 /// `ADDI $1, ` mid-operand) doesn't flash "Assembly error" on every
 /// character. Long enough to cover ordinary inter-keystroke gaps, short
 /// enough that a genuine pause still reads as immediate.
-const SOURCE_DEBOUNCE_MS: u32 = 500;
+const SOURCE_DEBOUNCE_MS: u32 = 400;
 
 /// MIX-only opcodes: mnemonics classic MIX has but MMIXAL doesn't, so their
 /// presence as a whole token is a strong signal the pasted source is MIX,
@@ -697,11 +697,15 @@ fn install_beforeunload_handler() -> (Rc<RefCell<bool>>, BeforeUnloadHandler) {
 /// as the handler should stay registered, same as [`BeforeUnloadHandler`].
 type KeydownHandler = Closure<dyn FnMut(KeyboardEvent)>;
 
-/// Registers `window.onkeydown`: on a bare keypress (no Ctrl/Cmd/Alt) outside
-/// a text-entry element, dispatches the `Msg` `keyboard_shortcut_for` maps
-/// the key to, gated by the returned cell's current `ControlEnablement` --
-/// kept live by `App::rendered`, not recomputed here. Seeded with the ready
-/// state (`control_enablement(false, false, false)`), matching a
+/// Registers `window.onkeydown`. Ctrl-S / Cmd-S (`save_shortcut`) dispatches
+/// `Msg::FlushSource` and suppresses the browser's Save dialog regardless of
+/// focus, checked first since it is the one shortcut that must fire while a
+/// text-entry element is focused. Otherwise, on a bare keypress (no
+/// Ctrl/Cmd/Alt) outside a text-entry element, dispatches the `Msg`
+/// `keyboard_shortcut_for` maps the key to, gated by the returned cell's
+/// current `ControlEnablement` -- kept live by `App::rendered`, not
+/// recomputed here. Seeded with the ready state
+/// (`control_enablement(false, false, false)`), matching a
 /// freshly-constructed `Control`. Returns the shared cell alongside the
 /// `Closure` backing the handler; the caller must keep the latter alive (see
 /// [`KeydownHandler`]).
@@ -711,6 +715,14 @@ fn install_keyboard_shortcuts(
     let enablement = Rc::new(Cell::new(control_enablement(false, false, false)));
     let enablement_for_handler = enablement.clone();
     let handler = Closure::wrap(Box::new(move |event: KeyboardEvent| {
+        // Checked before the text-input bail-out below, unlike the other
+        // four shortcuts: Ctrl-S's only realistic use is while typing in
+        // the source editor, so it must fire regardless of focus.
+        if save_shortcut(&event.key(), event.ctrl_key() || event.meta_key()) {
+            event.prevent_default();
+            link.send_message(Msg::FlushSource);
+            return;
+        }
         let modifier_held = event.ctrl_key() || event.meta_key() || event.alt_key();
         let focused_element_is_text_input = event
             .target()
@@ -760,6 +772,64 @@ fn stop_if_running(control: &mut Control, view_state: &mut ViewState) -> bool {
     true
 }
 
+/// Cancel any pending chunk tick and reload `source` into `control`,
+/// recording the resulting success or parse error -- the sequence
+/// `App::reload_source` always runs, factored out so it can also run
+/// unconditionally as part of a caller-checked flush.
+fn reload_and_record(
+    chunk_timeout: &mut Option<Timeout>,
+    control: &mut Control,
+    source: &str,
+    error: &mut Option<String>,
+    error_line: &mut Option<usize>,
+    view_state: &mut ViewState,
+) {
+    *chunk_timeout = None;
+    match control.reload(source) {
+        Ok(()) => {
+            *error = None;
+            *error_line = None;
+            view_state.reset(control);
+        }
+        Err(err) => {
+            *error_line = parse_error_location(&err).map(|(line, _)| line);
+            *error = Some(describe_source_error(source, &err));
+        }
+    }
+}
+
+/// `Msg::FlushSource`'s core logic, factored out for the same reason
+/// `stop_if_running` is: testable without a live `Context`. Ctrl-S's whole
+/// reason to exist is the window before `SOURCE_DEBOUNCE_MS` catches up on
+/// its own, so this only acts when a debounce is actually pending --
+/// dropping it (which cancels the pending `setTimeout`, `Timeout`'s `Drop`)
+/// before reloading, so `Msg::ReassembleSource` cannot also fire afterward
+/// and reset `view_state` a second time. Returns whether anything was
+/// pending; a `false` return is a genuine no-op, not a failure.
+fn flush_pending_source(
+    debounce_timeout: &mut Option<Timeout>,
+    chunk_timeout: &mut Option<Timeout>,
+    control: &mut Control,
+    source: &str,
+    error: &mut Option<String>,
+    error_line: &mut Option<usize>,
+    view_state: &mut ViewState,
+) -> bool {
+    if debounce_timeout.is_none() {
+        return false;
+    }
+    *debounce_timeout = None;
+    reload_and_record(
+        chunk_timeout,
+        control,
+        source,
+        error,
+        error_line,
+        view_state,
+    );
+    true
+}
+
 pub enum Msg {
     SourceChanged(String),
     /// Fires once `SOURCE_DEBOUNCE_MS` has passed with no further
@@ -767,6 +837,9 @@ pub enum Msg {
     /// `self.error` accordingly. Carries no payload: `self.source` is
     /// already current by the time this arrives.
     ReassembleSource,
+    /// Ctrl-S / Cmd-S: flush a pending debounced re-assemble immediately.
+    /// A no-op when nothing is pending -- see `flush_pending_source`.
+    FlushSource,
     ToggleBreakpoint(usize),
     Run,
     Step,
@@ -911,25 +984,21 @@ impl App {
     /// state. On a parse error, `reload` already leaves the previous
     /// machine and everything else untouched, so only `self.error` moves.
     fn reload_source(&mut self) {
-        self.chunk_timeout = None;
         self.debounce_timeout = None;
-        match self.control.reload(&self.source) {
-            Ok(()) => {
-                self.error = None;
-                self.error_line = None;
-                self.view_state.reset(&self.control);
-            }
-            Err(error) => {
-                self.error_line = parse_error_location(&error).map(|(line, _)| line);
-                self.error = Some(describe_source_error(&self.source, &error));
-            }
-        }
+        reload_and_record(
+            &mut self.chunk_timeout,
+            &mut self.control,
+            &self.source,
+            &mut self.error,
+            &mut self.error_line,
+            &mut self.view_state,
+        );
     }
 
     /// Flush a debounced re-assemble that hasn't fired yet, so Run, Step,
     /// and Step Over can never execute a program older than `self.source`
-    /// -- `SOURCE_DEBOUNCE_MS` otherwise leaves up to half a second where
-    /// every control still reads enabled against the stale prior program.
+    /// -- `SOURCE_DEBOUNCE_MS` otherwise leaves a window where every
+    /// control still reads enabled against the stale prior program.
     /// Returns whether the caller may proceed: `false` once the flush
     /// surfaces a parse error, since the edit that is pending is not a
     /// program that can run.
@@ -1122,6 +1191,25 @@ impl Component for App {
                     self.status_message = "Reset";
                 }
                 true
+            }
+            Msg::FlushSource => {
+                let flushed = flush_pending_source(
+                    &mut self.debounce_timeout,
+                    &mut self.chunk_timeout,
+                    &mut self.control,
+                    &self.source,
+                    &mut self.error,
+                    &mut self.error_line,
+                    &mut self.view_state,
+                );
+                if flushed {
+                    if self.error.is_none() {
+                        self.status_message = "Loaded";
+                    }
+                    true
+                } else {
+                    false
+                }
             }
             Msg::ChunkTick => {
                 self.advance_chunk(ctx);
@@ -1523,6 +1611,43 @@ mod tests {
             view_state.changed_specials(),
             &changed_specials_after_step,
             "an inert Stop must not touch the changed-specials set"
+        );
+    }
+
+    #[test]
+    fn flush_pending_source_is_a_true_no_op_with_nothing_pending() {
+        const WRITES_REGISTER_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(WRITES_REGISTER_MMS, "flush.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        let changed_registers_before = view_state.changed_registers().clone();
+
+        // Nothing pending, the case `save_shortcut`'s unit test alone
+        // cannot cover since it never sees `debounce_timeout`: this must
+        // leave `error` and `view_state` exactly as they were, the same way
+        // `stop_if_running` leaves the changed set alone while paused.
+        let mut debounce_timeout: Option<Timeout> = None;
+        let mut chunk_timeout: Option<Timeout> = None;
+        let mut error: Option<String> = None;
+        let mut error_line: Option<usize> = None;
+        assert!(!flush_pending_source(
+            &mut debounce_timeout,
+            &mut chunk_timeout,
+            &mut control,
+            WRITES_REGISTER_MMS,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        ));
+        assert!(error.is_none(), "a no-op flush must not set an error");
+        assert!(
+            error_line.is_none(),
+            "a no-op flush must not set error_line"
+        );
+        assert_eq!(
+            view_state.changed_registers(),
+            &changed_registers_before,
+            "a no-op flush must not touch view_state"
         );
     }
 

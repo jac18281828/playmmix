@@ -734,6 +734,15 @@ pub fn keyboard_shortcut_for(
     }
 }
 
+/// Whether a keydown is the platform Save chord (Ctrl-S / Cmd-S), unlike
+/// [`keyboard_shortcut_for`]'s bare-key shortcuts. No `ControlEnablement`
+/// gate: flushing a pending re-assemble is always safe to attempt, the same
+/// way `flush_pending_reassemble` unconditionally checks whether anything is
+/// pending.
+pub fn save_shortcut(key: &str, ctrl_or_meta_held: bool) -> bool {
+    key == "s" && ctrl_or_meta_held
+}
+
 #[derive(Properties, PartialEq)]
 pub struct ControlBarProps {
     pub running: bool,
@@ -1492,6 +1501,21 @@ mod tests {
         // lowercase form is what keeps Shift+S from firing Step Over.
         let enablement = control_enablement(false, false, false);
         assert_eq!(keyboard_shortcut_for("S", false, false, enablement), None);
+    }
+
+    #[test]
+    fn save_shortcut_matches_s_with_a_modifier_held() {
+        assert!(save_shortcut("s", true));
+    }
+
+    #[test]
+    fn save_shortcut_ignores_s_without_a_modifier_held() {
+        assert!(!save_shortcut("s", false));
+    }
+
+    #[test]
+    fn save_shortcut_ignores_every_other_key_even_with_a_modifier_held() {
+        assert!(!save_shortcut("r", true));
     }
 
     #[test]

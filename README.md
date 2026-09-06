@@ -55,6 +55,9 @@ Controls, top left:
 - **Reset** — reload the current source from the top, clearing output and
   highlights.
 
+Press **Ctrl-S** (**Cmd-S** on macOS) anywhere on the page to reassemble
+immediately instead of waiting for the debounce.
+
 Click a line number to set a breakpoint. Registers, special registers and
 memory update after every step or run, with whatever changed highlighted.
 
