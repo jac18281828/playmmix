@@ -1,11 +1,11 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gloo_timers::callback::Timeout;
 use log::info;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{BeforeUnloadEvent, Element, Event, PointerEvent};
+use web_sys::{BeforeUnloadEvent, Element, Event, KeyboardEvent, PointerEvent};
 use yew::{Callback, Component, Context, Html, NodeRef, Renderer, html};
 
 mod control;
@@ -14,7 +14,10 @@ mod examples;
 mod highlight;
 mod machine;
 
-use control::{Control, ControlBar, StepOutcome, yield_to_event_loop};
+use control::{
+    Control, ControlBar, ControlEnablement, KeyboardShortcut, StepOutcome, control_enablement,
+    keyboard_shortcut_for, yield_to_event_loop,
+};
 use editor::Editor;
 use examples::DEFAULT_MMS;
 use machine::{MachinePane, OutputPane, ViewState};
@@ -690,6 +693,55 @@ fn install_beforeunload_handler() -> (Rc<RefCell<bool>>, BeforeUnloadHandler) {
     (dirty, handler)
 }
 
+/// The JS closure backing `window.onkeydown` -- must stay alive for as long
+/// as the handler should stay registered, same as [`BeforeUnloadHandler`].
+type KeydownHandler = Closure<dyn FnMut(KeyboardEvent)>;
+
+/// Registers `window.onkeydown`: on a bare keypress (no Ctrl/Cmd/Alt) outside
+/// a text-entry element, dispatches the `Msg` `keyboard_shortcut_for` maps
+/// the key to, gated by the returned cell's current `ControlEnablement` --
+/// kept live by `App::rendered`, not recomputed here. Seeded with the ready
+/// state (`control_enablement(false, false, false)`), matching a
+/// freshly-constructed `Control`. Returns the shared cell alongside the
+/// `Closure` backing the handler; the caller must keep the latter alive (see
+/// [`KeydownHandler`]).
+fn install_keyboard_shortcuts(
+    link: yew::html::Scope<App>,
+) -> (Rc<Cell<ControlEnablement>>, KeydownHandler) {
+    let enablement = Rc::new(Cell::new(control_enablement(false, false, false)));
+    let enablement_for_handler = enablement.clone();
+    let handler = Closure::wrap(Box::new(move |event: KeyboardEvent| {
+        let modifier_held = event.ctrl_key() || event.meta_key() || event.alt_key();
+        let focused_element_is_text_input = event
+            .target()
+            .and_then(|target| target.dyn_into::<Element>().ok())
+            .map(|element| matches!(element.tag_name().as_str(), "TEXTAREA" | "INPUT"))
+            .unwrap_or(false);
+        let shortcut = keyboard_shortcut_for(
+            &event.key(),
+            modifier_held,
+            focused_element_is_text_input,
+            enablement_for_handler.get(),
+        );
+        if let Some(shortcut) = shortcut {
+            event.prevent_default();
+            let msg = match shortcut {
+                KeyboardShortcut::StepOver => Msg::StepOver,
+                KeyboardShortcut::Step => Msg::Step,
+                KeyboardShortcut::Run => Msg::Run,
+                KeyboardShortcut::Stop => Msg::Stop,
+            };
+            link.send_message(msg);
+        }
+    }) as Box<dyn FnMut(KeyboardEvent)>);
+
+    if let Some(window) = web_sys::window() {
+        window.set_onkeydown(Some(handler.as_ref().unchecked_ref()));
+    }
+
+    (enablement, handler)
+}
+
 /// `Msg::Stop`'s core logic, factored out of `App::update` so it is
 /// testable without a live `Context`: interrupts a chunked Run or Step
 /// Over in flight and records the resulting pause boundary. A true no-op
@@ -800,6 +852,14 @@ pub struct App {
     /// pointing at freed memory. Never read directly; `source_dirty` is the
     /// live channel to it.
     _beforeunload_handler: BeforeUnloadHandler,
+    /// Live enablement `window.onkeydown`'s handler reads on every keydown --
+    /// kept current by `rendered`, since the handler itself runs outside any
+    /// render and so can't call `control_enablement` against fresh state
+    /// directly.
+    shortcut_enablement: Rc<Cell<ControlEnablement>>,
+    /// Kept alive for as long as `App` is, same reason as
+    /// `_beforeunload_handler`. Never read directly.
+    _keydown_handler: KeydownHandler,
 }
 
 impl App {
@@ -889,6 +949,8 @@ impl Component for App {
         let control = Control::new(DEFAULT_MMS, SOURCE_FILENAME)
             .expect("DEFAULT_MMS assembles; pinned by examples::tests::default_mms_assembles");
         let (source_dirty, beforeunload_handler) = install_beforeunload_handler();
+        let (shortcut_enablement, keydown_handler) =
+            install_keyboard_shortcuts(_ctx.link().clone());
         let mut app = Self {
             source: DEFAULT_MMS.to_string(),
             control,
@@ -907,6 +969,8 @@ impl Component for App {
             drag_state: Rc::new(RefCell::new(None)),
             source_dirty,
             _beforeunload_handler: beforeunload_handler,
+            shortcut_enablement,
+            _keydown_handler: keydown_handler,
         };
         // Seed continuity and the diff baseline off the freshly loaded
         // machine -- not about the first render (`visible_registers`
@@ -1191,6 +1255,19 @@ impl Component for App {
                 <div class="machine-slot">{ machine_view }</div>
             </main>
         }
+    }
+
+    /// Keeps `shortcut_enablement` current for `window.onkeydown`'s handler
+    /// -- one choke point, guaranteed to run after every render, rather than
+    /// a write in each of `update`'s several state-changing arms. Recomputes
+    /// unconditionally, `first_render` included: there is no cheaper correct
+    /// state to seed with than the real one.
+    fn rendered(&mut self, _ctx: &Context<Self>, _first_render: bool) {
+        self.shortcut_enablement.set(control_enablement(
+            self.control.is_running(),
+            self.control.is_halted(),
+            self.error.is_some(),
+        ));
     }
 }
 

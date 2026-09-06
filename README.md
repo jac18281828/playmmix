@@ -47,11 +47,11 @@ and watch `$255` pick up that address the instant the `LDA` runs.
 
 Controls, top left:
 
-- **Run** — execute to completion, or the next breakpoint.
-- **Step** — execute one source-level step, following into calls.
-- **Step Over** — execute one step, but run a whole call to completion
+- **Run** (`r`) — execute to completion, or the next breakpoint.
+- **Step** (`i`) — execute one source-level step, following into calls.
+- **Step Over** (`s`) — execute one step, but run a whole call to completion
   rather than stepping into it.
-- **Stop** — interrupt a Run in progress.
+- **Stop** (`x`) — interrupt a Run in progress.
 - **Reset** — reload the current source from the top, clearing output and
   highlights.
 

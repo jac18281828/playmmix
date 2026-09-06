@@ -694,6 +694,46 @@ pub fn control_enablement(running: bool, halted: bool, has_error: bool) -> Contr
     }
 }
 
+/// A control-bar action triggered from the keyboard rather than a click.
+/// Reset has no shortcut: it stays mouse-only, deliberately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardShortcut {
+    StepOver,
+    Step,
+    Run,
+    Stop,
+}
+
+/// Maps a bare keydown to the [`KeyboardShortcut`] it fires, gated by the
+/// same [`ControlEnablement`] the control-bar buttons use -- a disabled
+/// action stays a no-op from the keyboard too. `modifier_held` (Ctrl, Cmd,
+/// or Alt) or `focused_element_is_text_input` forces `None` regardless of
+/// `key`, keeping every OS/browser chord and ordinary typing untouched.
+/// `key` is matched against the layout-produced string
+/// (`KeyboardEvent::key()`), not the physical code, so a Shift-held press
+/// (which yields the uppercase form) never matches.
+///
+/// `s` maps to Step Over and `i` to Step -- inverted from the naive
+/// letter-to-word mapping, since Step Over is the default/most-common step
+/// action and `i` explicitly requests following into a call.
+pub fn keyboard_shortcut_for(
+    key: &str,
+    modifier_held: bool,
+    focused_element_is_text_input: bool,
+    enablement: ControlEnablement,
+) -> Option<KeyboardShortcut> {
+    if modifier_held || focused_element_is_text_input {
+        return None;
+    }
+    match key {
+        "s" if !enablement.step_over_disabled => Some(KeyboardShortcut::StepOver),
+        "i" if !enablement.step_disabled => Some(KeyboardShortcut::Step),
+        "r" if !enablement.run_disabled => Some(KeyboardShortcut::Run),
+        "x" if !enablement.stop_disabled => Some(KeyboardShortcut::Stop),
+        _ => None,
+    }
+}
+
 #[derive(Properties, PartialEq)]
 pub struct ControlBarProps {
     pub running: bool,
@@ -1373,6 +1413,77 @@ mod tests {
                 "Reset disabled at running={running} halted={halted} has_error={has_error}"
             );
         }
+    }
+
+    #[test]
+    fn keyboard_shortcut_for_maps_each_key_when_enabled() {
+        let enablement = control_enablement(false, false, false); // ready: nothing disabled
+        let cases = [
+            ("s", KeyboardShortcut::StepOver),
+            ("i", KeyboardShortcut::Step),
+            ("r", KeyboardShortcut::Run),
+            ("x", KeyboardShortcut::Stop),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                keyboard_shortcut_for(key, false, false, enablement),
+                Some(expected),
+                "key {key:?} must map to {expected:?} when enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_shortcut_for_is_none_when_its_control_is_disabled() {
+        // `running`: Step and Step Over disable (Stop is the live control).
+        let running = control_enablement(true, false, false);
+        assert_eq!(keyboard_shortcut_for("i", false, false, running), None);
+        assert_eq!(keyboard_shortcut_for("s", false, false, running), None);
+
+        // `halted`: Stop disables (nothing left to interrupt).
+        let halted = control_enablement(false, true, false);
+        assert_eq!(keyboard_shortcut_for("x", false, false, halted), None);
+
+        // Run has no reachable state above that disables it alone; hand-build
+        // one to cover run_disabled directly.
+        let run_disabled = ControlEnablement {
+            run_disabled: true,
+            step_disabled: false,
+            step_over_disabled: false,
+            stop_disabled: false,
+            reset_disabled: false,
+        };
+        assert_eq!(keyboard_shortcut_for("r", false, false, run_disabled), None);
+    }
+
+    #[test]
+    fn keyboard_shortcut_for_ignores_every_key_while_a_modifier_is_held() {
+        let enablement = control_enablement(false, false, false);
+        for key in ["s", "i", "r", "x"] {
+            assert_eq!(
+                keyboard_shortcut_for(key, true, false, enablement),
+                None,
+                "key {key:?} must not fire while a modifier is held"
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_shortcut_for_ignores_every_key_while_a_text_input_has_focus() {
+        let enablement = control_enablement(false, false, false);
+        for key in ["s", "i", "r", "x"] {
+            assert_eq!(
+                keyboard_shortcut_for(key, false, true, enablement),
+                None,
+                "key {key:?} must not fire while a text input is focused"
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_shortcut_for_ignores_an_unmapped_key() {
+        let enablement = control_enablement(false, false, false);
+        assert_eq!(keyboard_shortcut_for("q", false, false, enablement), None);
     }
 
     #[test]
