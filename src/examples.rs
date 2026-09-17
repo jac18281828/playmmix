@@ -16,7 +16,7 @@
 ///
 /// Must assemble: `App::create` loads it unconditionally. Pinned by
 /// `default_mms_assembles` below.
-pub const DEFAULT_MMS: &str = "% Hello, Halt.\n\n\tLOC\t#100\nMain\n\tTRAP\t0,Halt,0\n\n\tLOC\tData_Segment\n\tGREG\t@\n";
+pub const DEFAULT_MMS: &str = "% Hello, Halt.\n\n    LOC #100\nMain\n    TRAP    0,Halt,0\n\n    LOC Data_Segment\n    GREG    @\n";
 
 /// `examples/hello_world.mms` from checksmix, embedded verbatim. Not
 /// `include_str!`: a dependency's on-disk location, wherever cargo puts it
