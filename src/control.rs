@@ -373,9 +373,9 @@ impl Control {
     /// `GREG`. `rG` alone cannot answer this: `GREG` allocates downward from
     /// `$254`, so 223 directives leave `rG` at exactly `32`, the same value
     /// an untouched machine has -- and `PUT`/`PUTI` can move `rG` off `32`
-    /// with no `GREG` involved at all. `machine.rs`'s unallocated-range
-    /// collapse needs both signals to tell a genuinely empty global range
-    /// from either coincidence.
+    /// with no `GREG` involved at all. `machine.rs`'s global-range collapse
+    /// needs both signals to tell a genuinely empty global range from
+    /// either coincidence.
     pub fn has_greg_allocations(&self) -> bool {
         !self.assembler.greg_inits.is_empty()
     }

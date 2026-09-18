@@ -550,16 +550,55 @@ main {
     white-space: nowrap;
 }
 
+/* Every fixed-width column carries flex-shrink: 0 -- .register-row is a
+   flex container, and without it an empty tag or mark span shrinks to zero
+   under a squeezed row while a filled sibling can't, drifting the columns
+   out of alignment at narrow viewports. */
 .reg-name {
     display: inline-block;
     width: 5ch;
+    flex-shrink: 0;
     text-align: right;
     color: #9cdcfe;
+}
+
+/* Register class tag and rL-boundary mark: fixed widths, empty when unused,
+   so a class or mark change never reflows the row -- the no-reflow
+   invariant `docs/layout-spec.md` requires. Colour only, per class. */
+.reg-tag {
+    display: inline-block;
+    width: 8ch;
+    flex-shrink: 0;
+    color: #888;
+}
+
+.reg-mark {
+    display: inline-block;
+    width: 8ch;
+    flex-shrink: 0;
+    color: #dcdcaa;
+}
+
+.register-marginal .reg-name,
+.register-marginal .reg-hex,
+.register-marginal .reg-dec {
+    color: #666;
+}
+
+/* A changed value keeps its accent colour on a marginal row: the dimming
+   selector above carries two classes, outranking plain .changed's one, so
+   restate it here with .changed folded in, at higher specificity than the
+   dimming rule regardless of source order. The highlight stays value-only,
+   whatever the row's class. */
+.register-marginal .reg-hex.changed,
+.register-marginal .reg-dec.changed {
+    color: #4ec9b0;
 }
 
 .reg-hex {
     display: inline-block;
     width: 18ch;
+    flex-shrink: 0;
     color: #ddd;
 }
 
@@ -570,6 +609,7 @@ main {
 .reg-dec {
     display: inline-block;
     width: 21ch;
+    flex-shrink: 0;
     text-align: right;
     color: #888;
 }
@@ -579,7 +619,7 @@ main {
     font-style: italic;
 }
 
-/* The collapsed range label ("$32-$255") can run to 8+ characters, well past
+/* The collapsed range label ("$32-$254") can run to 8+ characters, well past
    .reg-name's 5ch width sized for a single register ("$25"). Auto-width
    here so the label reserves its real space instead of overflowing into
    .reg-note's box and rendering on top of it. */

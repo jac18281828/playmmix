@@ -132,12 +132,13 @@ their own class), passed to `MMix::with_host` in `assemble_and_load`.
 Replace the value-driven visible set with a stable one. Three rules, applied
 in order, ascending index, one register per row:
 
-1. **Pinned floor:** `$0`–`$31` always render, zero or not. This is the
-   local-register file as MMIX teaches it, and it gives every program the
-   same first 32 rows every time.
+1. **Pinned floor:** `$0`–`$31` always render, zero or not. MMIX requires
+   `rG >= 32`, so none of these is ever global; each one is local or
+   marginal by `rL`, and the pane shows which, in place, without moving
+   rows.
 2. **Globals:** every `$i >= rG` renders, as today. The no-`GREG` collapse
-   row (`$32–$254 · 223 unallocated (0)`) survives for the untouched middle,
-   but now only ever covers `$32..=$255`.
+   row (`$32–$254 · 223 global (0)`) survives for the untouched middle, and
+   covers at most `$32..=$254`; `$255` always renders individually.
 3. **Sticky:** any register observed rendering individually keeps its row for
    the life of the load, whatever its value does later. The sticky set lives
    in `machine::ViewState`, owned by `App` (it is view state, not machine
@@ -154,9 +155,12 @@ in order, ascending index, one register per row:
 
 A row never moves once shown; new rows insert in index order. Fixed column
 widths in `ch` so a value updates in place without reflow: name 5ch
-right-aligned, hex 18ch, decimal right-aligned in the remainder. Same row
-format for special registers: the six pinned ones (`rA rG rL rO rS rJ`)
-first, then any other nonzero special, sticky under the same rule.
+right-aligned, class tag 8ch, `rL` mark 8ch, hex 18ch, decimal right-aligned
+in the remainder. The class tag and `rL` mark reserve their width whether or
+not a row uses them, so a class change never reflows the row. Special-register
+rows leave the tag and mark columns out: same row format otherwise, the six
+pinned ones (`rA rG rL rO rS rJ`) first, then any other nonzero special,
+sticky under the same rule.
 
 ## Memory pane
 
