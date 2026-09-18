@@ -79,23 +79,23 @@ static KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "cswapi", "csz", "cszi", "debug", "div", "divi", "divu", "divui", "fadd", "fcmp", "fcmpe",
         "fdiv", "feql", "feqle", "fint", "fix", "fixu", "flot", "floti", "flotu", "flotui", "fmul",
         "frem", "fsqrt", "fsub", "fun", "fune", "get", "geta", "getab", "go", "goi", "greg",
-        "halt", "inch", "incl", "incmh", "incml", "is", "je", "jg", "jl", "jmp", "jmpb", "jne",
-        "lda", "ldai", "ldb", "ldbi", "ldbu", "ldbui", "ldht", "ldhti", "ldo", "ldoi", "ldou",
-        "ldoui", "ldsf", "ldsfi", "ldt", "ldti", "ldtu", "ldtui", "ldunc", "ldunci", "ldvts",
-        "ldvtsi", "ldw", "ldwi", "ldwu", "ldwui", "loc", "mor", "mori", "mul", "muli", "mulu",
-        "mului", "mux", "muxi", "mxor", "mxori", "nand", "nandi", "neg", "negi", "negu", "negui",
-        "nor", "nori", "nxor", "nxori", "octa", "odif", "odifi", "or", "orh", "ori", "orl", "ormh",
-        "orml", "orn", "orni", "pbev", "pbevb", "pbn", "pbnb", "pbnn", "pbnnb", "pbnp", "pbnpb",
-        "pbnz", "pbnzb", "pbod", "pbodb", "pbp", "pbpb", "pbz", "pbzb", "pop", "prefix", "prego",
-        "pregoi", "preld", "preldi", "prest", "presti", "pushgo", "pushgoi", "pushj", "pushjb",
-        "put", "puti", "quad", "resume", "sadd", "saddi", "save", "set", "seth", "seti", "setl",
-        "setmh", "setml", "sflot", "sfloti", "sflotu", "sflotui", "sl", "sli", "slu", "slui", "sr",
-        "sri", "sru", "srui", "stb", "stbi", "stbu", "stbui", "stco", "stcoi", "stht", "sthti",
-        "sto", "stoi", "stou", "stoui", "stsf", "stsfi", "stt", "stti", "sttu", "sttui", "stunc",
-        "stunci", "stw", "stwi", "stwu", "stwui", "sub", "subi", "subu", "subui", "swym", "sync",
-        "syncd", "syncdi", "syncid", "syncidi", "tdif", "tdifi", "tetra", "trap", "trip", "unsave",
-        "wdif", "wdifi", "wyde", "xor", "xori", "zsev", "zsevi", "zsn", "zsni", "zsnn", "zsnni",
-        "zsnp", "zsnpi", "zsnz", "zsnzi", "zsod", "zsodi", "zsp", "zspi", "zsz", "zszi",
+        "halt", "inch", "incl", "incmh", "incml", "is", "jmp", "jmpb", "lda", "ldai", "ldb",
+        "ldbi", "ldbu", "ldbui", "ldht", "ldhti", "ldo", "ldoi", "ldou", "ldoui", "ldsf", "ldsfi",
+        "ldt", "ldti", "ldtu", "ldtui", "ldunc", "ldunci", "ldvts", "ldvtsi", "ldw", "ldwi",
+        "ldwu", "ldwui", "loc", "mor", "mori", "mul", "muli", "mulu", "mului", "mux", "muxi",
+        "mxor", "mxori", "nand", "nandi", "neg", "negi", "negu", "negui", "nor", "nori", "nxor",
+        "nxori", "octa", "odif", "odifi", "or", "orh", "ori", "orl", "ormh", "orml", "orn", "orni",
+        "pbev", "pbevb", "pbn", "pbnb", "pbnn", "pbnnb", "pbnp", "pbnpb", "pbnz", "pbnzb", "pbod",
+        "pbodb", "pbp", "pbpb", "pbz", "pbzb", "pop", "prefix", "prego", "pregoi", "preld",
+        "preldi", "prest", "presti", "pushgo", "pushgoi", "pushj", "pushjb", "put", "puti", "quad",
+        "resume", "sadd", "saddi", "save", "set", "seth", "seti", "setl", "setmh", "setml",
+        "sflot", "sfloti", "sflotu", "sflotui", "sl", "sli", "slu", "slui", "sr", "sri", "sru",
+        "srui", "stb", "stbi", "stbu", "stbui", "stco", "stcoi", "stht", "sthti", "sto", "stoi",
+        "stou", "stoui", "stsf", "stsfi", "stt", "stti", "sttu", "sttui", "stunc", "stunci", "stw",
+        "stwi", "stwu", "stwui", "sub", "subi", "subu", "subui", "swym", "sync", "syncd", "syncdi",
+        "syncid", "syncidi", "tdif", "tdifi", "tetra", "trap", "trip", "unsave", "wdif", "wdifi",
+        "wyde", "xor", "xori", "zsev", "zsevi", "zsn", "zsni", "zsnn", "zsnni", "zsnp", "zsnpi",
+        "zsnz", "zsnzi", "zsod", "zsodi", "zsp", "zspi", "zsz", "zszi",
     ]
     .into_iter()
     .collect()
@@ -457,5 +457,36 @@ mod tests {
         let line = "Main $1 ADDD";
         let spans = classify(line);
         assert!(!spans.iter().any(|s| s.kind == TokenKind::UnknownMnemonic));
+    }
+
+    #[test]
+    fn mixs_compare_and_jump_mnemonics_are_neither_keywords_nor_valid_mmixal() {
+        // checksmix 0.3.9 dropped `JE`/`JNE`/`JL`/`JG` from the grammar --
+        // MIX's compare-and-jump mnemonics, never real MMIXAL, that had
+        // entered as aliases of `BZ`/`BNZ`/`BN`/`BP`. KEYWORDS carried all
+        // four past that removal, which defeated `UnknownMnemonic` styling
+        // for source checksmix now rejects outright. Each case pins both
+        // halves: the word is gone from KEYWORDS, and a program that uses
+        // it genuinely fails to assemble -- so this fails if either half of
+        // the fix is ever undone.
+        const CASES: [(&str, &str); 4] = [
+            ("je", "\tLOC\t#100\nMain\tJE\t$1,Main\n"),
+            ("jne", "\tLOC\t#100\nMain\tJNE\t$1,Main\n"),
+            ("jl", "\tLOC\t#100\nMain\tJL\t$1,Main\n"),
+            ("jg", "\tLOC\t#100\nMain\tJG\t$1,Main\n"),
+        ];
+
+        for (word, source) in CASES {
+            assert!(
+                !KEYWORDS.contains(word),
+                "{word} must not be in KEYWORDS -- checksmix 0.3.9 dropped it \
+                 from the grammar"
+            );
+            assert!(
+                crate::control::Control::new(source, "drift.mms").is_err(),
+                "{word} must fail to assemble -- a program using it is not \
+                 valid MMIXAL under checksmix 0.3.9"
+            );
+        }
     }
 }

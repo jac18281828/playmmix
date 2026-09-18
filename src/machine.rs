@@ -1439,10 +1439,13 @@ mod tests {
         view.observe(&control);
         view.record_pause_boundary(&control);
 
-        // CALL_MMS leaves $1 = 40, $2 = 2, $255 = 42; rL grows past its
-        // load-time value too.
+        // Under checksmix 0.3.9's register-stack rule, CALL_MMS's `POP 1,0`
+        // returns one value into the hole PUSHJ $0 left and marginalizes
+        // the rest: the program ends with $0 = 42, $255 = 42, rL = 1 --
+        // and $1, $2 (40 and 2 mid-call) zeroed back out, since both sit
+        // above the new rL. rL still grows past its load-time value too.
         assert!(
-            view.changed_registers().contains(&1) && view.changed_registers().contains(&255),
+            view.changed_registers().contains(&0) && view.changed_registers().contains(&255),
             "registers the run wrote must be flagged: {:?}",
             view.changed_registers()
         );
@@ -1450,6 +1453,16 @@ mod tests {
             view.changed_specials().contains("rL"),
             "rL grew across the run: {:?}",
             view.changed_specials()
+        );
+        assert_eq!(
+            control.machine().get_register(1),
+            0,
+            "the new POP rule must marginalize $1 back to zero"
+        );
+        assert_eq!(
+            control.machine().get_register(2),
+            0,
+            "the new POP rule must marginalize $2 back to zero"
         );
 
         // A second boundary with nothing executed in between diffs against
@@ -1724,11 +1737,11 @@ mod tests {
         let after = memory_runs(control.machine(), control.labels());
         let after_len: usize = after.iter().map(|run| run.bytes.len()).sum();
 
-        // 82 text + 14 data, per HELLO_WORLD_MMS as embedded in examples.rs
+        // 90 text + 14 data, per HELLO_WORLD_MMS as embedded in examples.rs
         // today -- unchanged by the run, since loaded_extent() tracks only
         // what write_image loaded, not the register-stack spills a real
         // run performs.
-        assert_eq!(before_len, 96);
+        assert_eq!(before_len, 104);
         assert_eq!(after_len, before_len);
     }
 

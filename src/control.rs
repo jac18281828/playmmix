@@ -838,6 +838,11 @@ mod tests {
     /// A non-halting counter loop, for chunk-exhaustion tests.
     const INFINITE_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,0\nLoop\tADDU\t$1,$1,1\n\tJMP\tLoop\n";
 
+    /// A self-recursive call (line 2): the `PUSHJ`'s own target is the
+    /// `PUSHJ` itself, so the callee's first instruction maps to the SAME
+    /// source line the call started on.
+    const SELF_RECURSIVE_CALL_MMS: &str = "\tLOC\t#100\nLoop\tPUSHJ\t$0,Loop\n\tPOP\t0,0\n";
+
     /// A source that fails to parse: `BOGUS` is not a valid opcode.
     const INVALID_MMS: &str = "\tLOC\t#100\nMain\tBOGUS\t$1,1\n";
 
@@ -1682,45 +1687,37 @@ mod tests {
     }
 
     #[test]
-    fn step_never_searches_past_a_call_into_unmapped_generated_code() {
-        // Mirrors HELLO_WORLD_MMS's shape: a labeled `debug "..."` line as
-        // the very first instruction, compiling to a PUSHJ into checksmix's
-        // appended, entirely unmapped debug-print subroutine.
-        let mut control =
-            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+    fn step_never_searches_past_a_call_that_lands_on_its_own_source_line() {
+        // checksmix 0.3.9 turned `debug` from a `PUSHJ` into a `JMP`, which
+        // this test used to rely on for a call whose target is unmapped
+        // generated code -- but an unmapped target already stops
+        // `step_instruction_group`'s inner search on its own (the resolved
+        // `SourceLoc` can never equal `head_loc` there), so that fixture
+        // never actually exercised condition (b) (`self.call_depth() ==
+        // pre_call_depth`, the guard above): deleting condition (b) would
+        // have left the test just as green. A self-recursive call whose
+        // target is the `PUSHJ` instruction itself does exercise it: the
+        // callee's first instruction (the same `PUSHJ`) maps to the exact
+        // same, mapped source line the call started on, so the inner
+        // search's line-equality check alone would keep going. Only
+        // condition (b) -- the call changed depth -- stops it here.
+        let mut control = Control::new(SELF_RECURSIVE_CALL_MMS, "loop.mms").expect("assembles");
         let pre_call_depth = control.call_depth();
+        let call_addr = expect_addr(SELF_RECURSIVE_CALL_MMS, "loop.mms", 2);
+        assert_eq!(control.get_pc(), call_addr, "fixture assumption");
 
-        // (1) The call itself: depth increases, landing on the callee's own
-        // first instruction (SAVE), which has no source mapping at all.
         assert_eq!(control.step(), StepOutcome::Advanced);
-        assert!(
-            control.call_depth() > pre_call_depth,
-            "PUSHJ must have pushed a call frame"
-        );
-        assert!(
-            control.assembler.source_loc(control.marker_pc()).is_none(),
-            "the debug subroutine's own SAVE instruction has no source mapping"
-        );
-
-        // (2) A second Step, taken from that already-unmapped PC: exactly
-        // one more physical instruction, not a further search. Reverting
-        // condition (b) (searching whenever depth is merely unchanged,
-        // ignoring whether the pre-step PC was mapped) would instead run
-        // several more instructions of the subroutine here, including the
-        // diagnostic TRAP write -- a real side effect the user never asked
-        // for.
-        let pc_before_second = control.get_pc();
-        let depth_before_second = control.call_depth();
-        assert_eq!(control.step(), StepOutcome::Advanced);
-        assert_eq!(
-            control.call_depth(),
-            depth_before_second,
-            "SAVE must not itself change call depth, for this test to mean anything"
-        );
         assert_eq!(
             control.get_pc(),
-            pc_before_second + 4,
-            "exactly one physical instruction must execute -- not a search"
+            call_addr,
+            "the call's target is the PUSHJ instruction itself"
+        );
+        assert_eq!(
+            control.call_depth(),
+            pre_call_depth + 1,
+            "exactly one PUSHJ must have executed -- reverting condition (b) \
+             would let the group search chase this same, mapped source line \
+             through further recursive calls instead of stopping at one"
         );
     }
 }
