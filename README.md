@@ -49,8 +49,8 @@ Controls, top left:
 
 - **Run** (`r`) — execute to completion, or the next breakpoint.
 - **Step** (`i`) — execute one source-level step, following into calls.
-- **Step Over** (`s`) — execute one step, but run a whole call to completion
-  rather than stepping into it.
+- **Step Over** (`s`) — execute to the next source line, running any call
+  along the way to completion rather than stepping into it.
 - **Stop** (`x`) — interrupt a Run in progress.
 - **Reset** — reload the current source from the top, clearing output and
   highlights.

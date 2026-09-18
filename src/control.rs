@@ -15,6 +15,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 use checksmix::{Host, MMix, MMixAssembler, SourceLoc, entry_point, write_image};
@@ -158,16 +159,12 @@ pub struct Control {
     /// share this flag, since only one can be in flight at a time and both
     /// are interrupted by Stop the same way.
     running: bool,
-    /// Set only while a chunked Step Over is in flight: the call depth and
-    /// source line it must return to before it's done. `Debugger::do_next`'s
-    /// stopping rule tests both together (`call_depth() <= depth &&
-    /// reached_new_line(&origin)`), so they travel as one piece of state --
-    /// a depth-only field can't express it: a `debug` line's `JMP` never
-    /// changes call depth, so a depth-only stop condition would end the Step
-    /// Over before the PC ever leaves the generated stub. Also distinguishes
-    /// a Step Over continuation from a Run continuation when `running` is
-    /// true, since both reuse the same chunk-yield loop.
-    step_over: Option<StepOverState>,
+    /// Set only while a chunked Step Over is in flight: the target it must
+    /// return to before it's done -- see `step_over_reached` for the full
+    /// stopping rule and why a depth-only field can't express it. Also
+    /// distinguishes a Step Over continuation from a Run continuation when
+    /// `running` is true, since both reuse the same chunk-yield loop.
+    step_over: Option<StepOverTarget>,
     /// Set once the machine halts; cleared only by `reload`/`new` loading a
     /// fresh machine. There is no Reset control, so without this, Run,
     /// Step, or Step Over after a halt would execute whatever uninitialized
@@ -194,13 +191,22 @@ pub struct Control {
     /// arrival order. Rebuilt by `assemble_and_load`, so both `new` and a
     /// successful `reload` start with an empty buffer automatically.
     output: OutputBuffer,
+    /// The `[start, end]` bound of every text-segment address
+    /// `write_image` actually wrote for this load, or `None` if it wrote
+    /// none at all -- computed once from `machine().loaded_extent()` on
+    /// `new`/`reload` and cached, since that walks the whole image and
+    /// `step_over_chunk`'s continuation loop checks it once per executed
+    /// instruction. A `debug` stub is unmapped in the source map but
+    /// `write_image` wrote its bytes too, so it sits inside this bound;
+    /// only running off the program's own end leaves it.
+    text_extent: Option<RangeInclusive<u64>>,
 }
 
 /// A chunked Step Over's target, captured once when it begins: the call
 /// depth and source line to return to before it's done. `Control`'s
 /// `step_over` field explains why the two travel together.
 #[derive(Clone)]
-struct StepOverState {
+struct StepOverTarget {
     depth: usize,
     origin: Option<SourceLoc>,
 }
@@ -211,6 +217,7 @@ impl Control {
     /// preserve them from.
     pub fn new(source: &str, filename: &str) -> Result<Self, String> {
         let (mmix, assembler, output) = Self::assemble_and_load(source, filename)?;
+        let text_extent = Self::text_extent(&mmix);
         Ok(Self {
             mmix,
             assembler,
@@ -223,6 +230,7 @@ impl Control {
             has_advanced: false,
             resumed_breakpoint: None,
             output,
+            text_extent,
         })
     }
 
@@ -240,6 +248,7 @@ impl Control {
         self.running = false;
         self.step_over = None;
         let (mmix, assembler, output) = Self::assemble_and_load(source, &self.filename)?;
+        self.text_extent = Self::text_extent(&mmix);
         self.mmix = mmix;
         self.assembler = assembler;
         self.halted = false;
@@ -264,6 +273,24 @@ impl Control {
         write_image(&mut mmix, &assembler);
         mmix.set_pc(entry_point(&assembler));
         Ok((mmix, assembler, output))
+    }
+
+    /// The `[start, end]` bound of `mmix`'s loaded text segment -- every
+    /// address `write_image` wrote that isn't past `DATA_SEGMENT_START` --
+    /// or `None` if it wrote no text address at all (not reachable through
+    /// `Control::new`, which always has an entry point). `MMix::loaded_
+    /// extent` yields addresses in ascending order and text addresses sort
+    /// below every data address (segment 0 vs. segment 1+), so the
+    /// text-segment prefix can be taken directly without visiting the data
+    /// segment at all.
+    fn text_extent(mmix: &MMix) -> Option<RangeInclusive<u64>> {
+        let mut text_addrs = mmix
+            .loaded_extent()
+            .map(|(addr, _)| addr)
+            .take_while(|&addr| addr < DATA_SEGMENT_START);
+        let start = text_addrs.next()?;
+        let end = text_addrs.last().unwrap_or(start);
+        Some(start..=end)
     }
 
     /// Recompute `resolved_breakpoints` from `breakpoints` against the
@@ -534,26 +561,42 @@ impl Control {
         }
     }
 
-    /// `Debugger::do_next`'s stopping rule: the call depth is back at or
-    /// below `target.depth` AND the PC has reached a source line other than
-    /// `target.origin`. Depth alone is not enough -- a `debug` line's `JMP`
-    /// never changes depth, so a depth-only rule would stop before the PC
-    /// ever leaves the generated stub; line alone is not enough either -- a
-    /// callee sharing its caller's line (self-recursion on one statement)
-    /// would stop before the call actually returns.
-    fn step_over_reached(&self, target: &StepOverState) -> bool {
-        self.call_depth() <= target.depth && self.reached_new_line(target.origin.as_ref())
+    /// Whether the PC has left the loaded image: outside `text_extent`
+    /// altogether, not just unmapped in the source map. A `debug` stub is
+    /// unmapped too, but `write_image` wrote its bytes, so it stays inside
+    /// `text_extent` -- only running off the program's own end leaves it.
+    /// The source map can't tell those two "unmapped" cases apart; this can.
+    fn left_loaded_image(&self) -> bool {
+        let pc = self.get_pc();
+        !self
+            .text_extent
+            .as_ref()
+            .is_some_and(|extent| extent.contains(&pc))
+    }
+
+    /// `Debugger::do_next`'s stopping rule, plus a case checksmix's own
+    /// debugger never has to consider: the call depth is back at or below
+    /// `target.depth` AND the PC has reached a source line other than
+    /// `target.origin` -- a depth-only rule would stop before the PC ever
+    /// leaves a `debug` line's generated stub, since a `JMP` never changes
+    /// depth; a line-only rule would stop a self-recursive call before it
+    /// actually returns, since the callee can share its caller's line -- OR
+    /// the PC has left the loaded image entirely (`left_loaded_image`),
+    /// since nothing sensible follows a PC that ran off the program's own
+    /// end. Either half alone is not enough; see `left_loaded_image`'s own
+    /// doc for why that half can't be folded into the source-map check.
+    fn step_over_reached(&self, target: &StepOverTarget) -> bool {
+        self.left_loaded_image()
+            || (self.call_depth() <= target.depth && self.reached_new_line(target.origin.as_ref()))
     }
 
     /// `Debugger::do_next`'s rule, chunked: begin or continue a Step Over.
     ///
     /// A fresh call (no Step Over already in flight) executes the statement
     /// at the current PC -- never checking a breakpoint first, same as
-    /// `step` -- and, unless that alone already reached a new line at or
-    /// below the starting depth, starts a chunked continuation back to that
-    /// target. A `debug` line's `JMP` is exactly the case that alone-step
-    /// misses: depth never changes, so without this the Step Over would end
-    /// with the PC still inside the generated, unmapped stub.
+    /// `step` -- and, unless that alone already reached the target (see
+    /// `step_over_reached`), starts a chunked continuation back to it. A
+    /// `debug` line's `JMP` is exactly the case that alone-step misses.
     ///
     /// A continuation call (one already in flight) executes up to `budget`
     /// more instructions, stopping sooner on a halt, a resolved breakpoint,
@@ -562,7 +605,10 @@ impl Control {
     /// that takes many instructions to return. Self-recursion whose callee
     /// entry shares its caller's line (`Loop PUSHJ $0,Loop`) runs on until a
     /// genuinely new line, which is `Debugger::do_next`'s own rule too --
-    /// not a defect to "fix" here.
+    /// not a defect to "fix" here. A single-line self-loop with no call at
+    /// all (`Loop JMP Loop`) never reaches a new line either, so it never
+    /// terminates on its own -- stoppable only by Stop, same as Run on the
+    /// same loop.
     ///
     /// Ends the run (`is_running()` becomes `false`) on every outcome
     /// except `BudgetExhausted`, which the caller is expected to yield on
@@ -582,7 +628,7 @@ impl Control {
             if self.step_instruction_group() == StepOutcome::Halted {
                 return StepOutcome::Halted;
             }
-            let target = StepOverState {
+            let target = StepOverTarget {
                 depth: pre_call_depth,
                 origin,
             };
@@ -1773,13 +1819,53 @@ mod tests {
     }
 
     #[test]
+    fn step_from_an_unmapped_pc_never_searches_into_the_debug_stubs_trap_fputs() {
+        // The first Step on HELLO_WORLD_MMS executes the debug line's `JMP`
+        // and lands inside the generated stub (SAVE), unmapped -- condition
+        // (a) has nothing to do with that first Step, since `head_loc` there
+        // is still the mapped debug line itself. It is the SECOND Step,
+        // taken from that already-unmapped PC, that exercises condition (a):
+        // `head_loc` is now `None`, and depth alone (unchanged by SAVE)
+        // would otherwise pass condition (b) and enter the group search,
+        // which would then keep matching `None == None` through the stub's
+        // remaining instructions -- GETA, TRAP Fputs, UNSAVE -- executing a
+        // write the user never asked for. Condition (a) stops the search
+        // before it starts, so the second Step is exactly one instruction.
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+
+        assert_eq!(
+            control.step(),
+            StepOutcome::Advanced,
+            "executes the debug JMP"
+        );
+        let pc_after_jmp = control.get_pc();
+
+        assert_eq!(
+            control.step(),
+            StepOutcome::Advanced,
+            "executes one stub instruction (SAVE)"
+        );
+
+        assert_eq!(
+            control.get_pc() - pc_after_jmp,
+            4,
+            "deleting condition (a) lets the second step search the rest of \
+             the stub instead of stopping after one instruction"
+        );
+        assert!(
+            control.output().is_empty(),
+            "the stub's TRAP Fputs must not have executed -- deleting \
+             condition (a) runs it as a side effect of the second step alone"
+        );
+    }
+
+    #[test]
     fn step_over_on_a_debug_line_lands_on_the_next_source_line_in_one_call() {
         // checksmix 0.3.9's `debug` compiles to a `JMP` into a generated,
-        // unmapped stub, not a `PUSHJ` -- call depth never changes across
-        // it. A depth-only Step Over rule stops the instant that `JMP`
-        // executes, leaving the PC inside the stub with no source mapping;
-        // the fix must instead keep going until a new source line is
-        // reached, landing past the whole `debug` line in this one call.
+        // unmapped stub, not a `PUSHJ` (see `step_over_reached`'s doc for
+        // why a depth-only rule can't handle this). The fix must land past
+        // the whole `debug` line in this one call, not stop inside the stub.
         let mut control =
             Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         let pre_call_depth = control.call_depth();
@@ -1804,5 +1890,89 @@ mod tests {
             "the landing PC must resolve to a real source line"
         );
         assert!(!control.is_running());
+    }
+
+    #[test]
+    fn step_over_stops_at_the_end_of_the_image_instead_of_halting() {
+        // This program has no halting TRAP: once its two lines are done, the
+        // PC runs into memory write_image never wrote. An unmapped PC alone
+        // reads as "not a new line" (`reached_new_line`), so without a check
+        // against the loaded image, the continuation loop would keep going
+        // through that unwritten memory until it happened to decode into
+        // something checksmix treats as an unhandled trap -- latching
+        // `halted` for a Step Over the user never asked to run that far. A
+        // plain Step here does not have this problem: `step_instruction_
+        // group`'s own group search already stops the instant the PC leaves
+        // the mapped line, so this pins Step Over to that same landing spot.
+        const RUNS_OFF_THE_END_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,1\n\tSETL\t$2,2\n";
+
+        let mut stepped = Control::new(RUNS_OFF_THE_END_MMS, "n.mms").expect("assembles");
+        stepped.step(); // land on line 3
+        assert_eq!(
+            stepped.step(),
+            StepOutcome::Advanced,
+            "a plain Step must not halt here -- fixture assumption"
+        );
+        let pc_after_plain_steps = stepped.get_pc();
+
+        let mut control = Control::new(RUNS_OFF_THE_END_MMS, "n.mms").expect("assembles");
+        control.step(); // land on line 3
+
+        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+
+        assert_eq!(
+            outcome,
+            StepOutcome::Advanced,
+            "leaving the loaded image must stop Step Over cleanly, not run it \
+             into an unintended halt"
+        );
+        assert!(
+            !control.is_halted(),
+            "Control::halted's own doc: this must never latch from running \
+             off the end of the image, or Run/Step/Step Over stay disabled \
+             until Reset for a halt the program never actually reached"
+        );
+        assert!(
+            control.output().is_empty(),
+            "no diagnostic or write must come from unmapped memory"
+        );
+        assert_eq!(
+            control.get_pc(),
+            pc_after_plain_steps,
+            "Step Over must land exactly where a plain Step would"
+        );
+    }
+
+    #[test]
+    fn step_over_on_a_debug_line_that_is_the_programs_last_statement_prints_once_then_halts() {
+        // When `debug` is the program's last statement, nothing real
+        // follows its landing pad in the source -- but checksmix's own
+        // preprocessor already guards exactly this case: it appends a
+        // `TRAP 0,Halt,0` "no well-formed program ever reaches" right after
+        // every real program's own code, so the landing pad falls into a
+        // REAL, recognized halt, not into undefined memory (confirmed
+        // against `checksmix-0.3.9/src/mmixal.rs`'s `preprocess_debug`).
+        // `left_loaded_image` therefore never fires here -- the halt comes
+        // from `execute_instruction` itself, same as it would after enough
+        // plain Steps. This pins that Step Over still runs the whole debug
+        // print in this one call and stops at that same halt, rather than
+        // stopping early (missing the print) or running past it.
+        const DEBUG_LAST_MMS: &str = "\tLOC\t#100\nMain\tdebug \"bye\"\n";
+        let mut control = Control::new(DEBUG_LAST_MMS, "x.mms").expect("assembles");
+
+        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+
+        assert_eq!(outcome, StepOutcome::Halted);
+        assert!(control.is_halted());
+        let stdout_text: String = control
+            .output()
+            .iter()
+            .filter(|span| span.stream == OutputStream::Stdout)
+            .map(|span| span.text.clone())
+            .collect();
+        assert_eq!(
+            stdout_text, "bye\n",
+            "the debug print must have run exactly once in this one call"
+        );
     }
 }
