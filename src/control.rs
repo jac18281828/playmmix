@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use checksmix::{Host, MMix, MMixAssembler, entry_point, write_image};
+use checksmix::{Host, MMix, MMixAssembler, SourceLoc, entry_point, write_image};
 use gloo_timers::callback::Timeout;
 use yew::prelude::*;
 
@@ -158,11 +158,16 @@ pub struct Control {
     /// share this flag, since only one can be in flight at a time and both
     /// are interrupted by Stop the same way.
     running: bool,
-    /// Set only while a chunked Step Over is in flight: the call depth to
-    /// return to before it's done. Distinguishes a Step Over continuation
-    /// from a Run continuation when `running` is true, since both reuse the
-    /// same chunk-yield loop.
-    step_over_target_depth: Option<usize>,
+    /// Set only while a chunked Step Over is in flight: the call depth and
+    /// source line it must return to before it's done. `Debugger::do_next`'s
+    /// stopping rule tests both together (`call_depth() <= depth &&
+    /// reached_new_line(&origin)`), so they travel as one piece of state --
+    /// a depth-only field can't express it: a `debug` line's `JMP` never
+    /// changes call depth, so a depth-only stop condition would end the Step
+    /// Over before the PC ever leaves the generated stub. Also distinguishes
+    /// a Step Over continuation from a Run continuation when `running` is
+    /// true, since both reuse the same chunk-yield loop.
+    step_over: Option<StepOverState>,
     /// Set once the machine halts; cleared only by `reload`/`new` loading a
     /// fresh machine. There is no Reset control, so without this, Run,
     /// Step, or Step Over after a halt would execute whatever uninitialized
@@ -191,6 +196,15 @@ pub struct Control {
     output: OutputBuffer,
 }
 
+/// A chunked Step Over's target, captured once when it begins: the call
+/// depth and source line to return to before it's done. `Control`'s
+/// `step_over` field explains why the two travel together.
+#[derive(Clone)]
+struct StepOverState {
+    depth: usize,
+    origin: Option<SourceLoc>,
+}
+
 impl Control {
     /// Assemble `source`, load a fresh machine at the entry point, and stop
     /// -- nothing executed. No breakpoints yet; there is no prior state to
@@ -204,7 +218,7 @@ impl Control {
             breakpoints: BTreeSet::new(),
             resolved_breakpoints: BTreeSet::new(),
             running: false,
-            step_over_target_depth: None,
+            step_over: None,
             halted: false,
             has_advanced: false,
             resumed_breakpoint: None,
@@ -224,7 +238,7 @@ impl Control {
     /// re-assemble succeeds or fails.
     pub fn reload(&mut self, source: &str) -> Result<(), String> {
         self.running = false;
-        self.step_over_target_depth = None;
+        self.step_over = None;
         let (mmix, assembler, output) = Self::assemble_and_load(source, &self.filename)?;
         self.mmix = mmix;
         self.assembler = assembler;
@@ -433,7 +447,7 @@ impl Control {
     /// machine where it stopped.
     pub fn stop(&mut self) {
         self.running = false;
-        self.step_over_target_depth = None;
+        self.step_over = None;
     }
 
     /// Execute one source-level step. Never checks breakpoints or a budget
@@ -505,20 +519,50 @@ impl Control {
         StepOutcome::Advanced
     }
 
+    /// Whether the PC now sits on a source line other than `origin` --
+    /// `Debugger::reached_new_line`'s own rule, shared here with
+    /// `step_over_chunk`. An address with no source mapping (compiler-
+    /// generated code, or past the end of the program) answers false: it is
+    /// inside no line, so it is not a new one.
+    fn reached_new_line(&self, origin: Option<&SourceLoc>) -> bool {
+        let Some(loc) = self.assembler.source_loc(self.get_pc()) else {
+            return false;
+        };
+        match origin {
+            Some(o) => loc != o,
+            None => true,
+        }
+    }
+
+    /// `Debugger::do_next`'s stopping rule: the call depth is back at or
+    /// below `target.depth` AND the PC has reached a source line other than
+    /// `target.origin`. Depth alone is not enough -- a `debug` line's `JMP`
+    /// never changes depth, so a depth-only rule would stop before the PC
+    /// ever leaves the generated stub; line alone is not enough either -- a
+    /// callee sharing its caller's line (self-recursion on one statement)
+    /// would stop before the call actually returns.
+    fn step_over_reached(&self, target: &StepOverState) -> bool {
+        self.call_depth() <= target.depth && self.reached_new_line(target.origin.as_ref())
+    }
+
     /// `Debugger::do_next`'s rule, chunked: begin or continue a Step Over.
     ///
-    /// A fresh call (no Step Over already in flight) executes the call
-    /// instruction at the current PC -- never checking a breakpoint first,
-    /// same as `step` -- and, if the call depth increased (`PUSHJ`/`PUSHGO`
-    /// push a frame, `GO` does not), starts a chunked continuation back
-    /// down to that depth. If the depth didn't increase, or it halted, this
-    /// returns directly: there is nothing to continue.
+    /// A fresh call (no Step Over already in flight) executes the statement
+    /// at the current PC -- never checking a breakpoint first, same as
+    /// `step` -- and, unless that alone already reached a new line at or
+    /// below the starting depth, starts a chunked continuation back to that
+    /// target. A `debug` line's `JMP` is exactly the case that alone-step
+    /// misses: depth never changes, so without this the Step Over would end
+    /// with the PC still inside the generated, unmapped stub.
     ///
     /// A continuation call (one already in flight) executes up to `budget`
     /// more instructions, stopping sooner on a halt, a resolved breakpoint,
-    /// or the depth returning to the pre-call level -- the same shape
-    /// `run_chunk` uses, so Step Over is stoppable and cannot block the
-    /// event loop for a call that takes many instructions to return.
+    /// or the target being reached -- the same shape `run_chunk` uses, so
+    /// Step Over is stoppable and cannot block the event loop for a call
+    /// that takes many instructions to return. Self-recursion whose callee
+    /// entry shares its caller's line (`Loop PUSHJ $0,Loop`) runs on until a
+    /// genuinely new line, which is `Debugger::do_next`'s own rule too --
+    /// not a defect to "fix" here.
     ///
     /// Ends the run (`is_running()` becomes `false`) on every outcome
     /// except `BudgetExhausted`, which the caller is expected to yield on
@@ -527,45 +571,52 @@ impl Control {
         if self.halted {
             return StepOutcome::Halted;
         }
-        if self.step_over_target_depth.is_none() {
+        if self.step_over.is_none() {
             let pre_call_depth = self.call_depth();
+            let origin = self.assembler.source_loc(self.get_pc()).cloned();
             // May execute up to 4 instructions, not necessarily 1 (see
-            // `step_instruction_group`); the depth comparison below still
+            // `step_instruction_group`); the target check below still
             // correctly reflects whatever actually happened, since it reads
-            // `call_depth()` fresh rather than assuming a single call.
+            // `call_depth()` and the PC's source location fresh rather than
+            // assuming a single call.
             if self.step_instruction_group() == StepOutcome::Halted {
                 return StepOutcome::Halted;
             }
-            if self.call_depth() <= pre_call_depth {
+            let target = StepOverState {
+                depth: pre_call_depth,
+                origin,
+            };
+            if self.step_over_reached(&target) {
                 return StepOutcome::Advanced;
             }
             self.running = true;
-            self.step_over_target_depth = Some(pre_call_depth);
+            self.step_over = Some(target);
         }
-        let target_depth = self
-            .step_over_target_depth
+        let target = self
+            .step_over
+            .clone()
             .expect("set above, or by a prior call that left a continuation in flight");
 
         let mut count = 0usize;
-        while self.call_depth() > target_depth {
+        while !self.step_over_reached(&target) {
             if count >= budget {
                 return StepOutcome::BudgetExhausted;
             }
             if self.resolved_breakpoints.contains(&self.get_pc()) {
                 self.running = false;
-                self.step_over_target_depth = None;
+                self.step_over = None;
                 return StepOutcome::Breakpoint(self.get_pc());
             }
             if !self.mmix.execute_instruction() {
                 self.running = false;
-                self.step_over_target_depth = None;
+                self.step_over = None;
                 self.halted = true;
                 return StepOutcome::Halted;
             }
             count += 1;
         }
         self.running = false;
-        self.step_over_target_depth = None;
+        self.step_over = None;
         StepOutcome::Advanced
     }
 
@@ -627,10 +678,10 @@ impl Control {
     }
 
     /// Continue whichever chunked operation -- Run or Step Over -- is in
-    /// flight, dispatching on `step_over_target_depth` so `main.rs`'s
-    /// chunk-tick handler doesn't need to track which one it started.
+    /// flight, dispatching on `step_over` so `main.rs`'s chunk-tick handler
+    /// doesn't need to track which one it started.
     pub fn continue_chunk(&mut self, budget: usize) -> StepOutcome {
-        if self.step_over_target_depth.is_some() {
+        if self.step_over.is_some() {
             self.step_over_chunk(budget)
         } else {
             self.run_chunk(budget)
@@ -1719,5 +1770,39 @@ mod tests {
              would let the group search chase this same, mapped source line \
              through further recursive calls instead of stopping at one"
         );
+    }
+
+    #[test]
+    fn step_over_on_a_debug_line_lands_on_the_next_source_line_in_one_call() {
+        // checksmix 0.3.9's `debug` compiles to a `JMP` into a generated,
+        // unmapped stub, not a `PUSHJ` -- call depth never changes across
+        // it. A depth-only Step Over rule stops the instant that `JMP`
+        // executes, leaving the PC inside the stub with no source mapping;
+        // the fix must instead keep going until a new source line is
+        // reached, landing past the whole `debug` line in this one call.
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        let pre_call_depth = control.call_depth();
+        let next_line_addr = expect_addr(crate::examples::HELLO_WORLD_MMS, "hello.mms", 8);
+
+        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+
+        assert_eq!(outcome, StepOutcome::Advanced);
+        assert_eq!(
+            control.call_depth(),
+            pre_call_depth,
+            "a JMP never pushes a call frame, so depth must be unchanged"
+        );
+        assert_eq!(
+            control.get_pc(),
+            next_line_addr,
+            "Step Over must land on the line after the debug directive, not \
+             inside its generated stub"
+        );
+        assert!(
+            control.assembler.source_loc(control.marker_pc()).is_some(),
+            "the landing PC must resolve to a real source line"
+        );
+        assert!(!control.is_running());
     }
 }
