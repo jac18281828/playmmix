@@ -15,7 +15,6 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 use checksmix::{Host, MMix, MMixAssembler, SourceLoc, entry_point, write_image};
@@ -191,15 +190,22 @@ pub struct Control {
     /// arrival order. Rebuilt by `assemble_and_load`, so both `new` and a
     /// successful `reload` start with an empty buffer automatically.
     output: OutputBuffer,
-    /// The `[start, end]` bound of every text-segment address
-    /// `write_image` actually wrote for this load, or `None` if it wrote
-    /// none at all -- computed once from `machine().loaded_extent()` on
+    /// Every text-segment address `write_image` actually wrote for this
+    /// load -- computed once from `machine().loaded_extent()` on
     /// `new`/`reload` and cached, since that walks the whole image and
     /// `step_over_chunk`'s continuation loop checks it once per executed
-    /// instruction. A `debug` stub is unmapped in the source map but
-    /// `write_image` wrote its bytes too, so it sits inside this bound;
-    /// only running off the program's own end leaves it.
-    text_extent: Option<RangeInclusive<u64>>,
+    /// instruction. A membership test rather than a `[start, end]` bound:
+    /// a program with more than one `LOC` in its text segment can leave a
+    /// gap between two written regions, and a bound would read an address
+    /// in that gap as loaded when it never was. A `debug` stub is unmapped
+    /// in the source map but `write_image` wrote its bytes too, so they are
+    /// in this set; only running off the program's own end, or into a gap
+    /// between two `LOC`-separated regions, leaves it. Empty if
+    /// `write_image` wrote no text address at all (a program whose first
+    /// line is `LOC Data_Segment`); `left_loaded_image` then answers `true`
+    /// unconditionally, so Step Over degrades to a plain Step rather than
+    /// misreading nothing as everything.
+    loaded_text_addresses: BTreeSet<u64>,
 }
 
 /// A chunked Step Over's target, captured once when it begins: the call
@@ -217,7 +223,7 @@ impl Control {
     /// preserve them from.
     pub fn new(source: &str, filename: &str) -> Result<Self, String> {
         let (mmix, assembler, output) = Self::assemble_and_load(source, filename)?;
-        let text_extent = Self::text_extent(&mmix);
+        let loaded_text_addresses = Self::loaded_text_addresses(&mmix);
         Ok(Self {
             mmix,
             assembler,
@@ -230,7 +236,7 @@ impl Control {
             has_advanced: false,
             resumed_breakpoint: None,
             output,
-            text_extent,
+            loaded_text_addresses,
         })
     }
 
@@ -248,7 +254,7 @@ impl Control {
         self.running = false;
         self.step_over = None;
         let (mmix, assembler, output) = Self::assemble_and_load(source, &self.filename)?;
-        self.text_extent = Self::text_extent(&mmix);
+        self.loaded_text_addresses = Self::loaded_text_addresses(&mmix);
         self.mmix = mmix;
         self.assembler = assembler;
         self.halted = false;
@@ -275,22 +281,18 @@ impl Control {
         Ok((mmix, assembler, output))
     }
 
-    /// The `[start, end]` bound of `mmix`'s loaded text segment -- every
+    /// Every address `mmix`'s loaded text segment actually holds -- every
     /// address `write_image` wrote that isn't past `DATA_SEGMENT_START` --
-    /// or `None` if it wrote no text address at all (not reachable through
-    /// `Control::new`, which always has an entry point). `MMix::loaded_
-    /// extent` yields addresses in ascending order and text addresses sort
-    /// below every data address (segment 0 vs. segment 1+), so the
-    /// text-segment prefix can be taken directly without visiting the data
-    /// segment at all.
-    fn text_extent(mmix: &MMix) -> Option<RangeInclusive<u64>> {
-        let mut text_addrs = mmix
-            .loaded_extent()
+    /// empty if it wrote no text address at all. `MMix::loaded_extent`
+    /// yields addresses in ascending order and text addresses sort below
+    /// every data address (segment 0 vs. segment 1+), so the text-segment
+    /// prefix can be taken directly without visiting the data segment at
+    /// all.
+    fn loaded_text_addresses(mmix: &MMix) -> BTreeSet<u64> {
+        mmix.loaded_extent()
             .map(|(addr, _)| addr)
-            .take_while(|&addr| addr < DATA_SEGMENT_START);
-        let start = text_addrs.next()?;
-        let end = text_addrs.last().unwrap_or(start);
-        Some(start..=end)
+            .take_while(|&addr| addr < DATA_SEGMENT_START)
+            .collect()
     }
 
     /// Recompute `resolved_breakpoints` from `breakpoints` against the
@@ -561,17 +563,15 @@ impl Control {
         }
     }
 
-    /// Whether the PC has left the loaded image: outside `text_extent`
-    /// altogether, not just unmapped in the source map. A `debug` stub is
-    /// unmapped too, but `write_image` wrote its bytes, so it stays inside
-    /// `text_extent` -- only running off the program's own end leaves it.
-    /// The source map can't tell those two "unmapped" cases apart; this can.
+    /// Whether the PC has left the loaded image: not a member of
+    /// `loaded_text_addresses`, not just unmapped in the source map. A
+    /// `debug` stub is unmapped too, but `write_image` wrote its bytes, so
+    /// they are in `loaded_text_addresses` -- only running off the
+    /// program's own end, or into a gap between two `LOC`-separated
+    /// regions, leaves it. The source map can't tell those cases apart from
+    /// a genuine exit; this can.
     fn left_loaded_image(&self) -> bool {
-        let pc = self.get_pc();
-        !self
-            .text_extent
-            .as_ref()
-            .is_some_and(|extent| extent.contains(&pc))
+        !self.loaded_text_addresses.contains(&self.get_pc())
     }
 
     /// `Debugger::do_next`'s stopping rule, plus a case checksmix's own
@@ -1158,6 +1158,34 @@ mod tests {
         let outcome = control.run_chunk(1_000);
         assert_eq!(outcome, StepOutcome::Breakpoint(fresh_addr));
         assert_eq!(control.get_pc(), fresh_addr);
+    }
+
+    #[test]
+    fn reload_refreshes_the_loaded_text_address_cache() {
+        // `loaded_text_addresses` is computed once on load and cached (see
+        // its own doc for why). A reload that failed to recompute it would
+        // leave Step Over's `left_loaded_image` check consulting the
+        // *previous* load's addresses against the *new* machine's PC.
+        const SHORT_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
+        const LONGER_MMS: &str =
+            "\tLOC\t#100\nMain\tSETL\t$1,1\n\tSETL\t$2,2\n\tSETL\t$3,3\n\tTRAP\t0,Halt,0\n";
+
+        let mut control = Control::new(SHORT_MMS, "n.mms").expect("assembles");
+        let addresses_before_reload = control.loaded_text_addresses.clone();
+
+        control.reload(LONGER_MMS).expect("still assembles");
+
+        assert_ne!(
+            control.loaded_text_addresses, addresses_before_reload,
+            "reload must recompute the cache for the newly loaded image, \
+             not keep the previous load's addresses"
+        );
+        assert_eq!(
+            control.loaded_text_addresses,
+            Control::loaded_text_addresses(&control.mmix),
+            "the cache must match what the current machine actually has \
+             loaded"
+        );
     }
 
     #[test]
@@ -1939,6 +1967,57 @@ mod tests {
         assert_eq!(
             control.get_pc(),
             pc_after_plain_steps,
+            "Step Over must land exactly where a plain Step would"
+        );
+    }
+
+    #[test]
+    fn step_over_stops_at_a_gap_between_loc_regions_instead_of_running_into_it() {
+        // Two `LOC` directives in the text segment leave a gap between them
+        // that `write_image` never wrote -- ordinary MMIXAL, not a
+        // pathology. A `[start, end]` bound over the text segment reads an
+        // address in that gap as loaded when it never was, so the
+        // continuation loop would keep executing through it, decoding
+        // unwritten memory until it happens to read as `TRAP 0,Halt,0` --
+        // latching `halted` for a Step Over the user never asked to run
+        // that far, same class of defect as running off the program's own
+        // end. `loaded_text_addresses` is a membership set, not a bound, so
+        // it tells a real gap apart from loaded memory.
+        const GAP_BETWEEN_LOC_REGIONS_MMS: &str =
+            "\tLOC\t#100\nMain\tSETL\t$1,1\n\tLOC\t#108\n\tSETL\t$2,2\n\tTRAP\t0,Halt,0\n";
+
+        let mut stepped = Control::new(GAP_BETWEEN_LOC_REGIONS_MMS, "n.mms").expect("assembles");
+        assert_eq!(
+            stepped.step(),
+            StepOutcome::Advanced,
+            "a plain Step must not halt here -- fixture assumption"
+        );
+        let pc_after_plain_step = stepped.get_pc();
+
+        let mut control = Control::new(GAP_BETWEEN_LOC_REGIONS_MMS, "n.mms").expect("assembles");
+
+        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+
+        assert_eq!(
+            outcome,
+            StepOutcome::Advanced,
+            "landing in the gap must stop Step Over cleanly, not run it \
+             into an unintended halt"
+        );
+        assert!(
+            !control.is_halted(),
+            "Control::halted's own doc: this must never latch from running \
+             into a gap between loaded regions, or Run/Step/Step Over stay \
+             disabled until Reset for a halt the program never actually \
+             reached"
+        );
+        assert!(
+            control.output().is_empty(),
+            "no diagnostic or write must come from unmapped memory"
+        );
+        assert_eq!(
+            control.get_pc(),
+            pc_after_plain_step,
             "Step Over must land exactly where a plain Step would"
         );
     }
