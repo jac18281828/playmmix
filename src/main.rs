@@ -5,22 +5,23 @@ use gloo_timers::callback::Timeout;
 use log::info;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{BeforeUnloadEvent, Element, Event, KeyboardEvent, PointerEvent};
+use web_sys::{BeforeUnloadEvent, Element, Event, PointerEvent};
 use yew::{Callback, Component, Context, Html, NodeRef, Renderer, html};
 
 mod control;
+mod control_bar;
 mod editor;
 mod examples;
 mod highlight;
+mod keys;
 mod machine;
 mod output;
 
-use control::{
-    Control, ControlBar, ControlEnablement, KeyboardShortcut, StepOutcome, control_enablement,
-    keydown_decision, save_shortcut, yield_to_event_loop,
-};
+use control::{Control, StepOutcome, yield_to_event_loop};
+use control_bar::{ControlBar, ControlEnablement, control_enablement};
 use editor::Editor;
 use examples::DEFAULT_MMS;
+use keys::{KeydownHandler, install_keyboard_shortcuts};
 use machine::{MachinePane, ViewState};
 use output::OutputPane;
 
@@ -781,73 +782,6 @@ fn install_beforeunload_handler() -> (Rc<RefCell<bool>>, BeforeUnloadHandler) {
     }
 
     (dirty, handler)
-}
-
-/// The JS closure backing `window.onkeydown` -- must stay alive for as long
-/// as the handler should stay registered, same as [`BeforeUnloadHandler`].
-type KeydownHandler = Closure<dyn FnMut(KeyboardEvent)>;
-
-/// Registers `window.onkeydown`. Ctrl-S / Cmd-S (`save_shortcut`) dispatches
-/// `Msg::FlushSource` and suppresses the browser's Save dialog regardless of
-/// focus, checked first since it is the one shortcut that must fire while a
-/// text-entry element is focused. Every other keydown's whole decision --
-/// which shortcut fires, if any, and whether the browser's own default
-/// action must be prevented regardless -- comes from one call to
-/// `keydown_decision`, gated by the returned cell's current
-/// `ControlEnablement` -- kept live by `App::update`, not recomputed here.
-/// Seeded with the ready state (`control_enablement(false, false, false,
-/// false)`), matching a freshly-constructed `Control`. Returns the shared
-/// cell alongside the `Closure` backing the handler; the caller must keep the
-/// latter alive (see [`KeydownHandler`]).
-fn install_keyboard_shortcuts(
-    link: yew::html::Scope<App>,
-) -> (Rc<Cell<ControlEnablement>>, KeydownHandler) {
-    let enablement = Rc::new(Cell::new(control_enablement(false, false, false, false)));
-    let enablement_for_handler = enablement.clone();
-    let handler = Closure::wrap(Box::new(move |event: KeyboardEvent| {
-        let key = event.key();
-        // Checked before the text-input bail-out below, unlike the other
-        // shortcuts: Ctrl-S's only realistic use is while typing in the
-        // source editor, so it must fire regardless of focus.
-        if save_shortcut(&key, event.ctrl_key() || event.meta_key()) {
-            event.prevent_default();
-            link.send_message(Msg::FlushSource);
-            return;
-        }
-        let modifier_held = event.ctrl_key() || event.meta_key() || event.alt_key();
-        let shift_held = event.shift_key();
-        let focused_element_is_text_input = event
-            .target()
-            .and_then(|target| target.dyn_into::<Element>().ok())
-            .map(|element| matches!(element.tag_name().as_str(), "TEXTAREA" | "INPUT"))
-            .unwrap_or(false);
-        let (shortcut, prevent_default) = keydown_decision(
-            &key,
-            modifier_held,
-            shift_held,
-            focused_element_is_text_input,
-            enablement_for_handler.get(),
-        );
-        if prevent_default {
-            event.prevent_default();
-        }
-        if let Some(shortcut) = shortcut {
-            let msg = match shortcut {
-                KeyboardShortcut::Run => Msg::Run,
-                KeyboardShortcut::Continue => Msg::Continue,
-                KeyboardShortcut::Step => Msg::Step,
-                KeyboardShortcut::Next => Msg::Next,
-                KeyboardShortcut::Interrupt => Msg::Interrupt,
-            };
-            link.send_message(msg);
-        }
-    }) as Box<dyn FnMut(KeyboardEvent)>);
-
-    if let Some(window) = web_sys::window() {
-        window.set_onkeydown(Some(handler.as_ref().unchecked_ref()));
-    }
-
-    (enablement, handler)
 }
 
 /// `Msg::Interrupt`'s core logic, factored out of `App::update` so it is
