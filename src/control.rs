@@ -20,12 +20,6 @@ use std::rc::Rc;
 use checksmix::{MMix, MMixAssembler, SourceLoc, entry_point, start_program, write_image};
 use gloo_timers::callback::Timeout;
 
-#[cfg(test)]
-use crate::control_bar::control_enablement;
-#[cfg(test)]
-use crate::keys::keyboard_shortcut_for;
-#[cfg(test)]
-use crate::output::OutputStream;
 use crate::output::{CaptureHost, OutputBuffer, OutputSpan};
 
 /// The MMIX text/data segment boundary: the top three address bits select
@@ -744,6 +738,10 @@ pub fn yield_to_event_loop<F: FnOnce() + 'static>(callback: F) -> Timeout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::control_bar::control_enablement;
+    use crate::keys::keyboard_shortcut_for;
+    use crate::output::OutputStream;
 
     /// A five-iteration countdown loop. Line 3 (`SUBI`, the loop body) is
     /// the natural breakpoint target: it runs on every iteration, so a

@@ -15,8 +15,8 @@ These rules apply to all AI-assisted changes in this repository.
 - Prioritize correctness, then clarity, convention, and reviewability over cleverness.
 - Keep diffs focused; avoid idiosyncratic churn.
 - Decompose into small, single-purpose functions and modules.
-- Keep a module under 1,500 lines of code (`#[cfg(test)]` tests not counted), a
-  guideline code review watches, not a mechanical check; split by concern, never merely to fit the number.
+- Keep a module under 1,500 lines of code (`#[cfg(test)]` tests not counted), a guideline code
+  review watches, not a mechanical check; split by concern, never merely to fit the number.
 - Extract helpers as behavior grows rather than accreting onto existing ones.
 - Write comments that explain enduring intent or constraints, no editorial comments.
 
