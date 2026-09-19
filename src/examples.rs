@@ -24,7 +24,7 @@ pub const DEFAULT_MMS: &str = "% Hello, Halt.\n\n    LOC #100\nMain\n    TRAP   
 /// crate-relative path. Not the editor's default program (see
 /// `DEFAULT_MMS`) -- kept for its own sake as a behaviorally rich test
 /// fixture (`debug`, `LDA`, `Fputs`, a data-segment string) across
-/// `control.rs` and `machine.rs`, which is its only remaining use --
+/// `control.rs` and `machine/memory.rs`, which is its only remaining use --
 /// `#[cfg(test)]` accordingly, or it's dead code in a release build.
 #[cfg(test)]
 pub const HELLO_WORLD_MMS: &str = "\tLOC\tData_Segment\n\tGREG\t@\nText\tBYTE\t\"Hello world!\",'\\n',0\n\n\tLOC\t#100\n\nMain\tdebug \"Version 0.1: Hello World Example\"\t\n\tLDA\t\t$255,Text\n\tTRAP\t0,Fputs,StdOut\n\tTRAP\t0,Halt,0\n";
