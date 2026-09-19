@@ -463,18 +463,23 @@ impl Control {
         true
     }
 
-    /// Begin a chunked Run from the machine's current state. No-op once
+    /// Begin a chunked Run from the machine's current state, and start a
+    /// session immediately -- not left to `run_chunk`'s own first call:
+    /// `App::update` refreshes `shortcut_enablement` at the end of the very
+    /// same `Msg::Run` that calls this, before the first `ChunkTick` ever
+    /// reaches `run_chunk`, so an Interrupt landing in that window must
+    /// already see a started session (`paused`, Continue live), not `ready`.
+    /// `run_chunk` also sets this, redundantly for a call that went through
+    /// here first, but not for a direct caller (a host test, or any future
+    /// caller that skips `start_run`) -- see its own doc comment. No-op once
     /// halted -- see `is_halted`; Run's own restart always reloads first, so
     /// this guard never fires through the UI, only were `Control` called
-    /// directly on an already-halted machine. Leaves starting the session to
-    /// `run_chunk`'s own first call, not duplicated here: `run_chunk` sets it
-    /// before its entry-breakpoint check, so a Run that stops there before
-    /// executing anything still starts one -- a set here, ahead of that
-    /// call, could never distinguish the two.
+    /// directly on an already-halted machine.
     pub fn start_run(&mut self) {
         if self.halted {
             return;
         }
+        self.session = true;
         self.running = true;
     }
 
@@ -700,7 +705,11 @@ impl Control {
     /// hits a breakpoint always exhausts its budget. Ends the run
     /// (`is_running()` becomes `false`) on `Halted` or `Breakpoint`; leaves
     /// it running on `BudgetExhausted`, since the caller is expected to
-    /// yield and call this again. No-op once halted.
+    /// yield and call this again. No-op once halted. Also starts the session
+    /// -- redundantly for a call `start_run` already started one for, but
+    /// not for a direct caller that skips it, and this is the one call that
+    /// must cover a Run stopped at the entry breakpoint before executing
+    /// anything, whichever caller reaches it.
     pub fn run_chunk(&mut self, budget: usize) -> StepOutcome {
         if self.halted {
             return StepOutcome::Halted;

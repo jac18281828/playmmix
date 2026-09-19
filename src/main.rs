@@ -917,10 +917,11 @@ fn restart_and_run(
     error_line: &mut Option<usize>,
     view_state: &mut ViewState,
 ) -> bool {
+    let debounce_pending = debounce_timeout.is_some();
+    *debounce_timeout = None;
     restart_and_run_with(
-        debounce_timeout.is_some(),
+        debounce_pending,
         chunk_timeout,
-        debounce_timeout,
         control,
         source,
         error,
@@ -929,24 +930,15 @@ fn restart_and_run(
     )
 }
 
-/// [`restart_and_run`]'s testable core, parameterized on `debounce_pending`
-/// rather than reading it off a real `Timeout`.
-///
-/// A pending debounce means the shown source has already outrun the loaded
-/// one -- `had_session` must read the same whether the debounce had already
-/// fired, Ctrl-S had already flushed it, or neither has happened yet and this
-/// Run is what settles it: all three end with the same "was there a session
-/// before *this edit's own* reload" answer. Reading `control.session()`
-/// before flushing a still-pending debounce would instead read the *prior*
-/// edit's session, stale by exactly the debounce window -- true for the
-/// whole 400ms after an edit that itself ended a session, showing `Restarted
-/// ·` for a Run this settled decision says must report its outcome alone.
-/// Flushing first (an extra `reload_and_record`, mirroring what the debounce
-/// firing on its own would have done) makes the two cases converge before
-/// `had_session` is ever read.
-#[allow(clippy::too_many_arguments)]
-fn restart_and_run_with(
-    debounce_pending: bool,
+/// `Msg::Run`'s core, factored out for the same reason `continue_pressed`
+/// is: testable without a live `Context`, and the guard against a Run
+/// already in flight lives here, not inline in `update`, so a test can
+/// drive it directly. `None` -- nothing touched, `restart_and_run` never
+/// called -- while a Run is already in flight: nothing here should
+/// re-restart a running program out from under itself, and a no-op must
+/// leave a restarting Run's own `Restarted ·` untouched. `Some(had_session)`
+/// otherwise, via [`restart_and_run`].
+fn run_pressed(
     chunk_timeout: &mut Option<Timeout>,
     debounce_timeout: &mut Option<Timeout>,
     control: &mut Control,
@@ -954,23 +946,42 @@ fn restart_and_run_with(
     error: &mut Option<String>,
     error_line: &mut Option<usize>,
     view_state: &mut ViewState,
-) -> bool {
-    if debounce_pending {
-        *debounce_timeout = None;
-        reload_and_record(
-            chunk_timeout,
-            control,
-            source,
-            error,
-            error_line,
-            view_state,
-        );
-        if error.is_some() {
-            return false;
-        }
+) -> Option<bool> {
+    if control.is_running() {
+        return None;
     }
-    let had_session = control.session();
-    *debounce_timeout = None;
+    Some(restart_and_run(
+        chunk_timeout,
+        debounce_timeout,
+        control,
+        source,
+        error,
+        error_line,
+        view_state,
+    ))
+}
+
+/// [`restart_and_run`]'s testable core, parameterized on `debounce_pending`
+/// rather than reading it off a real `Timeout`.
+///
+/// A pending debounce means the shown source has already outrun the loaded
+/// one -- `had_session` must read the same whether the debounce had already
+/// fired, Ctrl-S had already flushed it, or neither has happened yet and this
+/// Run's own reload below is what settles it: all three end with the same
+/// "was there a session before *this edit's own* reload" answer, `false`.
+/// Reading `control.session()` only when nothing is pending is what makes
+/// the three converge, without a second reload just to force the read: one
+/// reload, always -- this Run's own, the only one that ever runs.
+fn restart_and_run_with(
+    debounce_pending: bool,
+    chunk_timeout: &mut Option<Timeout>,
+    control: &mut Control,
+    source: &str,
+    error: &mut Option<String>,
+    error_line: &mut Option<usize>,
+    view_state: &mut ViewState,
+) -> bool {
+    let had_session = !debounce_pending && control.session();
     reload_and_record(
         chunk_timeout,
         control,
@@ -1332,34 +1343,31 @@ impl Component for App {
                 true
             }
             Msg::Run => {
-                // A Run already in flight is a no-op: nothing here should
-                // re-restart a running program out from under itself, and a
-                // no-op must leave a restarting Run's own `Restarted ·` --
-                // set by an earlier `Msg::Run` -- untouched.
-                if self.control.is_running() {
-                    false
-                } else {
-                    // Run always restarts, through Reset's own path -- a
-                    // pending debounce is superseded by that restart, not
-                    // flushed separately.
-                    let restarted = restart_and_run(
-                        &mut self.chunk_timeout,
-                        &mut self.debounce_timeout,
-                        &mut self.control,
-                        &self.source,
-                        &mut self.error,
-                        &mut self.error_line,
-                        &mut self.view_state,
-                    );
-                    if self.error.is_some() {
-                        true
-                    } else {
-                        self.restart_signal = restarted;
-                        if self.control.is_running() {
-                            self.schedule_chunk_tick(ctx);
+                // Run always restarts, through Reset's own path -- a
+                // pending debounce is superseded by that restart, not
+                // flushed separately. `run_pressed` holds the guard against
+                // a Run already in flight.
+                match run_pressed(
+                    &mut self.chunk_timeout,
+                    &mut self.debounce_timeout,
+                    &mut self.control,
+                    &self.source,
+                    &mut self.error,
+                    &mut self.error_line,
+                    &mut self.view_state,
+                ) {
+                    None => false,
+                    Some(restarted) => {
+                        if self.error.is_some() {
+                            true
+                        } else {
+                            self.restart_signal = restarted;
+                            if self.control.is_running() {
+                                self.schedule_chunk_tick(ctx);
+                            }
+                            self.status_message = "Running".to_string();
+                            true
                         }
-                        self.status_message = "Running".to_string();
-                        true
                     }
                 }
             }
@@ -1897,6 +1905,94 @@ mod tests {
     }
 
     #[test]
+    fn run_pressed_is_a_true_no_op_while_a_run_is_already_in_flight() {
+        // A Run already in flight must be a no-op: nothing here should
+        // re-restart a running program out from under itself, or clobber a
+        // restarting Run's own `Restarted ·`.
+        let mut control =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "run-in-flight.mms").expect("assembles");
+        control.start_run();
+        assert!(control.is_running(), "fixture assumption");
+        let pc_before = control.get_pc();
+
+        let mut chunk_timeout = None;
+        let mut debounce_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        assert!(
+            run_pressed(
+                &mut chunk_timeout,
+                &mut debounce_timeout,
+                &mut control,
+                RESTART_STRAIGHT_LINE_MMS,
+                &mut error,
+                &mut error_line,
+                &mut view_state,
+            )
+            .is_none(),
+            "a Run already in flight must be a no-op"
+        );
+        // A restart would reload and reset the PC to the entry point; the
+        // no-op must leave the still-running program's own machine intact.
+        assert_eq!(control.get_pc(), pc_before);
+        assert!(control.is_running());
+    }
+
+    #[test]
+    fn run_then_immediate_interrupt_before_the_first_tick_still_reports_a_session() {
+        // `Msg::Run` calls `restart_and_run` (which calls `Control::
+        // start_run`), then `App::update` refreshes `shortcut_enablement`
+        // before the first `ChunkTick` -- scheduled async -- ever reaches
+        // `run_chunk`. An Interrupt landing in that window (a stray keydown,
+        // or a very fast double-tap) must already see a started session:
+        // `paused`, Continue live, not `ready`. `run_chunk` alone starting
+        // the session is too late for this window, since it never runs.
+        let mut control =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "run-then-interrupt.mms").expect("assembles");
+        let mut chunk_timeout = None;
+        let mut debounce_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        restart_and_run(
+            &mut chunk_timeout,
+            &mut debounce_timeout,
+            &mut control,
+            RESTART_STRAIGHT_LINE_MMS,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+        assert!(error.is_none(), "fixture must still assemble");
+        assert!(
+            control.is_running(),
+            "fixture assumption: nothing has ticked yet"
+        );
+
+        // Interrupt before any `resume_chunk`/`run_chunk` call at all.
+        assert!(interrupt_if_running(&mut control, &mut view_state));
+
+        assert!(
+            control.session(),
+            "a Run interrupted before its first tick must still report a session"
+        );
+        let enablement = control_enablement(
+            control.is_running(),
+            control.is_halted(),
+            control.session(),
+            false,
+        );
+        assert!(
+            !enablement.continue_disabled,
+            "Continue must read live, not `ready`'s disabled"
+        );
+    }
+
+    #[test]
     fn restart_and_run_with_reports_the_same_had_session_whichever_order_the_debounce_lands_in() {
         // A Step starts a session; an edit thereafter (`Msg::SourceChanged`)
         // never touches `session` itself -- only a reload does, whether
@@ -1919,7 +2015,6 @@ mod tests {
             .expect("still assembles");
         assert!(!already_flushed.session());
         let mut chunk_timeout = None;
-        let mut debounce_timeout = None;
         let mut error = None;
         let mut error_line = None;
         let mut view_state = ViewState::new();
@@ -1927,7 +2022,6 @@ mod tests {
         let had_session_after_flush = restart_and_run_with(
             false,
             &mut chunk_timeout,
-            &mut debounce_timeout,
             &mut already_flushed,
             RESTART_STRAIGHT_LINE_MMS,
             &mut error,
@@ -1945,7 +2039,6 @@ mod tests {
         let mut still_pending = session_after_a_step("still-pending.mms");
         assert!(still_pending.session());
         let mut chunk_timeout2 = None;
-        let mut debounce_timeout2 = None;
         let mut error2 = None;
         let mut error_line2 = None;
         let mut view_state2 = ViewState::new();
@@ -1953,7 +2046,6 @@ mod tests {
         let had_session_within_debounce = restart_and_run_with(
             true,
             &mut chunk_timeout2,
-            &mut debounce_timeout2,
             &mut still_pending,
             RESTART_STRAIGHT_LINE_MMS,
             &mut error2,
