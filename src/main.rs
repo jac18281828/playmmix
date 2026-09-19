@@ -16,7 +16,7 @@ mod machine;
 
 use control::{
     Control, ControlBar, ControlEnablement, KeyboardShortcut, StepOutcome, control_enablement,
-    keyboard_shortcut_for, save_shortcut, should_swallow_bare_fkey, yield_to_event_loop,
+    keydown_decision, save_shortcut, yield_to_event_loop,
 };
 use editor::Editor;
 use examples::DEFAULT_MMS;
@@ -706,6 +706,49 @@ fn advance_chunk_once(
     }
 }
 
+/// Continue's and Next's shared "first chunk landed" tail: observe the
+/// resulting state, and on every terminal outcome (not `BudgetExhausted`)
+/// record the pause boundary too. Takes the outcome already computed, not
+/// the call that produced it -- Continue's unconditional first instruction
+/// and Next's own statement-then-target-check are the one part that isn't
+/// shared. Returns the status text plus whether the caller must schedule
+/// another chunk tick.
+fn first_chunk_outcome(
+    control: &mut Control,
+    view_state: &mut ViewState,
+    outcome: StepOutcome,
+) -> (String, bool) {
+    view_state.observe(control);
+    match outcome {
+        StepOutcome::BudgetExhausted => (status_for(outcome).to_string(), true),
+        StepOutcome::Advanced | StepOutcome::Halted | StepOutcome::Breakpoint(_) => {
+            view_state.record_pause_boundary(control);
+            (status_for(outcome).to_string(), false)
+        }
+    }
+}
+
+/// `Msg::Continue`'s core, factored out for the same reason
+/// `interrupt_if_running` is: testable without a live `Context`. `None` --
+/// nothing run, `restart_signal` and `status_message` both left untouched by
+/// the caller -- when nothing is running but no session has started either:
+/// gdb answers "The program is not being run" there. Reachable even though
+/// `ControlEnablement` already gates Continue on a started session, because
+/// `App::update`'s own `flush_pending_reassemble` runs first and can itself
+/// reload, ending the very session this call would otherwise have resumed --
+/// the owner's settled decision is that the flush, not this call, is what
+/// already changed state, so this is a true no-op, not a fallback path.
+/// Clears the changed-value highlights before executing, same as Run and
+/// Next (`docs/layout-spec.md`'s Highlights §3).
+fn continue_pressed(control: &mut Control, view_state: &mut ViewState) -> Option<(String, bool)> {
+    if control.is_running() || !control.session() {
+        return None;
+    }
+    view_state.clear_changed();
+    let outcome = control.continue_chunk(control::CHUNK_BUDGET);
+    Some(first_chunk_outcome(control, view_state, outcome))
+}
+
 /// The JS closure backing `window.onbeforeunload` -- must stay alive for as
 /// long as the handler should stay registered; dropping it frees the JS
 /// function `onbeforeunload` points at.
@@ -745,16 +788,15 @@ type KeydownHandler = Closure<dyn FnMut(KeyboardEvent)>;
 /// Registers `window.onkeydown`. Ctrl-S / Cmd-S (`save_shortcut`) dispatches
 /// `Msg::FlushSource` and suppresses the browser's Save dialog regardless of
 /// focus, checked first since it is the one shortcut that must fire while a
-/// text-entry element is focused. A bare F10/F11 is always prevented next
-/// (`should_swallow_bare_fkey`), whether or not it fires a control, so
-/// Firefox's menu bar and the browser's fullscreen toggle never trigger on
-/// this page. Otherwise, dispatches the `Msg` `keyboard_shortcut_for` maps
-/// the key to, gated by the returned cell's current `ControlEnablement` --
-/// kept live by `App::rendered`, not recomputed here. Seeded with the ready
-/// state (`control_enablement(false, false, false, false)`), matching a
-/// freshly-constructed `Control`. Returns the shared cell alongside the
-/// `Closure` backing the handler; the caller must keep the latter alive (see
-/// [`KeydownHandler`]).
+/// text-entry element is focused. Every other keydown's whole decision --
+/// which shortcut fires, if any, and whether the browser's own default
+/// action must be prevented regardless -- comes from one call to
+/// `keydown_decision`, gated by the returned cell's current
+/// `ControlEnablement` -- kept live by `App::update`, not recomputed here.
+/// Seeded with the ready state (`control_enablement(false, false, false,
+/// false)`), matching a freshly-constructed `Control`. Returns the shared
+/// cell alongside the `Closure` backing the handler; the caller must keep the
+/// latter alive (see [`KeydownHandler`]).
 fn install_keyboard_shortcuts(
     link: yew::html::Scope<App>,
 ) -> (Rc<Cell<ControlEnablement>>, KeydownHandler) {
@@ -772,26 +814,22 @@ fn install_keyboard_shortcuts(
         }
         let modifier_held = event.ctrl_key() || event.meta_key() || event.alt_key();
         let shift_held = event.shift_key();
-        let swallow = should_swallow_bare_fkey(&key, modifier_held, shift_held);
-        if swallow {
-            event.prevent_default();
-        }
         let focused_element_is_text_input = event
             .target()
             .and_then(|target| target.dyn_into::<Element>().ok())
             .map(|element| matches!(element.tag_name().as_str(), "TEXTAREA" | "INPUT"))
             .unwrap_or(false);
-        let shortcut = keyboard_shortcut_for(
+        let (shortcut, prevent_default) = keydown_decision(
             &key,
             modifier_held,
             shift_held,
             focused_element_is_text_input,
             enablement_for_handler.get(),
         );
+        if prevent_default {
+            event.prevent_default();
+        }
         if let Some(shortcut) = shortcut {
-            if !swallow {
-                event.prevent_default();
-            }
             let msg = match shortcut {
                 KeyboardShortcut::Run => Msg::Run,
                 KeyboardShortcut::Continue => Msg::Continue,
@@ -858,15 +896,18 @@ fn reload_and_record(
 /// `reload_and_record` is: testable without a live `Context`. Always
 /// restarts through `reload_and_record` -- Reset's own path -- so Run and
 /// Reset can never land in different states: a program mid-run, or paused
-/// at a breakpoint, restarts exactly as one freshly loaded does. Cancels
-/// `debounce_timeout` too, as `App::reload_source` does today --
-/// `reload_and_record` alone does not.
+/// at a breakpoint, restarts exactly as one freshly loaded does.
 ///
 /// Returns whether a session existed before this call, the restart signal
 /// `App::advance_chunk` composes onto this Run's own terminal outcome
 /// (`Restarted · <outcome>`, via `restarted_status`) -- never set when
 /// there was no session to restart from. `false` on a parse error too:
 /// nothing will run for this signal to reach.
+///
+/// Thin wrapper over [`restart_and_run_with`], reading whether a debounce is
+/// actually pending off `debounce_timeout` -- the one thing a host test can't
+/// drive directly, since a real `Timeout` can't be constructed off the wasm
+/// target.
 fn restart_and_run(
     chunk_timeout: &mut Option<Timeout>,
     debounce_timeout: &mut Option<Timeout>,
@@ -876,6 +917,58 @@ fn restart_and_run(
     error_line: &mut Option<usize>,
     view_state: &mut ViewState,
 ) -> bool {
+    restart_and_run_with(
+        debounce_timeout.is_some(),
+        chunk_timeout,
+        debounce_timeout,
+        control,
+        source,
+        error,
+        error_line,
+        view_state,
+    )
+}
+
+/// [`restart_and_run`]'s testable core, parameterized on `debounce_pending`
+/// rather than reading it off a real `Timeout`.
+///
+/// A pending debounce means the shown source has already outrun the loaded
+/// one -- `had_session` must read the same whether the debounce had already
+/// fired, Ctrl-S had already flushed it, or neither has happened yet and this
+/// Run is what settles it: all three end with the same "was there a session
+/// before *this edit's own* reload" answer. Reading `control.session()`
+/// before flushing a still-pending debounce would instead read the *prior*
+/// edit's session, stale by exactly the debounce window -- true for the
+/// whole 400ms after an edit that itself ended a session, showing `Restarted
+/// ·` for a Run this settled decision says must report its outcome alone.
+/// Flushing first (an extra `reload_and_record`, mirroring what the debounce
+/// firing on its own would have done) makes the two cases converge before
+/// `had_session` is ever read.
+#[allow(clippy::too_many_arguments)]
+fn restart_and_run_with(
+    debounce_pending: bool,
+    chunk_timeout: &mut Option<Timeout>,
+    debounce_timeout: &mut Option<Timeout>,
+    control: &mut Control,
+    source: &str,
+    error: &mut Option<String>,
+    error_line: &mut Option<usize>,
+    view_state: &mut ViewState,
+) -> bool {
+    if debounce_pending {
+        *debounce_timeout = None;
+        reload_and_record(
+            chunk_timeout,
+            control,
+            source,
+            error,
+            error_line,
+            view_state,
+        );
+        if error.is_some() {
+            return false;
+        }
+    }
     let had_session = control.session();
     *debounce_timeout = None;
     reload_and_record(
@@ -1040,9 +1133,14 @@ pub struct App {
     /// live channel to it.
     _beforeunload_handler: BeforeUnloadHandler,
     /// Live enablement `window.onkeydown`'s handler reads on every keydown --
-    /// kept current by `rendered`, since the handler itself runs outside any
-    /// render and so can't call `control_enablement` against fresh state
-    /// directly.
+    /// kept current by the end of `update`, since the handler itself runs
+    /// outside any render and so can't call `control_enablement` against
+    /// fresh state directly. Refreshed from `update`, not `rendered`: Yew
+    /// 0.23's scheduler (`run_scheduler`'s `can_yield` ignores the rendered
+    /// queue while `fill_queue` runs updates first) can starve `rendered` for
+    /// the whole span of a chunked Run/Continue/Next, since `ChunkTick`
+    /// messages keep the update queue non-empty -- `x` stopped mapping to
+    /// Interrupt mid-run before this moved.
     shortcut_enablement: Rc<Cell<ControlEnablement>>,
     /// Kept alive for as long as `App` is, same reason as
     /// `_beforeunload_handler`. Never read directly.
@@ -1172,7 +1270,11 @@ impl Component for App {
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        match msg {
+        // No arm below returns early: the render decision is always this
+        // match's own tail value, never a `return`, so `shortcut_enablement`
+        // below is refreshed on every message, unconditionally -- the fix
+        // for the field's own starvation bug (see its doc comment).
+        let should_render = match msg {
             Msg::SourceChanged(source) => {
                 // Re-assembling (and showing a resulting parse error) is
                 // debounced to `Msg::ReassembleSource` -- see
@@ -1230,98 +1332,100 @@ impl Component for App {
                 true
             }
             Msg::Run => {
-                // Run always restarts, through Reset's own path -- a
-                // pending debounce is superseded by that restart, not
-                // flushed separately.
-                let restarted = restart_and_run(
-                    &mut self.chunk_timeout,
-                    &mut self.debounce_timeout,
-                    &mut self.control,
-                    &self.source,
-                    &mut self.error,
-                    &mut self.error_line,
-                    &mut self.view_state,
-                );
-                if self.error.is_some() {
-                    return true;
-                }
-                self.restart_signal = restarted;
+                // A Run already in flight is a no-op: nothing here should
+                // re-restart a running program out from under itself, and a
+                // no-op must leave a restarting Run's own `Restarted ·` --
+                // set by an earlier `Msg::Run` -- untouched.
                 if self.control.is_running() {
-                    self.schedule_chunk_tick(ctx);
+                    false
+                } else {
+                    // Run always restarts, through Reset's own path -- a
+                    // pending debounce is superseded by that restart, not
+                    // flushed separately.
+                    let restarted = restart_and_run(
+                        &mut self.chunk_timeout,
+                        &mut self.debounce_timeout,
+                        &mut self.control,
+                        &self.source,
+                        &mut self.error,
+                        &mut self.error_line,
+                        &mut self.view_state,
+                    );
+                    if self.error.is_some() {
+                        true
+                    } else {
+                        self.restart_signal = restarted;
+                        if self.control.is_running() {
+                            self.schedule_chunk_tick(ctx);
+                        }
+                        self.status_message = "Running".to_string();
+                        true
+                    }
                 }
-                self.status_message = "Running".to_string();
-                true
             }
             Msg::Continue => {
-                self.restart_signal = false;
                 if !self.flush_pending_reassemble() {
-                    return true;
-                }
-                // The flush above may itself have reloaded, ending the
-                // session Continue depended on -- a no-op then, per the
-                // owner's settled decision.
-                if !self.control.is_running() && self.control.session() {
-                    let outcome = self.control.continue_chunk(control::CHUNK_BUDGET);
-                    self.status_message = status_for(outcome).to_string();
-                    match outcome {
-                        StepOutcome::BudgetExhausted => {
-                            self.view_state.observe(&self.control);
+                    true
+                } else {
+                    // `continue_pressed` is `None` when nothing is running
+                    // but no session has started either -- the flush above
+                    // may itself have reloaded, ending the session Continue
+                    // depended on, per the owner's settled decision. A no-op
+                    // then: `restart_signal` and `status_message` are only
+                    // touched once Continue actually proceeds, so a no-op
+                    // Continue never wipes a restarting Run's own
+                    // `Restarted ·`.
+                    if let Some((status, needs_tick)) =
+                        continue_pressed(&mut self.control, &mut self.view_state)
+                    {
+                        self.restart_signal = false;
+                        self.status_message = status;
+                        if needs_tick {
                             self.schedule_chunk_tick(ctx);
                         }
-                        StepOutcome::Advanced
-                        | StepOutcome::Halted
-                        | StepOutcome::Breakpoint(_) => {
-                            self.view_state.observe(&self.control);
-                            self.view_state.record_pause_boundary(&self.control);
-                        }
                     }
+                    true
                 }
-                true
             }
             Msg::Step => {
-                self.restart_signal = false;
                 if !self.flush_pending_reassemble() {
-                    return true;
-                }
-                if !self.control.is_running() {
-                    let was_halted = self.control.is_halted();
-                    let outcome = self.control.step();
-                    if !was_halted {
-                        self.view_state.observe(&self.control);
-                        self.view_state.record_pause_boundary(&self.control);
-                        self.status_message = if outcome == StepOutcome::Halted {
-                            "Halted"
-                        } else {
-                            "Stepped"
-                        }
-                        .to_string();
-                    }
-                }
-                true
-            }
-            Msg::Next => {
-                self.restart_signal = false;
-                if !self.flush_pending_reassemble() {
-                    return true;
-                }
-                if !self.control.is_running() {
-                    self.view_state.clear_changed();
-                    let outcome = self.control.next_chunk(control::CHUNK_BUDGET);
-                    self.status_message = status_for(outcome).to_string();
-                    match outcome {
-                        StepOutcome::BudgetExhausted => {
-                            self.view_state.observe(&self.control);
-                            self.schedule_chunk_tick(ctx);
-                        }
-                        StepOutcome::Advanced
-                        | StepOutcome::Halted
-                        | StepOutcome::Breakpoint(_) => {
+                    true
+                } else {
+                    if !self.control.is_running() {
+                        let was_halted = self.control.is_halted();
+                        let outcome = self.control.step();
+                        if !was_halted {
+                            self.restart_signal = false;
                             self.view_state.observe(&self.control);
                             self.view_state.record_pause_boundary(&self.control);
+                            self.status_message = if outcome == StepOutcome::Halted {
+                                "Halted"
+                            } else {
+                                "Stepped"
+                            }
+                            .to_string();
                         }
                     }
+                    true
                 }
-                true
+            }
+            Msg::Next => {
+                if !self.flush_pending_reassemble() {
+                    true
+                } else {
+                    if !self.control.is_running() {
+                        self.restart_signal = false;
+                        self.view_state.clear_changed();
+                        let outcome = self.control.next_chunk(control::CHUNK_BUDGET);
+                        let (status, needs_tick) =
+                            first_chunk_outcome(&mut self.control, &mut self.view_state, outcome);
+                        self.status_message = status;
+                        if needs_tick {
+                            self.schedule_chunk_tick(ctx);
+                        }
+                    }
+                    true
+                }
             }
             Msg::Interrupt => {
                 self.restart_signal = false;
@@ -1372,7 +1476,17 @@ impl Component for App {
                 self.output_height = Some(height);
                 true
             }
-        }
+        };
+        // `window.onkeydown`'s choke point -- see `shortcut_enablement`'s own
+        // doc comment for why this lives here, at the end of every `update`,
+        // rather than in `rendered`.
+        self.shortcut_enablement.set(control_enablement(
+            self.control.is_running(),
+            self.control.is_halted(),
+            self.control.session(),
+            self.error.is_some(),
+        ));
+        should_render
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
@@ -1496,20 +1610,6 @@ impl Component for App {
                 <div class="machine-slot">{ machine_view }</div>
             </main>
         }
-    }
-
-    /// Keeps `shortcut_enablement` current for `window.onkeydown`'s handler
-    /// -- one choke point, guaranteed to run after every render, rather than
-    /// a write in each of `update`'s several state-changing arms. Recomputes
-    /// unconditionally, `first_render` included: there is no cheaper correct
-    /// state to seed with than the real one.
-    fn rendered(&mut self, _ctx: &Context<Self>, _first_render: bool) {
-        self.shortcut_enablement.set(control_enablement(
-            self.control.is_running(),
-            self.control.is_halted(),
-            self.control.session(),
-            self.error.is_some(),
-        ));
     }
 }
 
@@ -1797,6 +1897,79 @@ mod tests {
     }
 
     #[test]
+    fn restart_and_run_with_reports_the_same_had_session_whichever_order_the_debounce_lands_in() {
+        // A Step starts a session; an edit thereafter (`Msg::SourceChanged`)
+        // never touches `session` itself -- only a reload does, whether
+        // that reload is the debounce firing, Ctrl-S flushing it, or this
+        // Run's own restart. All three must report the same `had_session`
+        // for the restart that follows an edit: `false`, since the edit is
+        // what ended the prior session, not this Run.
+        fn session_after_a_step(filename: &str) -> Control {
+            let mut control = Control::new(RESTART_STRAIGHT_LINE_MMS, filename).expect("assembles");
+            assert_eq!(control.step(), StepOutcome::Advanced);
+            assert!(control.session(), "fixture assumption");
+            control
+        }
+
+        // The debounce already fired (or Ctrl-S flushed it): by the time
+        // Run runs, `session` is already false.
+        let mut already_flushed = session_after_a_step("already-flushed.mms");
+        already_flushed
+            .reload(RESTART_STRAIGHT_LINE_MMS)
+            .expect("still assembles");
+        assert!(!already_flushed.session());
+        let mut chunk_timeout = None;
+        let mut debounce_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        view_state.reset(&already_flushed);
+        let had_session_after_flush = restart_and_run_with(
+            false,
+            &mut chunk_timeout,
+            &mut debounce_timeout,
+            &mut already_flushed,
+            RESTART_STRAIGHT_LINE_MMS,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+        assert!(error.is_none());
+        assert!(
+            !had_session_after_flush,
+            "a Run after the debounce already fired reports its outcome alone"
+        );
+
+        // The debounce is still pending: without the ordering fix, `session`
+        // would still read true here, since nothing has reloaded yet.
+        let mut still_pending = session_after_a_step("still-pending.mms");
+        assert!(still_pending.session());
+        let mut chunk_timeout2 = None;
+        let mut debounce_timeout2 = None;
+        let mut error2 = None;
+        let mut error_line2 = None;
+        let mut view_state2 = ViewState::new();
+        view_state2.reset(&still_pending);
+        let had_session_within_debounce = restart_and_run_with(
+            true,
+            &mut chunk_timeout2,
+            &mut debounce_timeout2,
+            &mut still_pending,
+            RESTART_STRAIGHT_LINE_MMS,
+            &mut error2,
+            &mut error_line2,
+            &mut view_state2,
+        );
+        assert!(error2.is_none());
+        assert_eq!(
+            had_session_within_debounce, had_session_after_flush,
+            "a Run pressed within the debounce window must report the same \
+             `had_session` as one pressed after the debounce fires"
+        );
+        assert!(!had_session_within_debounce);
+    }
+
+    #[test]
     fn a_restart_composes_onto_the_final_outcome_not_an_intermediate_tick() {
         fn restart_then_advance_to_terminal(
             control: &mut Control,
@@ -1867,6 +2040,56 @@ mod tests {
         );
     }
 
+    /// A non-halting counter loop, long enough to outlast one
+    /// `control::CHUNK_BUDGET`-sized chunk -- `BudgetExhausted`, not a
+    /// terminal outcome, is the state this file's own §8-style proofs need
+    /// for a chunk still mid-run.
+    const INFINITE_LOOP_MMS: &str =
+        "\tLOC\t#100\nMain\tSETL\t$1,0\nLoop\tADDU\t$1,$1,1\n\tJMP\tLoop\n";
+
+    #[test]
+    fn shortcut_enablement_reads_interrupt_live_mid_chunk_not_just_at_rest() {
+        // The data half of the fix for "`x` never interrupts a chunked
+        // Run/Continue/Next": while a chunk is between ticks
+        // (`BudgetExhausted`, still `is_running()`), the enablement the
+        // keydown handler reads must already show Interrupt live and every
+        // other control disabled -- not whatever `App` had before the run
+        // started. The previous bug was `App::rendered` alone refreshing
+        // this cell, which Yew 0.23's scheduler can starve for a chunked
+        // run's entire span (`run_scheduler`'s `can_yield` ignores the
+        // rendered queue while `ChunkTick` messages keep the update queue
+        // non-empty) -- `App::rendered` no longer exists at all, and
+        // `App::update` refreshes this cell itself, at the end, on every
+        // message. That structural half can't be driven host-side without a
+        // live `yew::Context` (`AGENTS.md`'s Component-lifecycle exemption);
+        // this test pins the state the choke point must compute from.
+        let mut control = Control::new(INFINITE_LOOP_MMS, "loop.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        let mut restart_signal = false;
+        control.start_run();
+
+        let (_, needs_tick) =
+            advance_chunk_once(&mut control, &mut view_state, &mut restart_signal);
+        assert!(needs_tick, "fixture must outlast one chunk budget");
+        assert!(control.is_running(), "a BudgetExhausted tick stays running");
+
+        let enablement = control_enablement(
+            control.is_running(),
+            control.is_halted(),
+            control.session(),
+            false,
+        );
+        assert!(
+            !enablement.interrupt_disabled,
+            "Interrupt must read live mid-chunk"
+        );
+        assert!(enablement.run_disabled);
+        assert!(enablement.continue_disabled);
+        assert!(enablement.step_disabled);
+        assert!(enablement.next_disabled);
+    }
+
     #[test]
     fn interrupt_if_running_is_a_true_no_op_while_paused() {
         const WRITES_REGISTER_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tTRAP\t0,Halt,0\n";
@@ -1876,8 +2099,7 @@ mod tests {
 
         // An explicit Step, not a chunked Run/Continue/Next: `is_running()`
         // stays false throughout, exactly the `paused` state a stray
-        // `Msg::Interrupt` can still arrive in -- the key handler's
-        // enablement cell refreshes only in `App::rendered`.
+        // `Msg::Interrupt` can still arrive in.
         assert_eq!(control.step(), StepOutcome::Advanced);
         assert!(!control.is_running(), "a plain Step never sets running");
         assert!(control.session(), "a Step must start a session -- paused");
@@ -1921,6 +2143,52 @@ mod tests {
             view_state.changed_specials(),
             &changed_specials_after_step,
             "an inert Interrupt must not touch the changed-specials set"
+        );
+    }
+
+    #[test]
+    fn continue_pressed_is_a_true_no_op_once_the_session_has_ended() {
+        // `Msg::Continue`'s own `flush_pending_reassemble` can itself
+        // reload, ending the session Continue depended on -- a genuine
+        // no-op then, per the owner's settled decision, previously
+        // untested at this seam.
+        let mut control =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "continue-no-session.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        assert!(!control.session(), "fixture assumption: fresh load");
+
+        assert!(continue_pressed(&mut control, &mut view_state).is_none());
+    }
+
+    #[test]
+    fn continue_pressed_clears_the_changed_highlights_before_executing() {
+        // A Step first flags `$1` changed; `continue_pressed` must clear
+        // that before running, same as Run and Next
+        // (`docs/layout-spec.md`'s Highlights §3) -- not leave it to
+        // `record_pause_boundary`, which a `BudgetExhausted` outcome (this
+        // fixture never halts) never reaches, only `observe`, which never
+        // touches the changed sets.
+        let mut control =
+            Control::new(INFINITE_LOOP_MMS, "continue-clears.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        assert_eq!(control.step(), StepOutcome::Advanced); // SETL $1,0 -- starts the session
+        assert_eq!(control.step(), StepOutcome::Advanced); // ADDU $1,$1,1 -- $1 becomes 1
+        view_state.observe(&control);
+        view_state.record_pause_boundary(&control);
+        assert!(
+            view_state.changed_registers().contains(&1),
+            "fixture assumption: the second step must flag $1 changed"
+        );
+
+        let (_, needs_tick) =
+            continue_pressed(&mut control, &mut view_state).expect("a paused session proceeds");
+        assert!(needs_tick, "fixture must outlast one chunk budget");
+        assert!(
+            !view_state.changed_registers().contains(&1),
+            "Continue must clear the stale changed mark before running: {:?}",
+            view_state.changed_registers()
         );
     }
 

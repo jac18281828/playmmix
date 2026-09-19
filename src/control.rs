@@ -10,8 +10,10 @@
 //! [`ControlBar`] is the Yew-facing button bar. The chunked run loop itself
 //! lives in `main.rs`'s `App`, which is what holds the machine across
 //! renders (see that module) and therefore what decides when to call
-//! [`Control::run_chunk`], [`Control::continue_chunk`], or
-//! [`Control::next_chunk`], and when to yield via [`yield_to_event_loop`].
+//! [`Control::continue_chunk`] or [`Control::next_chunk`] for a Continue's
+//! or Next's own first, synchronous instruction, [`Control::resume_chunk`]
+//! for every chunk tick that follows -- Run's included -- and when to
+//! yield via [`yield_to_event_loop`].
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -179,17 +181,6 @@ pub struct Control {
     /// program is not being run" before a session starts. Cleared by
     /// `reload`, the one path every successful reload takes.
     session: bool,
-    /// The address `run_chunk` just stopped at because it was a resolved
-    /// breakpoint, or `None`. Consumed (read once, then always cleared) at
-    /// the top of the very next `run_chunk` call: if the machine's PC still
-    /// sits at this address, that call is a deliberate "continue past the
-    /// breakpoint I'm paused at," so its entry check is skipped for exactly
-    /// that one instruction. Any other address (or no value at all) means
-    /// this is a fresh start -- possibly one whose very first instruction
-    /// is itself a breakpoint, the case `run_chunk`'s own mid-chunk check
-    /// can never catch, since it only ever inspects the PC *after*
-    /// executing.
-    resumed_breakpoint: Option<u64>,
     /// The current load's captured stdout/stderr/diagnostic output, in
     /// arrival order. Rebuilt by `assemble_and_load`, so both `new` and a
     /// successful `reload` start with an empty buffer automatically.
@@ -238,7 +229,6 @@ impl Control {
             next_target: None,
             halted: false,
             session: false,
-            resumed_breakpoint: None,
             output,
             loaded_text_addresses,
         })
@@ -265,7 +255,6 @@ impl Control {
         self.assembler = assembler;
         self.halted = false;
         self.session = false;
-        self.resumed_breakpoint = None;
         self.output = output;
         self.resolve_breakpoints();
         Ok(())
@@ -474,15 +463,18 @@ impl Control {
         true
     }
 
-    /// Begin a chunked Run from the machine's current state, and start a
-    /// session. No-op once halted -- see `is_halted`; Run's own restart
-    /// always reloads first, so this guard never fires through the UI, only
-    /// were `Control` called directly on an already-halted machine.
+    /// Begin a chunked Run from the machine's current state. No-op once
+    /// halted -- see `is_halted`; Run's own restart always reloads first, so
+    /// this guard never fires through the UI, only were `Control` called
+    /// directly on an already-halted machine. Leaves starting the session to
+    /// `run_chunk`'s own first call, not duplicated here: `run_chunk` sets it
+    /// before its entry-breakpoint check, so a Run that stops there before
+    /// executing anything still starts one -- a set here, ahead of that
+    /// call, could never distinguish the two.
     pub fn start_run(&mut self) {
         if self.halted {
             return;
         }
-        self.session = true;
         self.running = true;
     }
 
@@ -697,11 +689,12 @@ impl Control {
     /// point with no address-consuming label before it, or any other PC a
     /// Step/Reset/reload happened to land on -- would silently execute
     /// before this loop ever got a chance to see it. The entry check below
-    /// closes that gap, without breaking a direct second call that resumes
-    /// past the breakpoint the previous call stopped at:
-    /// `resumed_breakpoint` names exactly the one address that call is
-    /// allowed to run through unchecked, and only while the PC still sits
-    /// there.
+    /// closes that gap. It fires unconditionally, with no "I'm deliberately
+    /// resuming past the breakpoint I last stopped at" exception: Run always
+    /// restarts (see `docs/layout-spec.md`'s Run lifecycle), so the only way
+    /// past a breakpoint is Continue, whose own unconditional first
+    /// instruction (`continue_chunk`) never routes through this check at
+    /// all.
     ///
     /// Never returns `StepOutcome::Advanced`: a chunk that neither halts nor
     /// hits a breakpoint always exhausts its budget. Ends the run
@@ -713,11 +706,8 @@ impl Control {
             return StepOutcome::Halted;
         }
         self.session = true;
-        let resuming_past_this_breakpoint = self.resumed_breakpoint == Some(self.get_pc());
-        self.resumed_breakpoint = None;
-        if !resuming_past_this_breakpoint && self.resolved_breakpoints.contains(&self.get_pc()) {
+        if self.resolved_breakpoints.contains(&self.get_pc()) {
             self.running = false;
-            self.resumed_breakpoint = Some(self.get_pc());
             return StepOutcome::Breakpoint(self.get_pc());
         }
         let mut count = 0usize;
@@ -733,7 +723,6 @@ impl Control {
             count += 1;
             if self.resolved_breakpoints.contains(&self.get_pc()) {
                 self.running = false;
-                self.resumed_breakpoint = Some(self.get_pc());
                 return StepOutcome::Breakpoint(self.get_pc());
             }
         }
@@ -751,7 +740,6 @@ impl Control {
             return StepOutcome::Halted;
         }
         self.running = true;
-        self.resumed_breakpoint = None;
         if !self.mmix.execute_instruction() {
             self.running = false;
             self.halted = true;
@@ -759,7 +747,6 @@ impl Control {
         }
         if self.resolved_breakpoints.contains(&self.get_pc()) {
             self.running = false;
-            self.resumed_breakpoint = Some(self.get_pc());
             return StepOutcome::Breakpoint(self.get_pc());
         }
         match budget.checked_sub(1) {
@@ -846,11 +833,11 @@ pub fn control_enablement(
         step_disabled: running || halted,
         next_disabled: running || halted,
         // Interrupt is live only while running: a live button that does
-        // nothing in `ready`/`paused` is the defect the owner found in Stop.
-        // Reset's own gate sits on the other side -- `ready`/`paused`/
-        // `halted` -- so the two overlap everywhere but `running`, and each
-        // is the sole live control in exactly one state: Interrupt alone in
-        // `running`, Reset alone in `halted`.
+        // nothing in `ready`/`paused` is the defect the owner found in
+        // Stop. Reset's own gate is the exact opposite -- live everywhere
+        // but `running` -- so the two are never live together; Interrupt
+        // is the sole live control in `running`. Run shares Reset's gate
+        // too, so both are live in `halted`, not Reset alone.
         interrupt_disabled: !running,
         reset_disabled: running,
     }
@@ -911,6 +898,33 @@ pub fn keyboard_shortcut_for(
         "x" if !enablement.interrupt_disabled => Some(KeyboardShortcut::Interrupt),
         _ => None,
     }
+}
+
+/// The whole `window.onkeydown` decision for a bare (non-Ctrl-S) keydown:
+/// which shortcut it fires, if any, and whether the browser's own default
+/// action must be prevented regardless. One function, not two split across
+/// [`should_swallow_bare_fkey`] and the wasm-only closure that calls it: a
+/// mutant that only prevents the default when a shortcut actually fired --
+/// exactly the bug bare F10/F11 swallowing exists to rule out, since Firefox's
+/// menu bar and the browser's fullscreen toggle must never trigger here even
+/// while both controls are disabled -- must be visible to one function's own
+/// test, not hidden behind two call sites the closure alone recombines.
+pub fn keydown_decision(
+    key: &str,
+    modifier_held: bool,
+    shift_held: bool,
+    focused_element_is_text_input: bool,
+    enablement: ControlEnablement,
+) -> (Option<KeyboardShortcut>, bool) {
+    let must_swallow = should_swallow_bare_fkey(key, modifier_held, shift_held);
+    let shortcut = keyboard_shortcut_for(
+        key,
+        modifier_held,
+        shift_held,
+        focused_element_is_text_input,
+        enablement,
+    );
+    (shortcut, must_swallow || shortcut.is_some())
 }
 
 /// Whether a keydown is the platform Save chord (Ctrl-S / Cmd-S), unlike
@@ -1100,26 +1114,6 @@ mod tests {
             0,
             "the breakpointed instruction ran before this call ever inspected its own PC"
         );
-    }
-
-    #[test]
-    fn running_again_from_a_breakpoint_executes_past_it_instead_of_re_stopping() {
-        // The entry-check fix above must not turn "click Run again" into a
-        // no-op that re-reports the same breakpoint forever.
-        let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
-        assert!(control.toggle_breakpoint(2), "line 2 has an address");
-        let entry_addr = expect_addr(LOOP_MMS, "loop.mms", 2);
-
-        let first = control.run_chunk(1_000);
-        assert_eq!(first, StepOutcome::Breakpoint(entry_addr));
-        assert_eq!(control.get_pc(), entry_addr);
-
-        // No further breakpoints ahead: a second call must run the rest of
-        // the program (through the loop) to completion, not immediately
-        // re-report the entry breakpoint it's still numerically sitting on.
-        let second = control.run_chunk(1_000);
-        assert_eq!(second, StepOutcome::Halted);
-        assert_eq!(control.machine().get_register(1), 0, "SETL 5, SUBI x5 -> 0");
     }
 
     #[test]
@@ -1339,12 +1333,12 @@ mod tests {
         assert!(!control.is_running());
 
         // A stale continuation left in flight would route a later Run's
-        // chunk tick through `next_chunk` (which stops as soon as the
-        // call returns) instead of `run_chunk` (which runs straight through
-        // to the halt). The failed reload leaves the old machine loaded, so
-        // this can still run to completion.
+        // chunk tick (`resume_chunk`) through `next_chunk` (which stops as
+        // soon as the call returns) instead of `run_chunk` (which runs
+        // straight through to the halt). The failed reload leaves the old
+        // machine loaded, so this can still run to completion.
         control.start_run();
-        assert_eq!(control.continue_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert_eq!(control.resume_chunk(CHUNK_BUDGET), StepOutcome::Halted);
     }
 
     #[test]
@@ -1535,12 +1529,13 @@ mod tests {
         assert!(!control.is_running());
 
         // Ending the in-flight call must clear the pending continuation,
-        // not just the running flag: a later Run must run straight through
-        // to the halt via `run_chunk`. A stale continuation left in flight
-        // would instead route it through `next_chunk`, which stops as soon
-        // as the interrupted call returns -- well short of the halt.
+        // not just the running flag: a later Run's chunk tick
+        // (`resume_chunk`) must run straight through to the halt via
+        // `run_chunk`. A stale continuation left in flight would instead
+        // route it through `next_chunk`, which stops as soon as the
+        // interrupted call returns -- well short of the halt.
         control.start_run();
-        assert_eq!(control.continue_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert_eq!(control.resume_chunk(CHUNK_BUDGET), StepOutcome::Halted);
     }
 
     #[test]
@@ -1886,6 +1881,51 @@ mod tests {
     fn should_swallow_bare_fkey_ignores_every_other_key() {
         assert!(!should_swallow_bare_fkey("F9", false, false));
         assert!(!should_swallow_bare_fkey("r", false, false));
+    }
+
+    #[test]
+    fn keydown_decision_swallows_a_bare_f10_even_when_its_control_is_disabled() {
+        // Next disabled (halted): no shortcut fires, but F10 must still be
+        // prevented -- Firefox's menu bar doesn't care whether playmmix had
+        // anything to do with the key. A mutant that only sets `must_swallow`
+        // when a shortcut also fired (splitting the two decisions back apart,
+        // the bug this function exists to rule out) would report `false`
+        // here instead.
+        let disabled = control_enablement(false, true, false, false);
+        let (shortcut, prevent_default) = keydown_decision("F10", false, false, false, disabled);
+        assert_eq!(shortcut, None);
+        assert!(prevent_default);
+    }
+
+    #[test]
+    fn keydown_decision_fires_and_swallows_a_bare_f10_when_enabled() {
+        let ready = control_enablement(false, false, false, false);
+        let (shortcut, prevent_default) = keydown_decision("F10", false, false, false, ready);
+        assert_eq!(shortcut, Some(KeyboardShortcut::Next));
+        assert!(prevent_default);
+    }
+
+    #[test]
+    fn keydown_decision_never_swallows_shift_f10() {
+        let ready = control_enablement(false, false, false, false);
+        let (shortcut, prevent_default) = keydown_decision("F10", false, true, false, ready);
+        assert_eq!(shortcut, None);
+        assert!(!prevent_default);
+    }
+
+    #[test]
+    fn keydown_decision_only_prevents_default_for_a_fired_ordinary_key() {
+        let ready = control_enablement(false, false, false, false);
+        let (fired, prevent_fired) = keydown_decision("r", false, false, false, ready);
+        assert_eq!(fired, Some(KeyboardShortcut::Run));
+        assert!(prevent_fired);
+
+        // Run disables while already running -- unlike halted, where Run
+        // stays live (Reset's own gate).
+        let running = control_enablement(true, false, false, false);
+        let (not_fired, prevent_not_fired) = keydown_decision("r", false, false, false, running);
+        assert_eq!(not_fired, None);
+        assert!(!prevent_not_fired);
     }
 
     #[test]

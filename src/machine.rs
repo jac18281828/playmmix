@@ -767,8 +767,9 @@ impl ViewState {
         self.clear_changed();
     }
 
-    /// Clear the changed-since-last-pause sets -- the moment a Run or Step
-    /// Over resumes advancing, per `docs/layout-spec.md`'s Highlights §3.
+    /// Clear the changed-since-last-pause sets -- the moment a Run,
+    /// Continue, or Next resumes advancing, per `docs/layout-spec.md`'s
+    /// Highlights §3.
     pub fn clear_changed(&mut self) {
         self.changed_registers.clear();
         self.changed_specials.clear();

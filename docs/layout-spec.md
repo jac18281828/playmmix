@@ -32,16 +32,16 @@ right is the machine. CSS grid with named areas on `<main>`:
 | header:  playmmix   [Run][Continue][Step][Next][Interrupt][Reset] state|
 +--------------------------------+---------------------------------------+
 | editor                         | machine status (PC, depth)            |
-|   gutter | source              |-----------------------------          |
+|   gutter | source              |---------------------------------------|
 |   (existing pane, unchanged    | registers        (scroll)             |
 |    behavior)                   |   $0  0x…  0                          |
 |                                |   $1  0x…  5                          |
 |                                |   …one per row…                       |
-|                                |-----------------------------          |
+|                                |---------------------------------------|
 |                                | special registers                     |
 |                                |   rA  0x…  0                          |
 +--------------------------------+   …one per row…                       |
-| output                (scroll) |-----------------------------          |
+| output                (scroll) |---------------------------------------|
 |   (program's stdout/stderr)    | memory           (scroll)             |
 |                                |   text 0x…100  f2 00 …                |
 +--------------------------------+---------------------------------------+
@@ -115,8 +115,10 @@ Four states, driven by `Control`'s `running`, `halted`, and `session` flags:
   as today.
 - **Interrupt** is live only in `running` -- there is nothing to interrupt
   otherwise, and a live button that does nothing in `ready`/`paused` is the
-  defect the owner found in Stop. Interrupt and Reset each is the sole live
-  control in exactly one state: Interrupt in `running`, Reset in `halted`.
+  defect the owner found in Stop. Reset's own gate is the exact opposite --
+  live everywhere but `running` -- so the two are never live together;
+  Interrupt is the sole live control in `running`. Run shares Reset's gate
+  too, so both are live in `halted`, not Reset alone.
 
 ## Output pane
 
