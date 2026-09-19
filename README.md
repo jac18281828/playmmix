@@ -45,7 +45,9 @@ Main    LDA     $255,Text
 0,Fputs,StdOut` prints it. `TRAP 0,Halt,0` stops the machine. Click **Step**
 and watch `$255` pick up that address the instant the `LDA` runs.
 
-Controls, top left, each showing its key on its face:
+Controls, top left, each key cued by its button's own bold amber first
+letter; on a phone or tablet the bar sits fixed at the bottom of the screen
+instead:
 
 - **Run** (`r`) — restart from the start state and run to a breakpoint or
   halt.
@@ -55,7 +57,7 @@ Controls, top left, each showing its key on its face:
   calls.
 - **Next** (`n`, `F10`) — execute one source line, running any call along
   the way to completion rather than stepping into it.
-- **Interrupt** (`x`) — pause a Run, Continue, or Next in progress.
+- **Interrupt** (`i`) — pause a Run, Continue, or Next in progress.
 - **Reset** — reload the current source from the top, clearing output and
   highlights; breakpoints are kept.
 

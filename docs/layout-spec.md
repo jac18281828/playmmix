@@ -76,6 +76,16 @@ right is the machine. CSS grid with named areas on `<main>`:
   somewhat as the window keeps shrinking (measured up to ~240px at a 200px
   window height, undragged), but the editor never disappears, which an
   unguarded `1fr` row would allow.
+- On a touch device (`(hover: none) and (pointer: coarse)`, keyed on the
+  input, not the viewport width) the control bar leaves the header and
+  becomes `position: fixed` to the viewport bottom, clear of the iOS home
+  indicator and the left/right safe-area insets, and never scrolls away.
+  `--control-bar-h` and `--viewport-h` (`100dvh`, tracking Safari's
+  collapsing toolbar) reserve the bar's space in `body`'s padding and
+  `main`'s height, in both grid layouts. Inside the bar, the run-state label
+  and status message sit on one line above a single row of six buttons, the
+  status message truncated by an ellipsis rather than wrapping; the buttons
+  carry no keyboard cue there, since a phone has no keyboard to teach.
 
 Registers in a column, one per row, is the load-bearing change: it makes rows
 addressable by position, which is what continuity (§ registers) and change

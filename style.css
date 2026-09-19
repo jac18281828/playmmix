@@ -4,8 +4,12 @@
 
 body {
     margin: 0;
-    min-height: 100vh;
+    min-height: var(--viewport-h, 100vh);
     padding: 1rem;
+    /* --control-bar-h is set only inside the touch query below, so this is
+       plain 1rem wherever that query doesn't match; there it grows to clear
+       the fixed control bar. */
+    padding-bottom: calc(1rem + var(--control-bar-h, 0px));
     font-family: system-ui, sans-serif;
     background: #1e1e1e;
     color: #ddd;
@@ -66,17 +70,19 @@ main {
         "row-splitter col-splitter machine"
         "output       col-splitter machine";
     gap: 0.75rem;
-    height: calc(100vh - 2rem);
+    /* --viewport-h and --control-bar-h are set only inside the touch query
+       below, so this is calc(100vh - 2rem) wherever that query doesn't
+       match. */
+    height: calc(var(--viewport-h, 100vh) - 2rem - var(--control-bar-h, 0px));
 }
 
 @media (max-width: 1100px) {
     main {
         /* minmax(0, 1fr), not bare 1fr: 1fr alone still sizes the track to
-           its widest item's min-content (the memory rows, ~680px, and
-           .controls, ~676px). minmax(0, ...) caps the track at the
-           viewport instead, so every one-column pane -- machine, editor,
-           output -- scrolls its own overflow internally rather than
-           widening the page. */
+           its widest item's min-content (the memory rows, ~680px).
+           minmax(0, ...) caps the track at the viewport instead, so every
+           one-column pane -- machine, editor, output -- scrolls its own
+           overflow internally rather than widening the page. */
         grid-template-columns: minmax(0, 1fr);
         grid-template-rows: auto auto auto auto;
         grid-template-areas:
@@ -121,7 +127,8 @@ main {
 /* Control pane: Run / Continue / Step / Next / Interrupt / Reset and the
    run-state indicator. Real <button> elements, so every control is
    keyboard-reachable without extra wiring; styled on its own classes per
-   the editor pane's rule below. */
+   the editor pane's rule below. Fixed to the viewport bottom on touch
+   devices -- see the (hover: none) and (pointer: coarse) query below. */
 
 .controls {
     display: flex;
@@ -149,16 +156,144 @@ main {
     opacity: 0.6;
 }
 
-.controls button:not(:disabled):hover {
-    background: #383838;
+/* iOS applies :hover on tap and leaves it stuck, so this only applies where
+   a real pointing device drives :hover. */
+@media (hover: hover) {
+    .controls button:not(:disabled):hover {
+        background: #383838;
+    }
 }
 
-/* The key hint on each button's face (§1.4): a dimmer, smaller mark beside
-   the label so the key reads as a hint, not a second label. Reset carries
-   no `.control-key` span -- it has no keyboard shortcut. */
-.control-key {
-    font-size: 0.75rem;
-    color: #999;
+/* The keyboard cue on each button's face (§1.4): the label's first letter,
+   bold and amber so the key reads without color vision -- 5.68:1 against
+   the button background, 4.84:1 against the hover background, both clear
+   of WCAG AA's 4.5:1. Retune the color here, the one rule that sets it.
+   Reset carries no `.control-cue` span -- it has no keyboard shortcut. */
+.control-cue {
+    font-weight: bold;
+    color: #e69500;
+}
+
+/* A disabled button's own opacity alone would dim the amber to about 3:1 --
+   still color, so still reading as a live key. Matching the disabled label
+   color instead keeps a disabled cue visibly disabled. */
+.controls button:disabled .control-cue {
+    color: #666;
+}
+
+/* Touch devices: pin the control bar to the viewport bottom instead of
+   letting it scroll away, and reserve room for it in body's and main's base
+   rules above. Keys on the input device, not the viewport width, so a
+   narrow desktop window keeps the top bar and a landscape iPad (above the
+   1100px breakpoint) still gets the bottom one; an iPad with a trackpad
+   reports a fine pointer and falls through to the desktop rule instead.
+   The owner's tuning point for this whole layout. */
+@media (hover: none) and (pointer: coarse) {
+    :root {
+        /* The bar's full rendered height, including its own bottom inset --
+           read by body's and main's base rules above to reserve exactly
+           this much room. The button row's floor is a literal 44px, not a
+           rem approximation of it, so this stays exact at any root font
+           size: 1.2rem (info row, its line-height below) + 0.3rem (the gap
+           .controls::after forces) + 0.8rem (0.4rem padding top and
+           bottom) = 2.3rem, plus the button row's own 44px, plus 1px
+           (border-top). Retune together with the rules below that set each
+           figure. */
+        --control-bar-h: calc(2.3rem + 44px + 1px + env(safe-area-inset-bottom));
+        /* Tracks Safari's collapsing toolbar (100vh there is the
+           toolbar-hidden height), so the two-column layout a landscape
+           iPad gets never runs under the bar. Supported since iOS 15.4. */
+        --viewport-h: 100dvh;
+    }
+
+    /* viewport-fit=cover (index.html) lets page content run under the
+       notch in landscape, so the side padding is at least the matching
+       inset -- max() keeps it at the base 1rem wherever the inset is
+       smaller. */
+    body {
+        padding-left: max(1rem, env(safe-area-inset-left));
+        padding-right: max(1rem, env(safe-area-inset-right));
+    }
+
+    .controls {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 10;
+        flex-wrap: wrap;
+        column-gap: 0.3rem;
+        row-gap: 0;
+        margin: 0;
+        background: #1e1e1e;
+        border-top: 1px solid #333;
+        padding: 0.4rem max(0.5rem, env(safe-area-inset-right))
+            calc(0.4rem + env(safe-area-inset-bottom)) max(0.5rem, env(safe-area-inset-left));
+    }
+
+    /* Forces the button row onto its own line regardless of how little of
+       the first line the label and message fill: a flex item can never
+       share a line with a sibling that needs its own 100% of the
+       container's width, so this zero-content item -- ordered right after
+       them, before the buttons -- always wraps, and carries everything
+       after it onto a fresh line with it. Its height is the row gap
+       between the two content rows; row-gap above stays 0 so this is the
+       only vertical spacing between them, keeping --control-bar-h's
+       arithmetic exact. */
+    .controls::after {
+        content: "";
+        order: -1;
+        flex-basis: 100%;
+        height: 0.3rem;
+    }
+
+    /* Ordered above the button-row break; both keep order -1 so the label
+       stays left of the message, same as their DOM order. A fixed
+       line-height -- rather than the font's own metrics -- keeps this
+       row's height, and so --control-bar-h, exact. */
+    .run-state,
+    .status-message {
+        order: -1;
+        line-height: 1.2rem;
+    }
+
+    /* flex-basis 0, not auto: a long message's own content width would
+       otherwise count toward whether it (and the break after it) still fit
+       the info row, wrapping it early regardless of the forced break above.
+       Zero keeps that decision solely the break's -- this item still grows
+       to fill the row and shrinks (min-width: 0) down to its ellipsis. */
+    .status-message {
+        flex: 1 1 0%;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    /* One row of six equal-width buttons, each at or above Apple's 44px
+       touch-target floor and centered (overriding the base rule's
+       align-items: baseline, which reads as text stuck to the button's
+       top edge once its box is taller than a line). overflow-wrap guards
+       viewports narrower than about 345px, where a button's share would
+       otherwise force a long single-word label (Continue, Interrupt) past
+       its box; at 375px itself neither label needs to break. */
+    .controls button {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 44px;
+        padding: 0.25rem 0.05rem;
+        font-size: 0.6875rem;
+        justify-content: center;
+        align-items: center;
+        overflow-wrap: anywhere;
+    }
+
+    /* No keyboard to teach on a phone -- the cue reads as plain label text
+       here. */
+    .control-cue {
+        font-weight: inherit;
+        color: inherit;
+    }
 }
 
 .run-state {
@@ -219,9 +354,13 @@ main {
     cursor: row-resize;
 }
 
-.col-splitter:hover,
-.row-splitter:hover {
-    background: #4a4a4a;
+/* iOS applies :hover on tap and leaves it stuck, so this only applies where
+   a real pointing device drives :hover. */
+@media (hover: hover) {
+    .col-splitter:hover,
+    .row-splitter:hover {
+        background: #4a4a4a;
+    }
 }
 
 .gutter-content,
@@ -262,8 +401,13 @@ main {
     padding-right: 0.5em;
 }
 
-.gutter-line:hover {
-    color: #aaa;
+/* iOS applies :hover on tap and leaves it stuck -- a tap toggles the
+   breakpoint via :active/click regardless, so this only applies where a
+   real pointing device drives :hover. */
+@media (hover: hover) {
+    .gutter-line:hover {
+        color: #aaa;
+    }
 }
 
 /* A line with no address (blank, comment, some directives) rejects a

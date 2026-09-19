@@ -63,10 +63,55 @@ const CONTINUE_TITLE: &str =
     "Continue (c): execute the instruction at the PC, then run to a breakpoint or halt.";
 const STEP_TITLE: &str = "Step (s, F11): one source line, into calls.";
 const NEXT_TITLE: &str = "Next (n, F10): one source line, over calls.";
-const INTERRUPT_TITLE: &str = "Interrupt (x): pause a Run, Continue, or Next in flight.";
+const INTERRUPT_TITLE: &str = "Interrupt (i): pause a Run, Continue, or Next in flight.";
 /// Reset's title, exact per the owner's settled decision.
 const RESET_TITLE: &str = "Reload the program and return the machine to its start state: \
 registers, memory and output as loaded, PC at Main. Breakpoints are kept.";
+
+/// Identifies a button, so `disabled_and_callback` can key
+/// `ControlBarProps`' runtime-only disabled flag and callback to
+/// `BUTTON_TABLE`'s row rather than to its position -- reordering the table
+/// changes bar order, never which title or click handler a button gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Control {
+    Run,
+    Continue,
+    Step,
+    Next,
+    Interrupt,
+    Reset,
+}
+
+/// The six controls, in bar order: identity, label, keyboard-shortcut key
+/// (absent for Reset, mouse-only), and title. `ControlBar` renders every
+/// button's face from this table, and the §8 face test iterates it too, so
+/// the face and the keymap cannot drift apart.
+const BUTTON_TABLE: [(Control, &str, Option<&str>, &str); 6] = [
+    (Control::Run, "Run", Some("r"), RUN_TITLE),
+    (Control::Continue, "Continue", Some("c"), CONTINUE_TITLE),
+    (Control::Step, "Step", Some("s"), STEP_TITLE),
+    (Control::Next, "Next", Some("n"), NEXT_TITLE),
+    (Control::Interrupt, "Interrupt", Some("i"), INTERRUPT_TITLE),
+    (Control::Reset, "Reset", None, RESET_TITLE),
+];
+
+/// Each control's disabled flag and click callback, keyed off its identity
+/// -- see `Control`'s own doc comment for why this is a match, not a
+/// position.
+fn disabled_and_callback(
+    control: Control,
+    enablement: ControlEnablement,
+    props: &ControlBarProps,
+) -> (bool, Callback<()>) {
+    match control {
+        Control::Run => (enablement.run_disabled, props.on_run.clone()),
+        Control::Continue => (enablement.continue_disabled, props.on_continue.clone()),
+        Control::Step => (enablement.step_disabled, props.on_step.clone()),
+        Control::Next => (enablement.next_disabled, props.on_next.clone()),
+        Control::Interrupt => (enablement.interrupt_disabled, props.on_interrupt.clone()),
+        Control::Reset => (enablement.reset_disabled, props.on_reset.clone()),
+    }
+}
 
 #[derive(Properties, PartialEq)]
 pub struct ControlBarProps {
@@ -100,12 +145,10 @@ pub fn control_bar(props: &ControlBarProps) -> Html {
 
     html! {
         <div class="controls">
-            { control_button("Run", Some("r"), RUN_TITLE, enablement.run_disabled, props.on_run.clone()) }
-            { control_button("Continue", Some("c"), CONTINUE_TITLE, enablement.continue_disabled, props.on_continue.clone()) }
-            { control_button("Step", Some("s F11"), STEP_TITLE, enablement.step_disabled, props.on_step.clone()) }
-            { control_button("Next", Some("n F10"), NEXT_TITLE, enablement.next_disabled, props.on_next.clone()) }
-            { control_button("Interrupt", Some("x"), INTERRUPT_TITLE, enablement.interrupt_disabled, props.on_interrupt.clone()) }
-            { control_button("Reset", None, RESET_TITLE, enablement.reset_disabled, props.on_reset.clone()) }
+            { for BUTTON_TABLE.into_iter().map(|(control, label, key, title)| {
+                let (disabled, on_click) = disabled_and_callback(control, enablement, props);
+                control_button(label, key, title, disabled, on_click)
+            }) }
             <span class="run-state">
                 { run_state_label(running, halted, props.session) }
             </span>
@@ -114,22 +157,42 @@ pub fn control_bar(props: &ControlBarProps) -> Html {
     }
 }
 
+/// The button's face: its keyboard cue -- the label's first letter -- paired
+/// with the rest of the label, or `None` when the table entry carries no key
+/// (Reset, mouse-only). A plain function per `AGENTS.md`'s host-testable-
+/// logic rule; `control_button` only renders its result.
+fn control_face(
+    label: &'static str,
+    key: Option<&'static str>,
+) -> Option<(&'static str, &'static str)> {
+    key?;
+    Some(label.split_at(1))
+}
+
 /// One control-pane button: a plain `<button>` so every control is
-/// keyboard-reachable without extra wiring. `key_hint`, when present, renders
-/// beside `label` as a hint on the button's own face, not only on hover;
-/// `title` names the action, its keys, and what it does in one clause.
+/// keyboard-reachable without extra wiring. `key`, when present, cues the
+/// label's first letter via `control_face`; `title` names the action, its
+/// key, and what it does in one clause.
 fn control_button(
     label: &'static str,
-    key_hint: Option<&'static str>,
+    key: Option<&'static str>,
     title: &'static str,
     disabled: bool,
     on_click: Callback<()>,
 ) -> Html {
     let onclick = Callback::from(move |_| on_click.emit(()));
+    let face = match control_face(label, key) {
+        Some((cue, rest)) => html! {
+            <span class="control-label">
+                <span class="control-cue">{ cue }</span>
+                { rest }
+            </span>
+        },
+        None => html! { <span class="control-label">{ label }</span> },
+    };
     html! {
         <button {disabled} {onclick} {title}>
-            <span class="control-label">{ label }</span>
-            { for key_hint.map(|hint| html! { <span class="control-key">{ hint }</span> }) }
+            { face }
         </button>
     }
 }
@@ -155,6 +218,7 @@ fn run_state_label(running: bool, halted: bool, session: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::{KeyboardShortcut, keyboard_shortcut_for};
 
     #[test]
     fn control_enablement_matches_the_run_lifecycle_table() {
@@ -235,6 +299,71 @@ mod tests {
             RESET_TITLE,
             "Reload the program and return the machine to its start state: \
              registers, memory and output as loaded, PC at Main. Breakpoints are kept."
+        );
+    }
+
+    #[test]
+    fn face_carries_the_cue_and_matches_the_keymap() {
+        let ready = control_enablement(false, false, false, false);
+        let paused = control_enablement(false, false, true, false);
+        let running = control_enablement(true, false, true, false);
+
+        for (control, label, key, _title) in BUTTON_TABLE {
+            if control == Control::Reset {
+                assert_eq!(key, None, "Reset must carry no key");
+                assert_eq!(control_face(label, key), None, "Reset must carry no cue");
+                continue;
+            }
+            let key = key.unwrap_or_else(|| panic!("{label} must carry a key"));
+            assert_eq!(
+                key,
+                label[..1].to_lowercase(),
+                "{label}'s key must be its label's first letter lowercased"
+            );
+            let (cue, rest) = control_face(label, Some(key))
+                .unwrap_or_else(|| panic!("{label} must carry a cue"));
+            assert_eq!(cue, &label[..1], "{label}'s cue must be its first letter");
+            assert_eq!(
+                format!("{cue}{rest}"),
+                label,
+                "{label}'s cue plus the rest must reconstruct the label"
+            );
+
+            // A state where this control is enabled, so its key can be
+            // proven to actually fire its shortcut.
+            let (enablement, shortcut) = match control {
+                Control::Run => (ready, KeyboardShortcut::Run),
+                Control::Continue => (paused, KeyboardShortcut::Continue),
+                Control::Step => (ready, KeyboardShortcut::Step),
+                Control::Next => (ready, KeyboardShortcut::Next),
+                Control::Interrupt => (running, KeyboardShortcut::Interrupt),
+                Control::Reset => unreachable!("handled above"),
+            };
+            assert_eq!(
+                keyboard_shortcut_for(key, false, false, false, enablement),
+                Some(shortcut),
+                "{key} must fire {label} when its control is enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn button_table_is_in_bar_order() {
+        let labels: Vec<&str> = BUTTON_TABLE.iter().map(|(_, label, ..)| *label).collect();
+        assert_eq!(
+            labels,
+            ["Run", "Continue", "Step", "Next", "Interrupt", "Reset"],
+            "BUTTON_TABLE's row order is the rendered bar order"
+        );
+    }
+
+    #[test]
+    fn titles_carry_every_key() {
+        assert!(STEP_TITLE.contains("F11"), "Step's title must name F11");
+        assert!(NEXT_TITLE.contains("F10"), "Next's title must name F10");
+        assert!(
+            INTERRUPT_TITLE.starts_with("Interrupt (i)"),
+            "Interrupt's title must start with its key"
         );
     }
 }

@@ -481,8 +481,8 @@ pub struct App {
     /// 0.23's scheduler (`run_scheduler`'s `can_yield` ignores the rendered
     /// queue while `fill_queue` runs updates first) can starve `rendered` for
     /// the whole span of a chunked Run/Continue/Next, since `ChunkTick`
-    /// messages keep the update queue non-empty -- `x` stopped mapping to
-    /// Interrupt mid-run before this moved.
+    /// messages keep the update queue non-empty -- the Interrupt shortcut
+    /// stopped firing mid-run before this moved.
     shortcut_enablement: Rc<Cell<ControlEnablement>>,
     /// Kept alive for as long as `App` is, same reason as
     /// `_beforeunload_handler`. Never read directly.
@@ -1282,9 +1282,9 @@ mod tests {
 
     #[test]
     fn shortcut_enablement_reads_interrupt_live_mid_chunk_not_just_at_rest() {
-        // The data half of the fix for "`x` never interrupts a chunked
-        // Run/Continue/Next": while a chunk is between ticks
-        // (`BudgetExhausted`, still `is_running()`), the enablement the
+        // The data half of the fix for "the Interrupt shortcut never
+        // interrupts a chunked Run/Continue/Next": while a chunk is between
+        // ticks (`BudgetExhausted`, still `is_running()`), the enablement the
         // keydown handler reads must already show Interrupt live and every
         // other control disabled -- not whatever `App` had before the run
         // started. The previous bug was `App::rendered` alone refreshing

@@ -41,9 +41,9 @@ pub fn should_swallow_bare_fkey(key: &str, modifier_held: bool, shift_held: bool
 /// F10 (Next) and F11 (Step) fire even while a text-entry element has
 /// focus -- they type nothing there -- but only with `shift_held` false
 /// too: Shift+F11 is VS Code's step-out, which playmmix lacks. Every other
-/// key -- `r` Run, `c` Continue, `s` Step, `n` Next, `x` Interrupt -- fires
+/// key -- `r` Run, `c` Continue, `s` Step, `n` Next, `i` Interrupt -- fires
 /// only outside a text-entry element, `focused_element_is_text_input`.
-/// `i` maps to nothing.
+/// `x` maps to nothing.
 pub fn keyboard_shortcut_for(
     key: &str,
     modifier_held: bool,
@@ -62,7 +62,7 @@ pub fn keyboard_shortcut_for(
         "c" if !enablement.continue_disabled => Some(KeyboardShortcut::Continue),
         "s" if !enablement.step_disabled => Some(KeyboardShortcut::Step),
         "n" if !enablement.next_disabled => Some(KeyboardShortcut::Next),
-        "x" if !enablement.interrupt_disabled => Some(KeyboardShortcut::Interrupt),
+        "i" if !enablement.interrupt_disabled => Some(KeyboardShortcut::Interrupt),
         _ => None,
     }
 }
@@ -185,7 +185,7 @@ mod tests {
             ("c", paused, KeyboardShortcut::Continue),
             ("s", ready, KeyboardShortcut::Step),
             ("n", ready, KeyboardShortcut::Next),
-            ("x", running, KeyboardShortcut::Interrupt),
+            ("i", running, KeyboardShortcut::Interrupt),
             ("F11", ready, KeyboardShortcut::Step),
             ("F10", ready, KeyboardShortcut::Next),
         ];
@@ -237,7 +237,7 @@ mod tests {
         // `halted`: Interrupt disables (nothing left to interrupt).
         let halted = control_enablement(false, true, true, false);
         assert_eq!(
-            keyboard_shortcut_for("x", false, false, false, halted),
+            keyboard_shortcut_for("i", false, false, false, halted),
             None
         );
 
@@ -271,7 +271,7 @@ mod tests {
             ("c", paused),
             ("s", ready),
             ("n", ready),
-            ("x", running),
+            ("i", running),
             ("F10", ready),
             ("F11", ready),
         ];
@@ -295,7 +295,7 @@ mod tests {
             ("c", paused),
             ("s", ready),
             ("n", ready),
-            ("x", running),
+            ("i", running),
         ];
         for (key, enablement) in cases {
             assert_eq!(
@@ -326,10 +326,40 @@ mod tests {
             keyboard_shortcut_for("q", false, false, false, paused),
             None
         );
+        // `running`, not `paused`: Interrupt is disabled while paused, so an
+        // `x`-as-Interrupt arm would return `None` there regardless, making
+        // the case vacuous. Running is where Interrupt is live.
+        let running = control_enablement(true, false, true, false);
         assert_eq!(
-            keyboard_shortcut_for("i", false, false, false, paused),
+            keyboard_shortcut_for("x", false, false, false, running),
             None,
-            "i must map to nothing"
+            "x must map to nothing"
+        );
+    }
+
+    #[test]
+    fn i_is_interrupt_only_while_running_and_x_never_fires() {
+        let ready = control_enablement(false, false, false, false);
+        let running = control_enablement(true, false, true, false);
+        let paused = control_enablement(false, false, true, false);
+        let halted = control_enablement(false, true, true, false);
+
+        assert_eq!(
+            keyboard_shortcut_for("i", false, false, false, running),
+            Some(KeyboardShortcut::Interrupt),
+            "i must fire Interrupt while running"
+        );
+        for (state, enablement) in [("ready", ready), ("paused", paused), ("halted", halted)] {
+            assert_eq!(
+                keyboard_shortcut_for("i", false, false, false, enablement),
+                None,
+                "i must fire nothing while {state}"
+            );
+        }
+        assert_eq!(
+            keyboard_shortcut_for("x", false, false, false, running),
+            None,
+            "x must fire nothing while running"
         );
     }
 
