@@ -16,7 +16,7 @@ mod machine;
 
 use control::{
     Control, ControlBar, ControlEnablement, KeyboardShortcut, StepOutcome, control_enablement,
-    keyboard_shortcut_for, save_shortcut, yield_to_event_loop,
+    keyboard_shortcut_for, save_shortcut, should_swallow_bare_fkey, yield_to_event_loop,
 };
 use editor::Editor;
 use examples::DEFAULT_MMS;
@@ -646,18 +646,63 @@ fn row_splitter_handlers(
     (onpointerdown, onpointermove, onpointerup, onpointercancel)
 }
 
-/// The status readout's text for a chunked Run or Step Over's outcome --
-/// shared because both drive the same chunk-yield loop
-/// (`Control::continue_chunk`) and report through the same four
-/// `StepOutcome` variants. `run_chunk` never returns `Advanced` (a chunk
-/// that neither halts nor hits a breakpoint always exhausts its budget), so
-/// "Stepped over call" only ever surfaces from a chunked Step Over.
+/// The status readout's text for a chunked Run, Continue, or Next's
+/// outcome -- shared because all three drive the same chunk-yield loop
+/// (`Control::resume_chunk`) and report through the same four `StepOutcome`
+/// variants. Neither `run_chunk` nor `continue_chunk` ever returns
+/// `Advanced` (a chunk that neither halts nor hits a breakpoint always
+/// exhausts its budget), so "Stepped over" only ever surfaces from a
+/// chunked Next.
 fn status_for(outcome: StepOutcome) -> &'static str {
     match outcome {
         StepOutcome::BudgetExhausted => "Running",
-        StepOutcome::Advanced => "Stepped over call",
+        StepOutcome::Advanced => "Stepped over",
         StepOutcome::Halted => "Halted",
         StepOutcome::Breakpoint(_) => "Hit breakpoint",
+    }
+}
+
+/// The status text for a chunk-tick's terminal outcome (`Halted`,
+/// `Breakpoint`, or `Advanced` -- never `BudgetExhausted`, an intermediate
+/// tick this never composes with `restart_signal`), composed with
+/// `Restarted · ` when `restart_signal` marks this outcome as the one a
+/// restarting Run set it for -- see `App::restart_signal`.
+fn restarted_status(outcome: StepOutcome, restart_signal: bool) -> String {
+    let base = status_for(outcome);
+    if restart_signal {
+        format!("Restarted · {base}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// `App::advance_chunk`'s core: run one chunk of whichever operation --
+/// Run, Continue, or Next -- is in flight, record the pause boundary once
+/// the outcome is terminal, and return the status text to show plus
+/// whether another tick must be scheduled. Factored out for the same
+/// reason `reload_and_record` is: testable without a live `Context` --
+/// the plain seam the restart signal's visibility (§1's "visible to the
+/// end") is proven through.
+///
+/// `restart_signal` composes onto the status (`restarted_status`) only
+/// once the outcome is terminal, never a `BudgetExhausted` tick, and is
+/// cleared there -- so it reaches exactly the Run that set it, and no
+/// later command's own outcome.
+fn advance_chunk_once(
+    control: &mut Control,
+    view_state: &mut ViewState,
+    restart_signal: &mut bool,
+) -> (String, bool) {
+    let outcome = control.resume_chunk(control::CHUNK_BUDGET);
+    view_state.observe(control);
+    match outcome {
+        StepOutcome::BudgetExhausted => (status_for(outcome).to_string(), true),
+        StepOutcome::Halted | StepOutcome::Breakpoint(_) | StepOutcome::Advanced => {
+            let status = restarted_status(outcome, *restart_signal);
+            *restart_signal = false;
+            view_state.record_pause_boundary(control);
+            (status, false)
+        }
     }
 }
 
@@ -700,31 +745,37 @@ type KeydownHandler = Closure<dyn FnMut(KeyboardEvent)>;
 /// Registers `window.onkeydown`. Ctrl-S / Cmd-S (`save_shortcut`) dispatches
 /// `Msg::FlushSource` and suppresses the browser's Save dialog regardless of
 /// focus, checked first since it is the one shortcut that must fire while a
-/// text-entry element is focused. Otherwise, on a bare keypress (no
-/// Ctrl/Cmd/Alt) outside a text-entry element, dispatches the `Msg`
-/// `keyboard_shortcut_for` maps the key to, gated by the returned cell's
-/// current `ControlEnablement` -- kept live by `App::rendered`, not
-/// recomputed here. Seeded with the ready state
-/// (`control_enablement(false, false, false)`), matching a
+/// text-entry element is focused. A bare F10/F11 is always prevented next
+/// (`should_swallow_bare_fkey`), whether or not it fires a control, so
+/// Firefox's menu bar and the browser's fullscreen toggle never trigger on
+/// this page. Otherwise, dispatches the `Msg` `keyboard_shortcut_for` maps
+/// the key to, gated by the returned cell's current `ControlEnablement` --
+/// kept live by `App::rendered`, not recomputed here. Seeded with the ready
+/// state (`control_enablement(false, false, false, false)`), matching a
 /// freshly-constructed `Control`. Returns the shared cell alongside the
 /// `Closure` backing the handler; the caller must keep the latter alive (see
 /// [`KeydownHandler`]).
 fn install_keyboard_shortcuts(
     link: yew::html::Scope<App>,
 ) -> (Rc<Cell<ControlEnablement>>, KeydownHandler) {
-    let enablement = Rc::new(Cell::new(control_enablement(false, false, false)));
+    let enablement = Rc::new(Cell::new(control_enablement(false, false, false, false)));
     let enablement_for_handler = enablement.clone();
     let handler = Closure::wrap(Box::new(move |event: KeyboardEvent| {
         let key = event.key();
         // Checked before the text-input bail-out below, unlike the other
-        // four shortcuts: Ctrl-S's only realistic use is while typing in
-        // the source editor, so it must fire regardless of focus.
+        // shortcuts: Ctrl-S's only realistic use is while typing in the
+        // source editor, so it must fire regardless of focus.
         if save_shortcut(&key, event.ctrl_key() || event.meta_key()) {
             event.prevent_default();
             link.send_message(Msg::FlushSource);
             return;
         }
         let modifier_held = event.ctrl_key() || event.meta_key() || event.alt_key();
+        let shift_held = event.shift_key();
+        let swallow = should_swallow_bare_fkey(&key, modifier_held, shift_held);
+        if swallow {
+            event.prevent_default();
+        }
         let focused_element_is_text_input = event
             .target()
             .and_then(|target| target.dyn_into::<Element>().ok())
@@ -733,16 +784,20 @@ fn install_keyboard_shortcuts(
         let shortcut = keyboard_shortcut_for(
             &key,
             modifier_held,
+            shift_held,
             focused_element_is_text_input,
             enablement_for_handler.get(),
         );
         if let Some(shortcut) = shortcut {
-            event.prevent_default();
+            if !swallow {
+                event.prevent_default();
+            }
             let msg = match shortcut {
-                KeyboardShortcut::StepOver => Msg::StepOver,
-                KeyboardShortcut::Step => Msg::Step,
                 KeyboardShortcut::Run => Msg::Run,
-                KeyboardShortcut::Stop => Msg::Stop,
+                KeyboardShortcut::Continue => Msg::Continue,
+                KeyboardShortcut::Step => Msg::Step,
+                KeyboardShortcut::Next => Msg::Next,
+                KeyboardShortcut::Interrupt => Msg::Interrupt,
             };
             link.send_message(msg);
         }
@@ -755,19 +810,19 @@ fn install_keyboard_shortcuts(
     (enablement, handler)
 }
 
-/// `Msg::Stop`'s core logic, factored out of `App::update` so it is
-/// testable without a live `Context`: interrupts a chunked Run or Step
-/// Over in flight and records the resulting pause boundary. A true no-op
+/// `Msg::Interrupt`'s core logic, factored out of `App::update` so it is
+/// testable without a live `Context`: ends a chunked Run, Continue, or Next
+/// in flight and records the resulting pause boundary. A true no-op
 /// otherwise -- `ready`/`paused` have nothing left to interrupt, and
 /// recording a boundary with nothing having moved since the last one would
 /// diff the current state against itself and silently clear the
 /// changed-value highlights that boundary already set. Returns whether
 /// anything actually happened.
-fn stop_if_running(control: &mut Control, view_state: &mut ViewState) -> bool {
+fn interrupt_if_running(control: &mut Control, view_state: &mut ViewState) -> bool {
     if !control.is_running() {
         return false;
     }
-    control.stop();
+    control.end_in_flight();
     view_state.observe(control);
     view_state.record_pause_boundary(control);
     true
@@ -799,8 +854,49 @@ fn reload_and_record(
     }
 }
 
+/// `Msg::Run`'s restart-and-run core, factored out for the same reason
+/// `reload_and_record` is: testable without a live `Context`. Always
+/// restarts through `reload_and_record` -- Reset's own path -- so Run and
+/// Reset can never land in different states: a program mid-run, or paused
+/// at a breakpoint, restarts exactly as one freshly loaded does. Cancels
+/// `debounce_timeout` too, as `App::reload_source` does today --
+/// `reload_and_record` alone does not.
+///
+/// Returns whether a session existed before this call, the restart signal
+/// `App::advance_chunk` composes onto this Run's own terminal outcome
+/// (`Restarted · <outcome>`, via `restarted_status`) -- never set when
+/// there was no session to restart from. `false` on a parse error too:
+/// nothing will run for this signal to reach.
+fn restart_and_run(
+    chunk_timeout: &mut Option<Timeout>,
+    debounce_timeout: &mut Option<Timeout>,
+    control: &mut Control,
+    source: &str,
+    error: &mut Option<String>,
+    error_line: &mut Option<usize>,
+    view_state: &mut ViewState,
+) -> bool {
+    let had_session = control.session();
+    *debounce_timeout = None;
+    reload_and_record(
+        chunk_timeout,
+        control,
+        source,
+        error,
+        error_line,
+        view_state,
+    );
+    if error.is_some() {
+        return false;
+    }
+    view_state.clear_changed();
+    control.start_run();
+    view_state.observe(control);
+    had_session
+}
+
 /// `Msg::FlushSource`'s core logic, factored out for the same reason
-/// `stop_if_running` is: testable without a live `Context`. Ctrl-S's whole
+/// `interrupt_if_running` is: testable without a live `Context`. Ctrl-S's whole
 /// reason to exist is the window before `SOURCE_DEBOUNCE_MS` catches up on
 /// its own, so this only acts when a debounce is actually pending --
 /// dropping it (which cancels the pending `setTimeout`, `Timeout`'s `Drop`)
@@ -849,12 +945,13 @@ pub enum Msg {
     FlushSource,
     ToggleBreakpoint(usize),
     Run,
+    Continue,
     Step,
-    StepOver,
-    Stop,
+    Next,
+    Interrupt,
     Reset,
-    /// One chunk boundary: reschedule if the run isn't finished, or if a
-    /// `Stop` landed while this tick was scheduled, do nothing.
+    /// One chunk boundary: reschedule if the run isn't finished, or if an
+    /// `Interrupt` landed while this tick was scheduled, do nothing.
     ChunkTick,
     /// The column splitter's drag committed, carrying the already-clamped
     /// left-column width.
@@ -874,10 +971,11 @@ pub struct App {
     /// debounce window `self.error` is already accepted to be stale in
     /// (`Msg::SourceChanged` clears neither).
     error_line: Option<usize>,
-    /// The pending chunk-tick timeout, if a chunked Run or Step Over is in
-    /// flight. Held rather than `.forget()`-ten so Stop, or a `reload` mid-
-    /// run, can cancel it by dropping this (runs `clearTimeout` and frees
-    /// the closure) instead of leaking one allocation per chunk boundary.
+    /// The pending chunk-tick timeout, if a chunked Run, Continue, or Next
+    /// is in flight. Held rather than `.forget()`-ten so Interrupt, or a
+    /// `reload` mid-run, can cancel it by dropping this (runs `clearTimeout`
+    /// and frees the closure) instead of leaking one allocation per chunk
+    /// boundary.
     chunk_timeout: Option<Timeout>,
     /// The pending `Msg::ReassembleSource` timeout, if a keystroke's
     /// re-assemble is still waiting out `SOURCE_DEBOUNCE_MS`. Held for the
@@ -890,8 +988,17 @@ pub struct App {
     view_state: ViewState,
     /// A short echo of the last action taken, rendered next to the Control
     /// Bar (§1.4). Left unchanged by a parse error -- the error itself is
-    /// already shown prominently elsewhere.
-    status_message: &'static str,
+    /// already shown prominently elsewhere. Owned (not `&'static str`):
+    /// `restarted_status` composes a `Restarted · ` prefix onto it.
+    status_message: String,
+    /// Whether the Run in flight (or about to be) restarted an existing
+    /// session -- set from `restart_and_run`'s own return in `Msg::Run`,
+    /// composed onto the next terminal chunk outcome by `advance_chunk`
+    /// (`Restarted · <outcome>`, via `restarted_status`) and cleared there,
+    /// so it reaches exactly that one outcome and no later one. Interrupt,
+    /// Continue, Step, Next, and any reload also clear it, so a later
+    /// command's own outcome never reads `Restarted`.
+    restart_signal: bool,
     /// The drag-set left-column width and output-pane height, pixels.
     /// `None` means "use the stylesheet's default sizing" -- a page that's
     /// never been dragged renders identically to before (§1.3). No
@@ -944,7 +1051,7 @@ pub struct App {
 
 impl App {
     /// Yield to the event loop, then deliver `Msg::ChunkTick` -- the one
-    /// place a chunked Run or Step Over reschedules itself. Replaces
+    /// place a chunked Run, Continue, or Next reschedules itself. Replaces
     /// `chunk_timeout`, dropping (and so cancelling) any tick already
     /// pending.
     fn schedule_chunk_tick(&mut self, ctx: &Context<Self>) {
@@ -954,25 +1061,27 @@ impl App {
         }));
     }
 
-    /// Advance one chunk of whichever operation -- Run or Step Over -- is
-    /// in flight, rescheduling if it isn't finished. The scheduling policy
-    /// for `Msg::ChunkTick`.
+    /// Advance one chunk of whichever operation -- Run, Continue, or Next --
+    /// is in flight, rescheduling if `advance_chunk_once` says it isn't
+    /// finished. The scheduling policy for `Msg::ChunkTick`; the state
+    /// update itself lives in `advance_chunk_once`, the plain seam a test
+    /// drives directly.
     fn advance_chunk(&mut self, ctx: &Context<Self>) {
-        // A Stop is checked only between chunks, never inside one; this is
-        // that check. Cancelling `chunk_timeout` on Stop already prevents
-        // this from firing in the normal case -- this guard is a
-        // defensive backstop, not the primary safety mechanism.
+        // An Interrupt is checked only between chunks, never inside one;
+        // this is that check. Cancelling `chunk_timeout` on Interrupt
+        // already prevents this from firing in the normal case -- this
+        // guard is a defensive backstop, not the primary safety mechanism.
         if !self.control.is_running() {
             return;
         }
-        let outcome = self.control.continue_chunk(control::CHUNK_BUDGET);
-        self.view_state.observe(&self.control);
-        self.status_message = status_for(outcome);
-        match outcome {
-            StepOutcome::BudgetExhausted => self.schedule_chunk_tick(ctx),
-            StepOutcome::Halted | StepOutcome::Breakpoint(_) | StepOutcome::Advanced => {
-                self.view_state.record_pause_boundary(&self.control);
-            }
+        let (status, needs_tick) = advance_chunk_once(
+            &mut self.control,
+            &mut self.view_state,
+            &mut self.restart_signal,
+        );
+        self.status_message = status;
+        if needs_tick {
+            self.schedule_chunk_tick(ctx);
         }
     }
 
@@ -984,14 +1093,17 @@ impl App {
         self.source != DEFAULT_MMS
     }
 
-    /// Reload the current source (Reset's and halted-Run's shared "play
-    /// again" step): cancel any pending chunk tick and any pending
-    /// debounced re-assemble (this reload supersedes both), re-run
-    /// `Control::reload`, and on success reseed the continuity/snapshot
-    /// state. On a parse error, `reload` already leaves the previous
-    /// machine and everything else untouched, so only `self.error` moves.
+    /// Reload the current source -- Reset's own step, and the start state
+    /// every restarting Run reuses (see `restart_and_run`): cancel any
+    /// pending chunk tick and any pending debounced re-assemble (this
+    /// reload supersedes both), re-run `Control::reload`, and on success
+    /// reseed the continuity/snapshot state. On a parse error, `reload`
+    /// already leaves the previous machine and everything else untouched,
+    /// so only `self.error` moves. Clears `restart_signal`: this is a
+    /// reload, and every reload clears it.
     fn reload_source(&mut self) {
         self.debounce_timeout = None;
+        self.restart_signal = false;
         reload_and_record(
             &mut self.chunk_timeout,
             &mut self.control,
@@ -1002,12 +1114,13 @@ impl App {
         );
     }
 
-    /// Flush a debounced re-assemble that hasn't fired yet, so Run, Step,
-    /// and Step Over can never execute a program older than `self.source`
+    /// Flush a debounced re-assemble that hasn't fired yet, so Continue,
+    /// Step, and Next can never execute a program older than `self.source`
     /// -- `SOURCE_DEBOUNCE_MS` otherwise leaves a window where every
-    /// control still reads enabled against the stale prior program.
-    /// Returns whether the caller may proceed: `false` once the flush
-    /// surfaces a parse error, since the edit that is pending is not a
+    /// control still reads enabled against the stale prior program. Run
+    /// never calls this: its own restart always reloads `self.source`
+    /// directly. Returns whether the caller may proceed: `false` once the
+    /// flush surfaces a parse error, since the edit that is pending is not a
     /// program that can run.
     fn flush_pending_reassemble(&mut self) -> bool {
         if self.debounce_timeout.is_some() {
@@ -1035,7 +1148,8 @@ impl Component for App {
             chunk_timeout: None,
             debounce_timeout: None,
             view_state: ViewState::new(),
-            status_message: "Loaded",
+            status_message: "Loaded".to_string(),
+            restart_signal: false,
             left_column_width: None,
             output_height: None,
             main_ref: NodeRef::default(),
@@ -1063,14 +1177,18 @@ impl Component for App {
                 // Re-assembling (and showing a resulting parse error) is
                 // debounced to `Msg::ReassembleSource` -- see
                 // `SOURCE_DEBOUNCE_MS` -- so typing an in-progress line
-                // doesn't flash "Assembly error" on every keystroke. A run
-                // or chunked Step Over in flight still stops immediately,
-                // same as before: the source shown alongside it is already
-                // no longer the one that produced it.
+                // doesn't flash "Assembly error" on every keystroke. A run,
+                // Continue, or chunked Next in flight still ends
+                // immediately: the source shown alongside it is already no
+                // longer the one that produced it. Ends any pending restart
+                // signal too, the same as an actual reload: an interrupted
+                // Run's chunk sequence never reaches its own terminal
+                // outcome.
                 self.source = source;
                 *self.source_dirty.borrow_mut() = self.should_confirm_before_leaving();
-                self.control.stop();
+                self.control.end_in_flight();
                 self.chunk_timeout = None;
+                self.restart_signal = false;
                 let link = ctx.link().clone();
                 self.debounce_timeout = Some(Timeout::new(SOURCE_DEBOUNCE_MS, move || {
                     link.send_message(Msg::ReassembleSource)
@@ -1079,12 +1197,13 @@ impl Component for App {
             }
             Msg::ReassembleSource => {
                 self.debounce_timeout = None;
+                self.restart_signal = false;
                 match self.control.reload(&self.source) {
                     Ok(()) => {
                         self.error = None;
                         self.error_line = None;
                         self.view_state.reset(&self.control);
-                        self.status_message = "Loaded";
+                        self.status_message = "Loaded".to_string();
                     }
                     Err(error) => {
                         self.error_line = parse_error_location(&error).map(|(line, _)| line);
@@ -1106,68 +1225,44 @@ impl Component for App {
                     "Breakpoint cleared"
                 } else {
                     "Breakpoint set"
-                };
+                }
+                .to_string();
                 true
             }
             Msg::Run => {
-                // A pending debounce means `self.control` still holds a
-                // program older than `self.source`; flush it rather than
-                // run the stale one.
-                if !self.flush_pending_reassemble() {
+                // Run always restarts, through Reset's own path -- a
+                // pending debounce is superseded by that restart, not
+                // flushed separately.
+                let restarted = restart_and_run(
+                    &mut self.chunk_timeout,
+                    &mut self.debounce_timeout,
+                    &mut self.control,
+                    &self.source,
+                    &mut self.error,
+                    &mut self.error_line,
+                    &mut self.view_state,
+                );
+                if self.error.is_some() {
                     return true;
                 }
-                if !self.control.is_running() {
-                    // Run while halted is Reset then Run -- the "play again"
-                    // affordance, one click to replay from the top.
-                    if self.control.is_halted() {
-                        self.reload_source();
-                        if self.error.is_some() {
-                            return true;
-                        }
-                    }
-                    self.view_state.clear_changed();
-                    self.control.start_run();
-                    self.view_state.observe(&self.control);
-                    if self.control.is_running() {
-                        self.schedule_chunk_tick(ctx);
-                    }
-                    // Fresh or replay-from-halt both read the same: no
-                    // "Restarted" status distinct from plain Running -- a
-                    // Msg::Run while halted reloads and then schedules a
-                    // chunk tick exactly like a fresh run, and that first
-                    // tick's BudgetExhausted branch would overwrite anything
-                    // more specific one event-loop turn later anyway.
-                    self.status_message = "Running";
+                self.restart_signal = restarted;
+                if self.control.is_running() {
+                    self.schedule_chunk_tick(ctx);
                 }
+                self.status_message = "Running".to_string();
                 true
             }
-            Msg::Step => {
+            Msg::Continue => {
+                self.restart_signal = false;
                 if !self.flush_pending_reassemble() {
                     return true;
                 }
-                if !self.control.is_running() {
-                    let was_halted = self.control.is_halted();
-                    let outcome = self.control.step();
-                    if !was_halted {
-                        self.view_state.observe(&self.control);
-                        self.view_state.record_pause_boundary(&self.control);
-                        self.status_message = if outcome == StepOutcome::Halted {
-                            "Halted"
-                        } else {
-                            "Stepped"
-                        };
-                    }
-                }
-                true
-            }
-            Msg::StepOver => {
-                if !self.flush_pending_reassemble() {
-                    return true;
-                }
-                if !self.control.is_running() {
-                    self.view_state.clear_changed();
-                    let outcome = self.control.step_over_chunk(control::CHUNK_BUDGET);
-                    self.status_message = status_for(outcome);
+                // The flush above may itself have reloaded, ending the
+                // session Continue depended on -- a no-op then, per the
+                // owner's settled decision.
+                if !self.control.is_running() && self.control.session() {
+                    let outcome = self.control.continue_chunk(control::CHUNK_BUDGET);
+                    self.status_message = status_for(outcome).to_string();
                     match outcome {
                         StepOutcome::BudgetExhausted => {
                             self.view_state.observe(&self.control);
@@ -1183,10 +1278,56 @@ impl Component for App {
                 }
                 true
             }
-            Msg::Stop => {
-                if stop_if_running(&mut self.control, &mut self.view_state) {
+            Msg::Step => {
+                self.restart_signal = false;
+                if !self.flush_pending_reassemble() {
+                    return true;
+                }
+                if !self.control.is_running() {
+                    let was_halted = self.control.is_halted();
+                    let outcome = self.control.step();
+                    if !was_halted {
+                        self.view_state.observe(&self.control);
+                        self.view_state.record_pause_boundary(&self.control);
+                        self.status_message = if outcome == StepOutcome::Halted {
+                            "Halted"
+                        } else {
+                            "Stepped"
+                        }
+                        .to_string();
+                    }
+                }
+                true
+            }
+            Msg::Next => {
+                self.restart_signal = false;
+                if !self.flush_pending_reassemble() {
+                    return true;
+                }
+                if !self.control.is_running() {
+                    self.view_state.clear_changed();
+                    let outcome = self.control.next_chunk(control::CHUNK_BUDGET);
+                    self.status_message = status_for(outcome).to_string();
+                    match outcome {
+                        StepOutcome::BudgetExhausted => {
+                            self.view_state.observe(&self.control);
+                            self.schedule_chunk_tick(ctx);
+                        }
+                        StepOutcome::Advanced
+                        | StepOutcome::Halted
+                        | StepOutcome::Breakpoint(_) => {
+                            self.view_state.observe(&self.control);
+                            self.view_state.record_pause_boundary(&self.control);
+                        }
+                    }
+                }
+                true
+            }
+            Msg::Interrupt => {
+                self.restart_signal = false;
+                if interrupt_if_running(&mut self.control, &mut self.view_state) {
                     self.chunk_timeout = None;
-                    self.status_message = "Stopped";
+                    self.status_message = "Interrupted".to_string();
                     true
                 } else {
                     false
@@ -1195,7 +1336,7 @@ impl Component for App {
             Msg::Reset => {
                 self.reload_source();
                 if self.error.is_none() {
-                    self.status_message = "Reset";
+                    self.status_message = "Reset".to_string();
                 }
                 true
             }
@@ -1210,8 +1351,9 @@ impl Component for App {
                     &mut self.view_state,
                 );
                 if flushed {
+                    self.restart_signal = false;
                     if self.error.is_none() {
-                        self.status_message = "Loaded";
+                        self.status_message = "Loaded".to_string();
                     }
                     true
                 } else {
@@ -1263,9 +1405,10 @@ impl Component for App {
         let on_change = ctx.link().callback(Msg::SourceChanged);
         let on_toggle_breakpoint = ctx.link().callback(Msg::ToggleBreakpoint);
         let on_run = ctx.link().callback(|()| Msg::Run);
+        let on_continue = ctx.link().callback(|()| Msg::Continue);
         let on_step = ctx.link().callback(|()| Msg::Step);
-        let on_step_over = ctx.link().callback(|()| Msg::StepOver);
-        let on_stop = ctx.link().callback(|()| Msg::Stop);
+        let on_next = ctx.link().callback(|()| Msg::Next);
+        let on_interrupt = ctx.link().callback(|()| Msg::Interrupt);
         let on_reset = ctx.link().callback(|()| Msg::Reset);
 
         // The PC indicator only means something while nothing is actively
@@ -1310,14 +1453,15 @@ impl Component for App {
                     <ControlBar
                         running={self.control.is_running()}
                         halted={self.control.is_halted()}
-                        has_advanced={self.control.has_advanced()}
+                        session={self.control.session()}
                         has_error={self.error.is_some()}
                         {on_run}
+                        {on_continue}
                         {on_step}
-                        {on_step_over}
-                        {on_stop}
+                        {on_next}
+                        {on_interrupt}
                         {on_reset}
-                        status={self.status_message.to_string()}
+                        status={self.status_message.clone()}
                     />
                 </div>
                 <Editor
@@ -1363,6 +1507,7 @@ impl Component for App {
         self.shortcut_enablement.set(control_enablement(
             self.control.is_running(),
             self.control.is_halted(),
+            self.control.session(),
             self.error.is_some(),
         ));
     }
@@ -1571,23 +1716,181 @@ mod tests {
     #[test]
     fn status_for_covers_every_step_outcome() {
         assert_eq!(status_for(StepOutcome::BudgetExhausted), "Running");
-        assert_eq!(status_for(StepOutcome::Advanced), "Stepped over call");
+        assert_eq!(status_for(StepOutcome::Advanced), "Stepped over");
         assert_eq!(status_for(StepOutcome::Halted), "Halted");
         assert_eq!(status_for(StepOutcome::Breakpoint(0x100)), "Hit breakpoint");
     }
 
+    /// A straight-line program -- no loop, so a Run from the current PC can
+    /// never reach a breakpoint past the entry again once the PC has moved
+    /// beyond it.
+    const RESTART_STRAIGHT_LINE_MMS: &str =
+        "\tLOC\t#100\nMain\tSETL\t$1,1\n\tSETL\t$2,2\n\tSETL\t$3,3\n\tTRAP\t0,Halt,0\n";
+
+    /// Drives `restart_and_run` on `control`, then `resume_chunk` to a
+    /// terminal outcome -- the plain seam `Msg::Run` and `App::advance_chunk`
+    /// together drive, without a live `Context`.
+    fn restart_then_drive_to_terminal(control: &mut Control) -> (bool, StepOutcome) {
+        let mut chunk_timeout = None;
+        let mut debounce_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        view_state.reset(control);
+        let had_session = restart_and_run(
+            &mut chunk_timeout,
+            &mut debounce_timeout,
+            control,
+            RESTART_STRAIGHT_LINE_MMS,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+        assert!(error.is_none(), "fixture must still assemble");
+        let mut outcome = control.resume_chunk(control::CHUNK_BUDGET);
+        while outcome == StepOutcome::BudgetExhausted {
+            outcome = control.resume_chunk(control::CHUNK_BUDGET);
+        }
+        (had_session, outcome)
+    }
+
     #[test]
-    fn stop_if_running_is_a_true_no_op_while_paused() {
+    fn restart_and_run_always_restarts_through_the_shared_start_state() {
+        // From paused: Step past the breakpointed line (line 3) -- a Run
+        // from the current PC could never reach it again in this
+        // straight-line program.
+        let mut from_paused =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "restart-paused.mms").expect("assembles");
+        assert!(from_paused.toggle_breakpoint(3), "line 3 has an address");
+        assert_eq!(from_paused.step(), StepOutcome::Advanced); // line 2
+        assert_eq!(from_paused.step(), StepOutcome::Advanced); // line 3, past it
+        assert!(from_paused.session());
+
+        let (had_session, outcome) = restart_then_drive_to_terminal(&mut from_paused);
+        assert!(had_session, "a session existed before this Run");
+        assert!(
+            matches!(outcome, StepOutcome::Breakpoint(_)),
+            "Run must have restarted to hit the breakpoint again: {outcome:?}"
+        );
+
+        // From halted: run the whole program to completion (breakpoint not
+        // yet set), then arm it before restarting.
+        let mut from_halted =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "restart-halted.mms").expect("assembles");
+        assert_eq!(
+            from_halted.run_chunk(control::CHUNK_BUDGET),
+            StepOutcome::Halted,
+            "fixture must reach a halt with no breakpoint set"
+        );
+        assert!(from_halted.toggle_breakpoint(3), "line 3 has an address");
+        assert!(from_halted.is_halted());
+
+        let (had_session_halted, outcome_halted) = restart_then_drive_to_terminal(&mut from_halted);
+        assert!(
+            had_session_halted,
+            "a session existed before this Run -- halted counts too"
+        );
+        assert!(
+            matches!(outcome_halted, StepOutcome::Breakpoint(_)),
+            "Run must have restarted from halted to hit the breakpoint again: {outcome_halted:?}"
+        );
+    }
+
+    #[test]
+    fn a_restart_composes_onto_the_final_outcome_not_an_intermediate_tick() {
+        fn restart_then_advance_to_terminal(
+            control: &mut Control,
+            view_state: &mut ViewState,
+        ) -> String {
+            let mut chunk_timeout = None;
+            let mut debounce_timeout = None;
+            let mut error = None;
+            let mut error_line = None;
+            let mut restart_signal = restart_and_run(
+                &mut chunk_timeout,
+                &mut debounce_timeout,
+                control,
+                RESTART_STRAIGHT_LINE_MMS,
+                &mut error,
+                &mut error_line,
+                view_state,
+            );
+            assert!(error.is_none(), "fixture must still assemble");
+            loop {
+                let (status, needs_tick) =
+                    advance_chunk_once(control, view_state, &mut restart_signal);
+                if !needs_tick {
+                    return status;
+                }
+            }
+        }
+
+        // A Run after something executed.
+        let mut ran_before =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "restart-visible-1.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&ran_before);
+        assert_eq!(ran_before.step(), StepOutcome::Advanced);
+        assert_eq!(
+            restart_then_advance_to_terminal(&mut ran_before, &mut view_state),
+            "Restarted · Halted"
+        );
+
+        // A Run after a Run stopped at an entry breakpoint, where nothing
+        // executed.
+        let mut entry_breakpoint =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "restart-visible-2.mms").expect("assembles");
+        let mut view_state2 = ViewState::new();
+        view_state2.reset(&entry_breakpoint);
+        assert!(
+            entry_breakpoint.toggle_breakpoint(2),
+            "line 2 has an address"
+        );
+        assert!(matches!(
+            entry_breakpoint.run_chunk(control::CHUNK_BUDGET),
+            StepOutcome::Breakpoint(_)
+        ));
+        assert!(entry_breakpoint.session());
+        assert_eq!(
+            restart_then_advance_to_terminal(&mut entry_breakpoint, &mut view_state2),
+            "Restarted · Hit breakpoint"
+        );
+
+        // A Run from a fresh load ends on its outcome alone.
+        let mut fresh =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "restart-visible-3.mms").expect("assembles");
+        let mut view_state3 = ViewState::new();
+        view_state3.reset(&fresh);
+        assert_eq!(
+            restart_then_advance_to_terminal(&mut fresh, &mut view_state3),
+            "Halted"
+        );
+    }
+
+    #[test]
+    fn interrupt_if_running_is_a_true_no_op_while_paused() {
         const WRITES_REGISTER_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tTRAP\t0,Halt,0\n";
-        let mut control = Control::new(WRITES_REGISTER_MMS, "stop.mms").expect("assembles");
+        let mut control = Control::new(WRITES_REGISTER_MMS, "interrupt.mms").expect("assembles");
         let mut view_state = ViewState::new();
         view_state.reset(&control);
 
-        // An explicit Step, not a chunked Run/Step Over: `is_running()`
-        // stays false throughout, exactly the `paused` state Stop is newly
-        // enabled in.
+        // An explicit Step, not a chunked Run/Continue/Next: `is_running()`
+        // stays false throughout, exactly the `paused` state a stray
+        // `Msg::Interrupt` can still arrive in -- the key handler's
+        // enablement cell refreshes only in `App::rendered`.
         assert_eq!(control.step(), StepOutcome::Advanced);
         assert!(!control.is_running(), "a plain Step never sets running");
+        assert!(control.session(), "a Step must start a session -- paused");
+        assert!(
+            control_enablement(
+                control.is_running(),
+                control.is_halted(),
+                control.session(),
+                false,
+            )
+            .interrupt_disabled,
+            "Interrupt must be disabled while paused"
+        );
         view_state.observe(&control);
         view_state.record_pause_boundary(&control);
         let changed_after_step = view_state.changed_registers().clone();
@@ -1603,21 +1906,21 @@ mod tests {
             "the step must flag rL as changed: {changed_specials_after_step:?}"
         );
 
-        // Stop, while paused with nothing having moved since that boundary,
-        // must leave the changed set exactly as it was -- reverting the
-        // `is_running()` guard would re-diff the current state against
-        // itself (the snapshot `record_pause_boundary` just advanced to)
-        // and silently clear it to empty.
-        assert!(!stop_if_running(&mut control, &mut view_state));
+        // Interrupt, while paused with nothing having moved since that
+        // boundary, must leave the changed set exactly as it was --
+        // reverting the `is_running()` guard would re-diff the current
+        // state against itself (the snapshot `record_pause_boundary` just
+        // advanced to) and silently clear it to empty.
+        assert!(!interrupt_if_running(&mut control, &mut view_state));
         assert_eq!(
             view_state.changed_registers(),
             &changed_after_step,
-            "an inert Stop must not touch the changed-registers set"
+            "an inert Interrupt must not touch the changed-registers set"
         );
         assert_eq!(
             view_state.changed_specials(),
             &changed_specials_after_step,
-            "an inert Stop must not touch the changed-specials set"
+            "an inert Interrupt must not touch the changed-specials set"
         );
     }
 
@@ -1630,8 +1933,8 @@ mod tests {
 
         // Advance the machine and record a pause boundary first, so the
         // baseline below is provably non-empty -- mirrors
-        // `stop_if_running_is_a_true_no_op_while_paused`, and for the same
-        // reason: a freshly-reset empty baseline can't distinguish "nothing
+        // `interrupt_if_running_is_a_true_no_op_while_paused`, and for the
+        // same reason: a freshly-reset empty baseline can't distinguish "nothing
         // happened" from "view_state got reset a second time", which is
         // exactly the bug this function exists to prevent (a swallowed
         // second `view_state.reset()` if the pending debounce timer weren't
@@ -1656,7 +1959,7 @@ mod tests {
         // Nothing pending, the case `save_shortcut`'s unit test alone
         // cannot cover since it never sees `debounce_timeout`: this must
         // leave `error` and `view_state` exactly as they were, the same way
-        // `stop_if_running` leaves the changed set alone while paused.
+        // `interrupt_if_running` leaves the changed set alone while paused.
         let mut debounce_timeout: Option<Timeout> = None;
         let mut chunk_timeout: Option<Timeout> = None;
         let mut error: Option<String> = None;

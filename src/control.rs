@@ -10,8 +10,8 @@
 //! [`ControlBar`] is the Yew-facing button bar. The chunked run loop itself
 //! lives in `main.rs`'s `App`, which is what holds the machine across
 //! renders (see that module) and therefore what decides when to call
-//! [`Control::run_chunk`] or [`Control::step_over_chunk`] and when to yield
-//! via [`yield_to_event_loop`].
+//! [`Control::run_chunk`], [`Control::continue_chunk`], or
+//! [`Control::next_chunk`], and when to yield via [`yield_to_event_loop`].
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -30,9 +30,9 @@ use yew::prelude::*;
 /// stable MMIX architectural boundary, safe to restate here.
 const DATA_SEGMENT_START: u64 = 0x2000_0000_0000_0000;
 
-/// Instructions per chunk: the interrupt granularity for Run and a chunked
-/// Step Over, since either can only be stopped at a chunk boundary. Not a
-/// throughput knob.
+/// Instructions per chunk: the interrupt granularity for Run, Continue, and
+/// a chunked Next, since any of the three can only be interrupted at a
+/// chunk boundary. Not a throughput knob.
 ///
 /// Chunk wall-clock cost depends on opcode mix and memory-access pattern,
 /// not just instruction count, so this is tuned to the heaviest reproduced
@@ -45,18 +45,18 @@ const DATA_SEGMENT_START: u64 = 0x2000_0000_0000_0000;
 /// -- the worst case, since a growing hash map is the most expensive access
 /// pattern this interpreter has. Instruction cost is roughly linear in count
 /// for a fixed mix, so scaling down to 1,000,000 brings the growing-heap
-/// case to ~245 ms (the actual worst-case Stop latency this budget is tuned
-/// for) while dropping the tight-loop case to ~90 ms.
+/// case to ~245 ms (the actual worst-case Interrupt latency this budget is
+/// tuned for) while dropping the tight-loop case to ~90 ms.
 pub const CHUNK_BUDGET: usize = 1_000_000;
 
-/// Why [`Control::step`], [`Control::step_over_chunk`], or
-/// [`Control::run_chunk`] stopped. Close to [`checksmix::Stop`] but adds
-/// `Advanced`: the operation completed without being interrupted by a halt,
-/// a breakpoint, or the budget running out -- a plain Step's one
-/// instruction, or a Step Over reaching the pre-call depth (whether that
-/// took one chunk or several). `run_chunk` never returns `Advanced`: a
-/// chunk that neither halts nor hits a breakpoint always exhausts its
-/// budget by construction.
+/// Why [`Control::step`], [`Control::next_chunk`], [`Control::run_chunk`],
+/// or [`Control::continue_chunk`] stopped. Close to [`checksmix::Stop`] but
+/// adds `Advanced`: the operation completed without being interrupted by a
+/// halt, a breakpoint, or the budget running out -- a plain Step's one
+/// instruction, or a Next reaching the pre-call depth (whether that took
+/// one chunk or several). Neither `run_chunk` nor `continue_chunk` ever
+/// returns `Advanced`: a chunk that neither halts nor hits a breakpoint
+/// always exhausts its budget by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepOutcome {
     /// Completed without interruption.
@@ -133,7 +133,7 @@ impl Host for CaptureHost {
 
 /// The loaded machine, its assembler, and the control-pane state layered on
 /// top: breakpoints (by line, resolved to addresses), and whether a run or
-/// chunked Step Over is in flight.
+/// chunked Next is in flight.
 pub struct Control {
     mmix: MMix,
     assembler: MMixAssembler,
@@ -154,27 +154,31 @@ pub struct Control {
     /// `resolve_breakpoint_line`), so two entries in `breakpoints` may
     /// collapse to one entry here.
     resolved_breakpoints: BTreeSet<u64>,
-    /// Set while a chunked Run or a chunked Step Over is in flight; both
-    /// share this flag, since only one can be in flight at a time and both
-    /// are interrupted by Stop the same way.
+    /// Set while a chunked Run, Continue, or Next is in flight; all three
+    /// share this flag, since only one can be in flight at a time and all
+    /// are interrupted the same way.
     running: bool,
-    /// Set only while a chunked Step Over is in flight: the target it must
-    /// return to before it's done -- see `step_over_reached` for the full
+    /// Set only while a chunked Next is in flight: the target it must
+    /// return to before it's done -- see `next_reached` for the full
     /// stopping rule and why a depth-only field can't express it. Also
-    /// distinguishes a Step Over continuation from a Run continuation when
-    /// `running` is true, since both reuse the same chunk-yield loop.
-    step_over: Option<StepOverTarget>,
+    /// distinguishes a Next continuation from a Run/Continue continuation
+    /// when `running` is true, since all three reuse the same chunk-yield
+    /// loop.
+    next_target: Option<NextTarget>,
     /// Set once the machine halts; cleared only by `reload`/`new` loading a
-    /// fresh machine. There is no Reset control, so without this, Run,
-    /// Step, or Step Over after a halt would execute whatever uninitialized
-    /// memory sits past the halt instruction.
+    /// fresh machine. There is no way past a halt but Reset or Run's own
+    /// restart, so without this, Step, Next, or Continue after a halt would
+    /// execute whatever uninitialized memory sits past the halt
+    /// instruction.
     halted: bool,
-    /// Set the first time `step`, `run_chunk`, or `step_over_chunk` actually
-    /// executes an instruction since the last `new`/`reload` -- including
-    /// one that itself halts the machine. Distinguishes `paused` (something
-    /// ran, then stopped) from `ready` (nothing has run yet) for the
-    /// run-state label; never set by a halted no-op early return.
-    has_advanced: bool,
+    /// Set the first time Run, Step, or Next is issued since the last
+    /// `new`/`reload` -- including a Run that stops at a resolved
+    /// breakpoint on the entry line before executing anything. Distinguishes
+    /// `paused` (a started session that has since stopped) from `ready` (no session
+    /// yet) for the run-state label, and gates Continue: gdb answers "The
+    /// program is not being run" before a session starts. Cleared by
+    /// `reload`, the one path every successful reload takes.
+    session: bool,
     /// The address `run_chunk` just stopped at because it was a resolved
     /// breakpoint, or `None`. Consumed (read once, then always cleared) at
     /// the top of the very next `run_chunk` call: if the machine's PC still
@@ -193,7 +197,7 @@ pub struct Control {
     /// Every text-segment address `write_image` actually wrote for this
     /// load -- computed once from `machine().loaded_extent()` on
     /// `new`/`reload` and cached, since that walks the whole image and
-    /// `step_over_chunk`'s continuation loop checks it once per executed
+    /// `next_chunk`'s continuation loop checks it once per executed
     /// instruction. A membership test rather than a `[start, end]` bound:
     /// a program with more than one `LOC` in its text segment can leave a
     /// gap between two written regions, and a bound would read an address
@@ -203,16 +207,16 @@ pub struct Control {
     /// between two `LOC`-separated regions, leaves it. Empty if
     /// `write_image` wrote no text address at all (a program whose first
     /// line is `LOC Data_Segment`); `left_loaded_image` then answers `true`
-    /// unconditionally, so Step Over degrades to a plain Step rather than
+    /// unconditionally, so Next degrades to a plain Step rather than
     /// misreading nothing as everything.
     loaded_text_addresses: BTreeSet<u64>,
 }
 
-/// A chunked Step Over's target, captured once when it begins: the call
-/// depth and source line to return to before it's done. `Control`'s
-/// `step_over` field explains why the two travel together.
+/// A chunked Next's target, captured once when it begins: the call depth
+/// and source line to return to before it's done. `Control`'s `next_target`
+/// field explains why the two travel together.
 #[derive(Clone)]
-struct StepOverTarget {
+struct NextTarget {
     depth: usize,
     origin: Option<SourceLoc>,
 }
@@ -231,34 +235,36 @@ impl Control {
             breakpoints: BTreeSet::new(),
             resolved_breakpoints: BTreeSet::new(),
             running: false,
-            step_over: None,
+            next_target: None,
             halted: false,
-            has_advanced: false,
+            session: false,
             resumed_breakpoint: None,
             output,
             loaded_text_addresses,
         })
     }
 
-    /// Re-assemble `source` and load a fresh machine -- what an edit does.
-    /// A breakpoint line that still resolves survives with its address
+    /// Re-assemble `source` and load a fresh machine -- what an edit does,
+    /// what Reset does, and the start state Run always restarts through. A
+    /// breakpoint line that still resolves survives with its address
     /// recomputed against the new assembly, since re-assembling moves
     /// addresses; one the edit left unresolvable is dropped entirely, so no
     /// gutter marker outlives the code it sat on. On a parse error the
     /// previous machine and breakpoints are left untouched (no pruning
     /// either), same as today's error surfacing -- but a run or chunked
-    /// Step Over in flight still stops, because the source shown
-    /// alongside it is no longer the one that produced it, whether the
-    /// re-assemble succeeds or fails.
+    /// Next in flight still stops, because the source shown alongside it is
+    /// no longer the one that produced it, whether the re-assemble succeeds
+    /// or fails. The one path every successful reload takes, so it is also
+    /// where a session ends.
     pub fn reload(&mut self, source: &str) -> Result<(), String> {
         self.running = false;
-        self.step_over = None;
+        self.next_target = None;
         let (mmix, assembler, output) = Self::assemble_and_load(source, &self.filename)?;
         self.loaded_text_addresses = Self::loaded_text_addresses(&mmix);
         self.mmix = mmix;
         self.assembler = assembler;
         self.halted = false;
-        self.has_advanced = false;
+        self.session = false;
         self.resumed_breakpoint = None;
         self.output = output;
         self.resolve_breakpoints();
@@ -380,13 +386,15 @@ impl Control {
         !self.assembler.greg_inits.is_empty()
     }
 
-    /// Whether a chunked Run or chunked Step Over is in flight.
+    /// Whether a chunked Run, Continue, or Next is in flight.
     pub fn is_running(&self) -> bool {
         self.running
     }
 
-    /// Whether the machine has halted since the last `reload`/`new`. Run,
-    /// Step, and Step Over all no-op while this is set.
+    /// Whether the machine has halted since the last `reload`/`new`. Step,
+    /// Next, and Continue all no-op while this is set; `start_run` does too,
+    /// though Run's own restart never leaves this set by the time it calls
+    /// `start_run`.
     pub fn is_halted(&self) -> bool {
         self.halted
     }
@@ -395,12 +403,14 @@ impl Control {
         self.mmix.call_depth()
     }
 
-    /// Whether `step`, `run_chunk`, or `step_over_chunk` has actually
-    /// executed an instruction since the last `new`/successful `reload` --
-    /// including one that itself halts the machine. False immediately after
-    /// a fresh load; never set by a halted no-op early return.
-    pub fn has_advanced(&self) -> bool {
-        self.has_advanced
+    /// Whether a session has started: Run, Step, or Next has been issued
+    /// since the last `new`/successful `reload` -- including a Run that
+    /// stopped at a resolved breakpoint on the entry line before executing
+    /// anything. Distinguishes `paused` (a started session that has since stopped)
+    /// from `ready` (no session yet) for the run-state label, and gates
+    /// Continue.
+    pub fn session(&self) -> bool {
+        self.session
     }
 
     /// The address "where you are": once `halted`, `get_pc()` already points
@@ -464,19 +474,24 @@ impl Control {
         true
     }
 
-    /// Begin a chunked Run. No-op once halted -- see `is_halted`.
+    /// Begin a chunked Run from the machine's current state, and start a
+    /// session. No-op once halted -- see `is_halted`; Run's own restart
+    /// always reloads first, so this guard never fires through the UI, only
+    /// were `Control` called directly on an already-halted machine.
     pub fn start_run(&mut self) {
         if self.halted {
             return;
         }
+        self.session = true;
         self.running = true;
     }
 
-    /// End a Run or chunked Step Over in flight, if any, leaving the
-    /// machine where it stopped.
-    pub fn stop(&mut self) {
+    /// End a Run, Continue, or Next in flight, if any, leaving the machine
+    /// where it stopped -- the user's Interrupt, and `Msg::SourceChanged`'s
+    /// own use when the edited source no longer matches what's running.
+    pub fn end_in_flight(&mut self) {
         self.running = false;
-        self.step_over = None;
+        self.next_target = None;
     }
 
     /// Execute one source-level step. Never checks breakpoints or a budget
@@ -528,7 +543,7 @@ impl Control {
         let head_loc = self.assembler.source_loc(self.get_pc()).cloned();
         let pre_call_depth = self.call_depth();
 
-        self.has_advanced = true;
+        self.session = true;
         if !self.mmix.execute_instruction() {
             self.halted = true;
             return StepOutcome::Halted;
@@ -550,7 +565,7 @@ impl Control {
 
     /// Whether the PC now sits on a source line other than `origin` --
     /// `Debugger::reached_new_line`'s own rule, shared here with
-    /// `step_over_chunk`. An address with no source mapping (compiler-
+    /// `next_chunk`. An address with no source mapping (compiler-
     /// generated code, or past the end of the program) answers false: it is
     /// inside no line, so it is not a new one.
     fn reached_new_line(&self, origin: Option<&SourceLoc>) -> bool {
@@ -585,39 +600,39 @@ impl Control {
     /// since nothing sensible follows a PC that ran off the program's own
     /// end. Either half alone is not enough; see `left_loaded_image`'s own
     /// doc for why that half can't be folded into the source-map check.
-    fn step_over_reached(&self, target: &StepOverTarget) -> bool {
+    fn next_reached(&self, target: &NextTarget) -> bool {
         self.left_loaded_image()
             || (self.call_depth() <= target.depth && self.reached_new_line(target.origin.as_ref()))
     }
 
-    /// `Debugger::do_next`'s rule, chunked: begin or continue a Step Over.
+    /// `Debugger::do_next`'s rule, chunked: begin or continue a Next.
     ///
-    /// A fresh call (no Step Over already in flight) executes the statement
-    /// at the current PC -- never checking a breakpoint first, same as
+    /// A fresh call (no Next already in flight) executes the statement at
+    /// the current PC -- never checking a breakpoint first, same as
     /// `step` -- and, unless that alone already reached the target (see
-    /// `step_over_reached`), starts a chunked continuation back to it. A
+    /// `next_reached`), starts a chunked continuation back to it. A
     /// `debug` line's `JMP` is exactly the case that alone-step misses.
     ///
     /// A continuation call (one already in flight) executes up to `budget`
     /// more instructions, stopping sooner on a halt, a resolved breakpoint,
     /// or the target being reached -- the same shape `run_chunk` uses, so
-    /// Step Over is stoppable and cannot block the event loop for a call
-    /// that takes many instructions to return. Self-recursion whose callee
+    /// Next is stoppable and cannot block the event loop for a call that
+    /// takes many instructions to return. Self-recursion whose callee
     /// entry shares its caller's line (`Loop PUSHJ $0,Loop`) runs on until a
     /// genuinely new line, which is `Debugger::do_next`'s own rule too --
     /// not a defect to "fix" here. A single-line self-loop with no call at
     /// all (`Loop JMP Loop`) never reaches a new line either, so it never
-    /// terminates on its own -- stoppable only by Stop, same as Run on the
-    /// same loop.
+    /// terminates on its own -- stoppable only by Interrupt, same as Run on
+    /// the same loop.
     ///
     /// Ends the run (`is_running()` becomes `false`) on every outcome
     /// except `BudgetExhausted`, which the caller is expected to yield on
     /// and call this again.
-    pub fn step_over_chunk(&mut self, budget: usize) -> StepOutcome {
+    pub fn next_chunk(&mut self, budget: usize) -> StepOutcome {
         if self.halted {
             return StepOutcome::Halted;
         }
-        if self.step_over.is_none() {
+        if self.next_target.is_none() {
             let pre_call_depth = self.call_depth();
             let origin = self.assembler.source_loc(self.get_pc()).cloned();
             // May execute up to 4 instructions, not necessarily 1 (see
@@ -628,41 +643,41 @@ impl Control {
             if self.step_instruction_group() == StepOutcome::Halted {
                 return StepOutcome::Halted;
             }
-            let target = StepOverTarget {
+            let target = NextTarget {
                 depth: pre_call_depth,
                 origin,
             };
-            if self.step_over_reached(&target) {
+            if self.next_reached(&target) {
                 return StepOutcome::Advanced;
             }
             self.running = true;
-            self.step_over = Some(target);
+            self.next_target = Some(target);
         }
         let target = self
-            .step_over
+            .next_target
             .clone()
             .expect("set above, or by a prior call that left a continuation in flight");
 
         let mut count = 0usize;
-        while !self.step_over_reached(&target) {
+        while !self.next_reached(&target) {
             if count >= budget {
                 return StepOutcome::BudgetExhausted;
             }
             if self.resolved_breakpoints.contains(&self.get_pc()) {
                 self.running = false;
-                self.step_over = None;
+                self.next_target = None;
                 return StepOutcome::Breakpoint(self.get_pc());
             }
             if !self.mmix.execute_instruction() {
                 self.running = false;
-                self.step_over = None;
+                self.next_target = None;
                 self.halted = true;
                 return StepOutcome::Halted;
             }
             count += 1;
         }
         self.running = false;
-        self.step_over = None;
+        self.next_target = None;
         StepOutcome::Advanced
     }
 
@@ -682,10 +697,11 @@ impl Control {
     /// point with no address-consuming label before it, or any other PC a
     /// Step/Reset/reload happened to land on -- would silently execute
     /// before this loop ever got a chance to see it. The entry check below
-    /// closes that gap, without breaking "click Run again to continue past
-    /// the breakpoint you're paused at": `resumed_breakpoint` names
-    /// exactly the one address this call is allowed to run through
-    /// unchecked, and only while the PC still sits there.
+    /// closes that gap, without breaking a direct second call that resumes
+    /// past the breakpoint the previous call stopped at:
+    /// `resumed_breakpoint` names exactly the one address that call is
+    /// allowed to run through unchecked, and only while the PC still sits
+    /// there.
     ///
     /// Never returns `StepOutcome::Advanced`: a chunk that neither halts nor
     /// hits a breakpoint always exhausts its budget. Ends the run
@@ -696,6 +712,7 @@ impl Control {
         if self.halted {
             return StepOutcome::Halted;
         }
+        self.session = true;
         let resuming_past_this_breakpoint = self.resumed_breakpoint == Some(self.get_pc());
         self.resumed_breakpoint = None;
         if !resuming_past_this_breakpoint && self.resolved_breakpoints.contains(&self.get_pc()) {
@@ -708,7 +725,6 @@ impl Control {
             if count >= budget {
                 return StepOutcome::BudgetExhausted;
             }
-            self.has_advanced = true;
             if !self.mmix.execute_instruction() {
                 self.running = false;
                 self.halted = true;
@@ -723,12 +739,47 @@ impl Control {
         }
     }
 
-    /// Continue whichever chunked operation -- Run or Step Over -- is in
-    /// flight, dispatching on `step_over` so `main.rs`'s chunk-tick handler
-    /// doesn't need to track which one it started.
+    /// gdb's `continue`: execute the instruction at the PC unconditionally
+    /// -- even a breakpointed one, so a Continue after a Step or Next lands
+    /// on a breakpointed line still makes progress, unlike `run_chunk`'s own
+    /// entry check -- then run up to `budget` further instructions exactly
+    /// as `run_chunk` does, stopping sooner on a halt or a resolved
+    /// breakpoint. No-op once halted; requires a started session, enforced
+    /// by the caller's own enablement, not repeated here.
     pub fn continue_chunk(&mut self, budget: usize) -> StepOutcome {
-        if self.step_over.is_some() {
-            self.step_over_chunk(budget)
+        if self.halted {
+            return StepOutcome::Halted;
+        }
+        self.running = true;
+        self.resumed_breakpoint = None;
+        if !self.mmix.execute_instruction() {
+            self.running = false;
+            self.halted = true;
+            return StepOutcome::Halted;
+        }
+        if self.resolved_breakpoints.contains(&self.get_pc()) {
+            self.running = false;
+            self.resumed_breakpoint = Some(self.get_pc());
+            return StepOutcome::Breakpoint(self.get_pc());
+        }
+        match budget.checked_sub(1) {
+            Some(remaining) if remaining > 0 => self.run_chunk(remaining),
+            _ => StepOutcome::BudgetExhausted,
+        }
+    }
+
+    /// Resume whichever chunked operation -- Run, Continue, or Next -- is in
+    /// flight, dispatching on `next_target` so `main.rs`'s chunk-tick
+    /// handler doesn't need to track which one it started. A Continue's own
+    /// chunk continuation resumes through `run_chunk`, not `continue_chunk`
+    /// again: past its own first, unconditional instruction, a Continue in
+    /// flight behaves exactly like a Run in flight -- the PC a `Budget
+    /// Exhausted` tick leaves is never itself a resolved breakpoint, since
+    /// the loop both methods share checks after every instruction, so
+    /// `run_chunk`'s own entry check is always a no-op there.
+    pub fn resume_chunk(&mut self, budget: usize) -> StepOutcome {
+        if self.next_target.is_some() {
+            self.next_chunk(budget)
         } else {
             self.run_chunk(budget)
         }
@@ -736,57 +787,71 @@ impl Control {
 }
 
 /// The single chunk-boundary yield point: hand control back to the browser
-/// event loop, then call `callback`. A Stop request is checked only between
-/// chunks (never inside one) because a chunk is bounded at `CHUNK_BUDGET` by
-/// construction -- that bound is the whole reason a chunk yields at all, so
-/// there is no second interruption mechanism to build here.
+/// event loop, then call `callback`. An Interrupt request is checked only
+/// between chunks (never inside one) because a chunk is bounded at
+/// `CHUNK_BUDGET` by construction -- that bound is the whole reason a chunk
+/// yields at all, so there is no second interruption mechanism to build
+/// here.
 ///
 /// Returns the `Timeout` handle rather than leaking it via `forget()`: the
-/// caller holds it (see `App::chunk_timeout`) so Stop, or a `reload` mid-run,
-/// can cancel a pending tick by dropping it -- `Timeout`'s `Drop` calls
-/// `clearTimeout` and frees the closure, `forget()` does neither.
+/// caller holds it (see `App::chunk_timeout`) so Interrupt, or a `reload`
+/// mid-run, can cancel a pending tick by dropping it -- `Timeout`'s `Drop`
+/// calls `clearTimeout` and frees the closure, `forget()` does neither.
 pub fn yield_to_event_loop<F: FnOnce() + 'static>(callback: F) -> Timeout {
     Timeout::new(0, callback)
 }
 
-/// Run/Step/Step Over/Stop/Reset's disabled state for a given
-/// `(running, halted, has_error)` triple -- `docs/layout-spec.md`'s Run
-/// lifecycle table, factored into one plain function so `ControlBar`'s body
-/// states it once and a table-driven test can pin the whole table at once.
+/// Run/Continue/Step/Next/Interrupt/Reset's disabled state for a given
+/// `(running, halted, session, has_error)` quadruple --
+/// `docs/layout-spec.md`'s Run lifecycle table, factored into one plain
+/// function so `ControlBar`'s body states it once and a table-driven test
+/// can pin the whole table at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlEnablement {
     pub run_disabled: bool,
+    pub continue_disabled: bool,
     pub step_disabled: bool,
-    pub step_over_disabled: bool,
-    pub stop_disabled: bool,
+    pub next_disabled: bool,
+    pub interrupt_disabled: bool,
     pub reset_disabled: bool,
 }
 
 /// `has_error` forces every field `true`: an assembly error means there is
-/// no valid program loaded to Run, Step, Step Over, Stop, or Reset, so every
-/// control disables regardless of `running`/`halted`.
-pub fn control_enablement(running: bool, halted: bool, has_error: bool) -> ControlEnablement {
+/// no valid program loaded to Run, Continue, Step, Next, Interrupt, or
+/// Reset, so every control disables regardless of `running`/`halted`/
+/// `session`.
+pub fn control_enablement(
+    running: bool,
+    halted: bool,
+    session: bool,
+    has_error: bool,
+) -> ControlEnablement {
     if has_error {
         return ControlEnablement {
             run_disabled: true,
+            continue_disabled: true,
             step_disabled: true,
-            step_over_disabled: true,
-            stop_disabled: true,
+            next_disabled: true,
+            interrupt_disabled: true,
             reset_disabled: true,
         };
     }
+    // A started session that is neither running nor halted -- the one state
+    // Continue is live in, gdb's "The program is not being run" everywhere
+    // else.
+    let paused = session && !running && !halted;
     ControlEnablement {
         run_disabled: running,
+        continue_disabled: !paused,
         step_disabled: running || halted,
-        step_over_disabled: running || halted,
-        // Stop stays clickable in `ready` and `paused` too, not just
-        // `running`: there is nothing left to interrupt once halted, but a
-        // paused run is exactly the state a user is most likely to want to
-        // bail from. Reset shares this same gate on the other side --
-        // `ready`/`paused`/`halted` -- so the two overlap in `ready`/
-        // `paused` and each is the sole live control in exactly one state:
-        // Stop alone in `running`, Reset alone in `halted`.
-        stop_disabled: halted,
+        next_disabled: running || halted,
+        // Interrupt is live only while running: a live button that does
+        // nothing in `ready`/`paused` is the defect the owner found in Stop.
+        // Reset's own gate sits on the other side -- `ready`/`paused`/
+        // `halted` -- so the two overlap everywhere but `running`, and each
+        // is the sole live control in exactly one state: Interrupt alone in
+        // `running`, Reset alone in `halted`.
+        interrupt_disabled: !running,
         reset_disabled: running,
     }
 }
@@ -795,38 +860,55 @@ pub fn control_enablement(running: bool, halted: bool, has_error: bool) -> Contr
 /// Reset has no shortcut: it stays mouse-only, deliberately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardShortcut {
-    StepOver,
-    Step,
     Run,
-    Stop,
+    Continue,
+    Step,
+    Next,
+    Interrupt,
+}
+
+/// Whether a bare F10/F11 keydown must be prevented regardless of whether it
+/// fires a control -- Firefox's menu bar (F10) and the browser's fullscreen
+/// toggle (F11) must never trigger on this page. A chord -- Shift, Ctrl,
+/// Cmd, or Alt held -- is never swallowed: Shift+F10 is the standard
+/// context-menu key and must keep working, the editor included.
+pub fn should_swallow_bare_fkey(key: &str, modifier_held: bool, shift_held: bool) -> bool {
+    matches!(key, "F10" | "F11") && !modifier_held && !shift_held
 }
 
 /// Maps a bare keydown to the [`KeyboardShortcut`] it fires, gated by the
 /// same [`ControlEnablement`] the control-bar buttons use -- a disabled
 /// action stays a no-op from the keyboard too. `modifier_held` (Ctrl, Cmd,
-/// or Alt) or `focused_element_is_text_input` forces `None` regardless of
-/// `key`, keeping every OS/browser chord and ordinary typing untouched.
-/// `key` is matched against the layout-produced string
-/// (`KeyboardEvent::key()`), not the physical code, so a Shift-held press
+/// or Alt) forces `None` regardless of `key`, keeping every OS chord
+/// untouched. `key` is matched against the layout-produced string
+/// (`KeyboardEvent::key()`), not the physical code, so a Shift-held letter
 /// (which yields the uppercase form) never matches.
 ///
-/// `s` maps to Step Over and `i` to Step -- inverted from the naive
-/// letter-to-word mapping, since Step Over is the default/most-common step
-/// action and `i` explicitly requests following into a call.
+/// F10 (Next) and F11 (Step) fire even while a text-entry element has
+/// focus -- they type nothing there -- but only with `shift_held` false
+/// too: Shift+F11 is VS Code's step-out, which playmmix lacks. Every other
+/// key -- `r` Run, `c` Continue, `s` Step, `n` Next, `x` Interrupt -- fires
+/// only outside a text-entry element, `focused_element_is_text_input`.
+/// `i` maps to nothing.
 pub fn keyboard_shortcut_for(
     key: &str,
     modifier_held: bool,
+    shift_held: bool,
     focused_element_is_text_input: bool,
     enablement: ControlEnablement,
 ) -> Option<KeyboardShortcut> {
-    if modifier_held || focused_element_is_text_input {
+    if modifier_held {
         return None;
     }
     match key {
-        "s" if !enablement.step_over_disabled => Some(KeyboardShortcut::StepOver),
-        "i" if !enablement.step_disabled => Some(KeyboardShortcut::Step),
+        "F10" if !shift_held && !enablement.next_disabled => Some(KeyboardShortcut::Next),
+        "F11" if !shift_held && !enablement.step_disabled => Some(KeyboardShortcut::Step),
+        _ if focused_element_is_text_input => None,
         "r" if !enablement.run_disabled => Some(KeyboardShortcut::Run),
-        "x" if !enablement.stop_disabled => Some(KeyboardShortcut::Stop),
+        "c" if !enablement.continue_disabled => Some(KeyboardShortcut::Continue),
+        "s" if !enablement.step_disabled => Some(KeyboardShortcut::Step),
+        "n" if !enablement.next_disabled => Some(KeyboardShortcut::Next),
+        "x" if !enablement.interrupt_disabled => Some(KeyboardShortcut::Interrupt),
         _ => None,
     }
 }
@@ -840,43 +922,57 @@ pub fn save_shortcut(key: &str, ctrl_or_meta_held: bool) -> bool {
     key == "s" && ctrl_or_meta_held
 }
 
+/// Run's title: its keys, and what separates it from Continue and Reset.
+const RUN_TITLE: &str = "Run (r): restart from the start state, run to a breakpoint or halt.";
+const CONTINUE_TITLE: &str =
+    "Continue (c): execute the instruction at the PC, then run to a breakpoint or halt.";
+const STEP_TITLE: &str = "Step (s, F11): one source line, into calls.";
+const NEXT_TITLE: &str = "Next (n, F10): one source line, over calls.";
+const INTERRUPT_TITLE: &str = "Interrupt (x): pause a Run, Continue, or Next in flight.";
+/// Reset's title, exact per the owner's settled decision.
+const RESET_TITLE: &str = "Reload the program and return the machine to its start state: \
+registers, memory and output as loaded, PC at Main. Breakpoints are kept.";
+
 #[derive(Properties, PartialEq)]
 pub struct ControlBarProps {
     pub running: bool,
     pub halted: bool,
-    /// Whether anything has executed since the last load -- distinguishes
-    /// `paused` from `ready` in the run-state label.
-    pub has_advanced: bool,
+    /// Whether a session has started -- distinguishes `paused` from `ready`
+    /// in the run-state label, and gates Continue.
+    pub session: bool,
     /// Whether the currently displayed source has an assembly error --
     /// forces every control disabled (see `control_enablement`), since a
     /// broken program isn't the one that would actually run.
     pub has_error: bool,
     pub on_run: Callback<()>,
+    pub on_continue: Callback<()>,
     pub on_step: Callback<()>,
-    pub on_step_over: Callback<()>,
-    pub on_stop: Callback<()>,
+    pub on_next: Callback<()>,
+    pub on_interrupt: Callback<()>,
     pub on_reset: Callback<()>,
     /// A short (4-5 word) echo of the last action taken, rendered to the
     /// right of the run-state label -- `App::status_message` in `main.rs`.
     pub status: String,
 }
 
-/// Run / Step / Step Over / Stop / Reset, enabled per `control_enablement`.
+/// Run / Continue / Step / Next / Interrupt / Reset, enabled per
+/// `control_enablement`.
 #[function_component(ControlBar)]
 pub fn control_bar(props: &ControlBarProps) -> Html {
     let running = props.running;
     let halted = props.halted;
-    let enablement = control_enablement(running, halted, props.has_error);
+    let enablement = control_enablement(running, halted, props.session, props.has_error);
 
     html! {
         <div class="controls">
-            { control_button("Run", enablement.run_disabled, props.on_run.clone()) }
-            { control_button("Step", enablement.step_disabled, props.on_step.clone()) }
-            { control_button("Step Over", enablement.step_over_disabled, props.on_step_over.clone()) }
-            { control_button("Stop", enablement.stop_disabled, props.on_stop.clone()) }
-            { control_button("Reset", enablement.reset_disabled, props.on_reset.clone()) }
+            { control_button("Run", Some("r"), RUN_TITLE, enablement.run_disabled, props.on_run.clone()) }
+            { control_button("Continue", Some("c"), CONTINUE_TITLE, enablement.continue_disabled, props.on_continue.clone()) }
+            { control_button("Step", Some("s F11"), STEP_TITLE, enablement.step_disabled, props.on_step.clone()) }
+            { control_button("Next", Some("n F10"), NEXT_TITLE, enablement.next_disabled, props.on_next.clone()) }
+            { control_button("Interrupt", Some("x"), INTERRUPT_TITLE, enablement.interrupt_disabled, props.on_interrupt.clone()) }
+            { control_button("Reset", None, RESET_TITLE, enablement.reset_disabled, props.on_reset.clone()) }
             <span class="run-state">
-                { run_state_label(running, halted, props.has_advanced) }
+                { run_state_label(running, halted, props.session) }
             </span>
             <span class="status-message">{ &props.status }</span>
         </div>
@@ -884,24 +980,37 @@ pub fn control_bar(props: &ControlBarProps) -> Html {
 }
 
 /// One control-pane button: a plain `<button>` so every control is
-/// keyboard-reachable without extra wiring.
-fn control_button(label: &'static str, disabled: bool, on_click: Callback<()>) -> Html {
+/// keyboard-reachable without extra wiring. `key_hint`, when present, renders
+/// beside `label` as a hint on the button's own face, not only on hover;
+/// `title` names the action, its keys, and what it does in one clause.
+fn control_button(
+    label: &'static str,
+    key_hint: Option<&'static str>,
+    title: &'static str,
+    disabled: bool,
+    on_click: Callback<()>,
+) -> Html {
     let onclick = Callback::from(move |_| on_click.emit(()));
     html! {
-        <button {disabled} {onclick}>{ label }</button>
+        <button {disabled} {onclick} {title}>
+            <span class="control-label">{ label }</span>
+            { for key_hint.map(|hint| html! { <span class="control-key">{ hint }</span> }) }
+        </button>
     }
 }
 
-/// The run-state label: `running`/`halted` take precedence over whether
-/// anything has executed; otherwise `paused` (something ran, then stopped)
-/// or `stopped` (nothing has run since the last load) distinguish a fresh
-/// load from a mid-program pause. `running && halted` cannot occur.
-fn run_state_label(running: bool, halted: bool, has_advanced: bool) -> &'static str {
+/// The run-state label: `running`/`halted` take precedence over whether a
+/// session has started; otherwise `paused` (a started session that has since stopped)
+/// or `stopped` (no session since the last load) distinguish a fresh load
+/// from a mid-program pause -- including a Run stopped at a breakpoint on
+/// the entry line, which starts a session even though nothing has executed
+/// yet. `running && halted` cannot occur.
+fn run_state_label(running: bool, halted: bool, session: bool) -> &'static str {
     if running {
         "running"
     } else if halted {
         "halted"
-    } else if has_advanced {
+    } else if session {
         "paused"
     } else {
         "stopped"
@@ -1014,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn step_lands_inside_the_callee_step_over_lands_after_the_call() {
+    fn step_lands_inside_the_callee_next_lands_after_the_call() {
         // Two independent machines, both advanced to the PUSHJ call site
         // (line 4) by the same two plain steps from Main.
         let mut stepped = Control::new(CALL_MMS, "call.mms").expect("assembles");
@@ -1039,16 +1148,13 @@ mod tests {
 
         // The callee is short enough to finish within one chunk budget, so
         // this completes in a single call -- see
-        // `step_over_chunk_is_interruptible_by_stop` for a callee that
+        // `next_chunk_is_interruptible_by_interrupt` for a callee that
         // outlasts its budget and must be resumed.
-        assert_eq!(
-            stepped_over.step_over_chunk(CHUNK_BUDGET),
-            StepOutcome::Advanced
-        );
+        assert_eq!(stepped_over.next_chunk(CHUNK_BUDGET), StepOutcome::Advanced);
         assert_eq!(
             stepped_over.get_pc(),
             after_call_addr,
-            "Step Over must land after the call"
+            "Next must land after the call"
         );
         // Reverting the depth rule to a plain single step would leave this
         // at the callee's address instead of back at the pre-call depth.
@@ -1178,7 +1284,7 @@ mod tests {
     fn reload_refreshes_the_loaded_text_address_cache() {
         // `loaded_text_addresses` is computed once on load and cached (see
         // its own doc for why). A reload that failed to recompute it would
-        // leave Step Over's `left_loaded_image` check consulting the
+        // leave Next's `left_loaded_image` check consulting the
         // *previous* load's addresses against the *new* machine's PC.
         const SHORT_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
         const LONGER_MMS: &str =
@@ -1219,11 +1325,11 @@ mod tests {
     }
 
     #[test]
-    fn reload_stops_a_chunked_step_over_in_flight_on_a_parse_error() {
+    fn reload_stops_a_chunked_next_in_flight_on_a_parse_error() {
         let mut control = Control::new(CALL_WAIT_MMS, "wait.mms").expect("assembles");
         control.step(); // land on the PUSHJ call site
         assert_eq!(
-            control.step_over_chunk(1),
+            control.next_chunk(1),
             StepOutcome::BudgetExhausted,
             "the wait loop must outlast a one-instruction chunk budget"
         );
@@ -1233,7 +1339,7 @@ mod tests {
         assert!(!control.is_running());
 
         // A stale continuation left in flight would route a later Run's
-        // chunk tick through `step_over_chunk` (which stops as soon as the
+        // chunk tick through `next_chunk` (which stops as soon as the
         // call returns) instead of `run_chunk` (which runs straight through
         // to the halt). The failed reload leaves the old machine loaded, so
         // this can still run to completion.
@@ -1272,10 +1378,10 @@ mod tests {
     }
 
     #[test]
-    fn reload_with_invalid_source_leaves_has_advanced_and_output_untouched() {
+    fn reload_with_invalid_source_leaves_session_and_output_untouched() {
         // Mirrors `reload_with_invalid_source_leaves_previous_machine_and_
         // breakpoints_untouched`, for the two fields that test doesn't cover:
-        // a halted run has both `has_advanced` set and real output captured,
+        // a halted run has both a started session and real output captured,
         // and a failed reload must leave both exactly as they were.
         let mut control =
             Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
@@ -1288,8 +1394,8 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            control.has_advanced(),
-            "has_advanced is untouched by a failed reload"
+            control.session(),
+            "the session is untouched by a failed reload"
         );
         assert_eq!(
             control.output(),
@@ -1370,7 +1476,7 @@ mod tests {
         assert_eq!(control.run_chunk(1_000), StepOutcome::Halted);
         assert_eq!(control.get_pc(), pc_at_halt);
 
-        assert_eq!(control.step_over_chunk(1_000), StepOutcome::Halted);
+        assert_eq!(control.next_chunk(1_000), StepOutcome::Halted);
         assert_eq!(control.get_pc(), pc_at_halt);
         assert_eq!(control.machine().get_register(1), register_at_halt);
     }
@@ -1389,16 +1495,16 @@ mod tests {
     }
 
     #[test]
-    fn step_over_breakpoint_check_stops_mid_call_not_just_at_return() {
+    fn next_breakpoint_check_stops_mid_call_not_just_at_return() {
         let mut control = Control::new(CALL_WITH_BODY_MMS, "call.mms").expect("assembles");
         control.step(); // land on the PUSHJ call site (line 3)
 
         let callee_first_addr = expect_addr(CALL_WITH_BODY_MMS, "call.mms", 6);
         assert!(control.toggle_breakpoint(6));
 
-        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+        let outcome = control.next_chunk(CHUNK_BUDGET);
 
-        // A step over that only checked for a breakpoint after the call
+        // A Next that only checked for a breakpoint after the call
         // fully returned would run both callee instructions and land back
         // at line 4 (`Advanced`) instead of stopping here: the PC would
         // have advanced past `callee_first_addr` to the second `ADDU`, or
@@ -1410,28 +1516,28 @@ mod tests {
     }
 
     #[test]
-    fn step_over_chunk_is_interruptible_by_stop() {
+    fn next_chunk_is_interruptible_by_interrupt() {
         let mut control = Control::new(CALL_WAIT_MMS, "wait.mms").expect("assembles");
         control.step(); // land on the PUSHJ call site (line 3)
 
-        assert_eq!(control.step_over_chunk(1), StepOutcome::BudgetExhausted);
+        assert_eq!(control.next_chunk(1), StepOutcome::BudgetExhausted);
         let counter_after_first = control.machine().get_register(1);
         assert!(control.is_running());
 
-        assert_eq!(control.step_over_chunk(1), StepOutcome::BudgetExhausted);
+        assert_eq!(control.next_chunk(1), StepOutcome::BudgetExhausted);
         let counter_after_second = control.machine().get_register(1);
         assert!(
             counter_after_second > counter_after_first,
             "each chunk call must resume the call in progress, not restart it"
         );
 
-        control.stop();
+        control.end_in_flight();
         assert!(!control.is_running());
 
-        // Stopping mid-call must clear the pending continuation, not just
-        // the running flag: a later Run must run straight through to the
-        // halt via `run_chunk`. A stale continuation left in flight would
-        // instead route it through `step_over_chunk`, which stops as soon
+        // Ending the in-flight call must clear the pending continuation,
+        // not just the running flag: a later Run must run straight through
+        // to the halt via `run_chunk`. A stale continuation left in flight
+        // would instead route it through `next_chunk`, which stops as soon
         // as the interrupted call returns -- well short of the halt.
         control.start_run();
         assert_eq!(control.continue_chunk(CHUNK_BUDGET), StepOutcome::Halted);
@@ -1468,39 +1574,37 @@ mod tests {
     }
 
     #[test]
-    fn has_advanced_tracks_whether_anything_has_executed() {
+    fn session_tracks_whether_run_step_or_next_has_been_issued() {
         let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
-        assert!(
-            !control.has_advanced(),
-            "a fresh load must not report having advanced"
-        );
+        assert!(!control.session(), "a fresh load must not report a session");
 
         control.step();
-        assert!(control.has_advanced(), "one step must set has_advanced");
+        assert!(control.session(), "one step must start a session");
 
         control.reload(LOOP_MMS).expect("still assembles");
         assert!(
-            !control.has_advanced(),
-            "a successful reload must clear has_advanced"
+            !control.session(),
+            "a successful reload must end the session"
         );
     }
 
     #[test]
-    fn has_advanced_is_set_even_when_the_first_instruction_halts() {
+    fn session_starts_even_when_the_first_instruction_halts() {
         const HALTS_IMMEDIATELY_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
         let mut control = Control::new(HALTS_IMMEDIATELY_MMS, "halt.mms").expect("assembles");
 
         assert_eq!(control.step(), StepOutcome::Halted);
         assert!(
-            control.has_advanced(),
-            "the halting instruction still executed, so has_advanced must be true \
-             even though the resulting state is halted, not paused"
+            control.session(),
+            "the halting instruction was still issued via Step, so a session \
+             must have started even though the resulting state is halted, \
+             not paused"
         );
 
-        // A second step is now a halted no-op and must not disturb
-        // has_advanced (already true, but this pins the no-op path too).
+        // A second step is a halted no-op and must not disturb the session
+        // (already started, but this pins the no-op path too).
         assert_eq!(control.step(), StepOutcome::Halted);
-        assert!(control.has_advanced());
+        assert!(control.session());
     }
 
     #[test]
@@ -1512,7 +1616,7 @@ mod tests {
         let outcome = control.run_chunk(1_000_000);
         assert_eq!(outcome, StepOutcome::Halted, "fixture must reach a halt");
         assert!(control.is_halted());
-        assert!(control.has_advanced());
+        assert!(control.session());
         assert!(!control.output().is_empty());
 
         control
@@ -1521,130 +1625,267 @@ mod tests {
 
         assert_eq!(control.get_pc(), fresh_pc, "PC returns to the entry point");
         assert!(!control.is_halted(), "halted clears on Reset");
-        assert!(!control.has_advanced(), "has_advanced clears on Reset");
+        assert!(!control.session(), "the session ends on Reset");
         assert!(control.output().is_empty(), "output clears on Reset");
     }
 
     #[test]
     fn control_enablement_matches_the_run_lifecycle_table() {
         // `docs/layout-spec.md`'s Run lifecycle table, restated as
-        // (running, halted, has_error) -> disabled state for every control.
+        // (running, halted, session, has_error) -> disabled state for every
+        // control.
         let cases = [
-            // (running, halted, has_error, run, step, step_over, stop, reset)
-            (false, false, false, false, false, false, false, false), // ready
-            (true, false, false, true, true, true, false, true),      // running
-            // paused is (running=false, halted=false) after having advanced --
-            // has_advanced doesn't affect enablement, only the label, so
-            // "ready" and "paused" share one row here.
-            (false, true, false, false, true, true, true, false), // halted
+            // (running, halted, session, has_error,
+            //  run, continue, step, next, interrupt, reset)
+            (
+                false, false, false, false, false, true, false, false, true, false,
+            ), // ready
+            (
+                true, false, true, false, true, true, true, true, false, true,
+            ), // running
+            // paused: a started session, neither running nor halted -- the
+            // one state Continue is live in.
+            (
+                false, false, true, false, false, false, false, false, true, false,
+            ), // paused
+            (
+                false, true, true, false, false, true, true, true, true, false,
+            ), // halted
             // has_error forces every control disabled, regardless of what
-            // running/halted would otherwise allow.
-            (false, false, true, true, true, true, true, true), // ready + error
-            (true, false, true, true, true, true, true, true),  // running + error
-            (false, true, true, true, true, true, true, true),  // halted + error
+            // running/halted/session would otherwise allow.
+            (
+                false, false, false, true, true, true, true, true, true, true,
+            ), // ready + error
+            (true, false, true, true, true, true, true, true, true, true), // running + error
+            (false, false, true, true, true, true, true, true, true, true), // paused + error
+            (false, true, true, true, true, true, true, true, true, true), // halted + error
         ];
-        for (running, halted, has_error, run, step, step_over, stop, reset) in cases {
-            let enablement = control_enablement(running, halted, has_error);
-            assert_eq!(
-                enablement.run_disabled, run,
-                "Run disabled at running={running} halted={halted} has_error={has_error}"
+        for (running, halted, session, has_error, run, continue_, step, next, interrupt, reset) in
+            cases
+        {
+            let enablement = control_enablement(running, halted, session, has_error);
+            let ctx = format!(
+                "running={running} halted={halted} session={session} has_error={has_error}"
             );
+            assert_eq!(enablement.run_disabled, run, "Run disabled at {ctx}");
             assert_eq!(
-                enablement.step_disabled, step,
-                "Step disabled at running={running} halted={halted} has_error={has_error}"
+                enablement.continue_disabled, continue_,
+                "Continue disabled at {ctx}"
             );
+            assert_eq!(enablement.step_disabled, step, "Step disabled at {ctx}");
+            assert_eq!(enablement.next_disabled, next, "Next disabled at {ctx}");
             assert_eq!(
-                enablement.step_over_disabled, step_over,
-                "Step Over disabled at running={running} halted={halted} has_error={has_error}"
+                enablement.interrupt_disabled, interrupt,
+                "Interrupt disabled at {ctx}"
             );
-            assert_eq!(
-                enablement.stop_disabled, stop,
-                "Stop disabled at running={running} halted={halted} has_error={has_error}"
-            );
-            assert_eq!(
-                enablement.reset_disabled, reset,
-                "Reset disabled at running={running} halted={halted} has_error={has_error}"
-            );
+            assert_eq!(enablement.reset_disabled, reset, "Reset disabled at {ctx}");
         }
     }
 
     #[test]
     fn keyboard_shortcut_for_maps_each_key_when_enabled() {
-        let enablement = control_enablement(false, false, false); // ready: nothing disabled
+        let ready = control_enablement(false, false, false, false);
+        let paused = control_enablement(false, false, true, false);
+        let running = control_enablement(true, false, true, false);
         let cases = [
-            ("s", KeyboardShortcut::StepOver),
-            ("i", KeyboardShortcut::Step),
-            ("r", KeyboardShortcut::Run),
-            ("x", KeyboardShortcut::Stop),
+            ("r", ready, KeyboardShortcut::Run),
+            ("c", paused, KeyboardShortcut::Continue),
+            ("s", ready, KeyboardShortcut::Step),
+            ("n", ready, KeyboardShortcut::Next),
+            ("x", running, KeyboardShortcut::Interrupt),
+            ("F11", ready, KeyboardShortcut::Step),
+            ("F10", ready, KeyboardShortcut::Next),
         ];
-        for (key, expected) in cases {
+        for (key, enablement, expected) in cases {
             assert_eq!(
-                keyboard_shortcut_for(key, false, false, enablement),
+                keyboard_shortcut_for(key, false, false, false, enablement),
                 Some(expected),
-                "key {key:?} must map to {expected:?} when enabled"
+                "key {key:?} must map to {expected:?} when its control is enabled"
             );
         }
     }
 
     #[test]
-    fn keyboard_shortcut_for_is_none_when_its_control_is_disabled() {
-        // `running`: Step and Step Over disable (Stop is the live control).
-        let running = control_enablement(true, false, false);
-        assert_eq!(keyboard_shortcut_for("i", false, false, running), None);
-        assert_eq!(keyboard_shortcut_for("s", false, false, running), None);
+    fn keyboard_shortcut_for_maps_f10_and_f11_even_inside_a_text_entry_element() {
+        let ready = control_enablement(false, false, false, false);
+        assert_eq!(
+            keyboard_shortcut_for("F10", false, false, true, ready),
+            Some(KeyboardShortcut::Next),
+            "F10 must fire Next even while a text input is focused"
+        );
+        assert_eq!(
+            keyboard_shortcut_for("F11", false, false, true, ready),
+            Some(KeyboardShortcut::Step),
+            "F11 must fire Step even while a text input is focused"
+        );
+    }
 
-        // `halted`: Stop disables (nothing left to interrupt).
-        let halted = control_enablement(false, true, false);
-        assert_eq!(keyboard_shortcut_for("x", false, false, halted), None);
+    #[test]
+    fn keyboard_shortcut_for_is_none_when_its_control_is_disabled() {
+        // `running`: Step and Next disable (Interrupt is the live control).
+        let running = control_enablement(true, false, true, false);
+        assert_eq!(
+            keyboard_shortcut_for("s", false, false, false, running),
+            None
+        );
+        assert_eq!(
+            keyboard_shortcut_for("n", false, false, false, running),
+            None
+        );
+        assert_eq!(
+            keyboard_shortcut_for("F11", false, false, false, running),
+            None
+        );
+        assert_eq!(
+            keyboard_shortcut_for("F10", false, false, false, running),
+            None
+        );
+
+        // `halted`: Interrupt disables (nothing left to interrupt).
+        let halted = control_enablement(false, true, true, false);
+        assert_eq!(
+            keyboard_shortcut_for("x", false, false, false, halted),
+            None
+        );
+
+        // `ready`: Continue disables (no session yet).
+        let ready = control_enablement(false, false, false, false);
+        assert_eq!(keyboard_shortcut_for("c", false, false, false, ready), None);
 
         // Run has no reachable state above that disables it alone; hand-build
         // one to cover run_disabled directly.
         let run_disabled = ControlEnablement {
             run_disabled: true,
+            continue_disabled: false,
             step_disabled: false,
-            step_over_disabled: false,
-            stop_disabled: false,
+            next_disabled: false,
+            interrupt_disabled: false,
             reset_disabled: false,
         };
-        assert_eq!(keyboard_shortcut_for("r", false, false, run_disabled), None);
+        assert_eq!(
+            keyboard_shortcut_for("r", false, false, false, run_disabled),
+            None
+        );
     }
 
     #[test]
     fn keyboard_shortcut_for_ignores_every_key_while_a_modifier_is_held() {
-        let enablement = control_enablement(false, false, false);
-        for key in ["s", "i", "r", "x"] {
+        let ready = control_enablement(false, false, false, false);
+        let paused = control_enablement(false, false, true, false);
+        let running = control_enablement(true, false, true, false);
+        let cases = [
+            ("r", ready),
+            ("c", paused),
+            ("s", ready),
+            ("n", ready),
+            ("x", running),
+            ("F10", ready),
+            ("F11", ready),
+        ];
+        for (key, enablement) in cases {
             assert_eq!(
-                keyboard_shortcut_for(key, true, false, enablement),
+                keyboard_shortcut_for(key, true, false, false, enablement),
                 None,
-                "key {key:?} must not fire while a modifier is held"
+                "key {key:?} must not fire while a modifier is held, even when \
+                 its control is otherwise enabled"
             );
         }
     }
 
     #[test]
-    fn keyboard_shortcut_for_ignores_every_key_while_a_text_input_has_focus() {
-        let enablement = control_enablement(false, false, false);
-        for key in ["s", "i", "r", "x"] {
+    fn keyboard_shortcut_for_ignores_letters_while_a_text_input_has_focus() {
+        let ready = control_enablement(false, false, false, false);
+        let paused = control_enablement(false, false, true, false);
+        let running = control_enablement(true, false, true, false);
+        let cases = [
+            ("r", ready),
+            ("c", paused),
+            ("s", ready),
+            ("n", ready),
+            ("x", running),
+        ];
+        for (key, enablement) in cases {
             assert_eq!(
-                keyboard_shortcut_for(key, false, true, enablement),
+                keyboard_shortcut_for(key, false, false, true, enablement),
                 None,
-                "key {key:?} must not fire while a text input is focused"
+                "letter {key:?} must not fire while a text input is focused"
             );
         }
+    }
+
+    #[test]
+    fn keyboard_shortcut_for_blocks_f10_and_f11_while_shift_is_held() {
+        let ready = control_enablement(false, false, false, false);
+        assert_eq!(
+            keyboard_shortcut_for("F10", false, true, false, ready),
+            None
+        );
+        assert_eq!(
+            keyboard_shortcut_for("F11", false, true, false, ready),
+            None
+        );
     }
 
     #[test]
     fn keyboard_shortcut_for_ignores_an_unmapped_key() {
-        let enablement = control_enablement(false, false, false);
-        assert_eq!(keyboard_shortcut_for("q", false, false, enablement), None);
+        let paused = control_enablement(false, false, true, false);
+        assert_eq!(
+            keyboard_shortcut_for("q", false, false, false, paused),
+            None
+        );
+        assert_eq!(
+            keyboard_shortcut_for("i", false, false, false, paused),
+            None,
+            "i must map to nothing"
+        );
     }
 
     #[test]
     fn keyboard_shortcut_for_does_not_lowercase_shift_held_keys() {
         // `key()` reports Shift-held letters in uppercase; matching only the
-        // lowercase form is what keeps Shift+S from firing Step Over.
-        let enablement = control_enablement(false, false, false);
-        assert_eq!(keyboard_shortcut_for("S", false, false, enablement), None);
+        // lowercase form is what keeps Shift+S from firing Step.
+        let enablement = control_enablement(false, false, false, false);
+        assert_eq!(
+            keyboard_shortcut_for("S", false, false, false, enablement),
+            None
+        );
+    }
+
+    #[test]
+    fn bare_f10_is_swallowed_even_when_its_control_is_disabled() {
+        let running = control_enablement(true, false, true, false); // Next disabled
+        assert_eq!(
+            keyboard_shortcut_for("F10", false, false, false, running),
+            None,
+            "fixture assumption: Next is disabled while running"
+        );
+        assert!(
+            should_swallow_bare_fkey("F10", false, false),
+            "a bare F10 must still be swallowed even when it fires nothing"
+        );
+    }
+
+    #[test]
+    fn should_swallow_bare_fkey_swallows_f10_and_f11_with_no_modifier_or_shift() {
+        assert!(should_swallow_bare_fkey("F10", false, false));
+        assert!(should_swallow_bare_fkey("F11", false, false));
+    }
+
+    #[test]
+    fn should_swallow_bare_fkey_never_swallows_shift_f10() {
+        assert!(!should_swallow_bare_fkey("F10", false, true));
+    }
+
+    #[test]
+    fn should_swallow_bare_fkey_never_swallows_a_modifier_held_fkey() {
+        assert!(!should_swallow_bare_fkey("F10", true, false));
+        assert!(!should_swallow_bare_fkey("F11", true, false));
+    }
+
+    #[test]
+    fn should_swallow_bare_fkey_ignores_every_other_key() {
+        assert!(!should_swallow_bare_fkey("F9", false, false));
+        assert!(!should_swallow_bare_fkey("r", false, false));
     }
 
     #[test]
@@ -1673,11 +1914,11 @@ mod tests {
             (false, true, false, "halted"),
             (false, true, true, "halted"),
         ];
-        for (running, halted, has_advanced, expected) in cases {
+        for (running, halted, session, expected) in cases {
             assert_eq!(
-                run_state_label(running, halted, has_advanced),
+                run_state_label(running, halted, session),
                 expected,
-                "running={running} halted={halted} has_advanced={has_advanced}"
+                "running={running} halted={halted} session={session}"
             );
         }
     }
@@ -1903,9 +2144,9 @@ mod tests {
     }
 
     #[test]
-    fn step_over_on_a_debug_line_lands_on_the_next_source_line_in_one_call() {
+    fn next_on_a_debug_line_lands_on_the_next_source_line_in_one_call() {
         // checksmix 0.3.9's `debug` compiles to a `JMP` into a generated,
-        // unmapped stub, not a `PUSHJ` (see `step_over_reached`'s doc for
+        // unmapped stub, not a `PUSHJ` (see `next_reached`'s doc for
         // why a depth-only rule can't handle this). The fix must land past
         // the whole `debug` line in this one call, not stop inside the stub.
         let mut control =
@@ -1913,7 +2154,7 @@ mod tests {
         let pre_call_depth = control.call_depth();
         let next_line_addr = expect_addr(crate::examples::HELLO_WORLD_MMS, "hello.mms", 8);
 
-        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+        let outcome = control.next_chunk(CHUNK_BUDGET);
 
         assert_eq!(outcome, StepOutcome::Advanced);
         assert_eq!(
@@ -1924,7 +2165,7 @@ mod tests {
         assert_eq!(
             control.get_pc(),
             next_line_addr,
-            "Step Over must land on the line after the debug directive, not \
+            "Next must land on the line after the debug directive, not \
              inside its generated stub"
         );
         assert!(
@@ -1935,17 +2176,17 @@ mod tests {
     }
 
     #[test]
-    fn step_over_stops_at_the_end_of_the_image_instead_of_halting() {
+    fn next_stops_at_the_end_of_the_image_instead_of_halting() {
         // This program has no halting TRAP: once its two lines are done, the
         // PC runs into memory write_image never wrote. An unmapped PC alone
         // reads as "not a new line" (`reached_new_line`), so without a check
         // against the loaded image, the continuation loop would keep going
         // through that unwritten memory until it happened to decode into
         // something checksmix treats as an unhandled trap -- latching
-        // `halted` for a Step Over the user never asked to run that far. A
+        // `halted` for a Next the user never asked to run that far. A
         // plain Step here does not have this problem: `step_instruction_
         // group`'s own group search already stops the instant the PC leaves
-        // the mapped line, so this pins Step Over to that same landing spot.
+        // the mapped line, so this pins Next to that same landing spot.
         const RUNS_OFF_THE_END_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,1\n\tSETL\t$2,2\n";
 
         let mut stepped = Control::new(RUNS_OFF_THE_END_MMS, "n.mms").expect("assembles");
@@ -1960,18 +2201,18 @@ mod tests {
         let mut control = Control::new(RUNS_OFF_THE_END_MMS, "n.mms").expect("assembles");
         control.step(); // land on line 3
 
-        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+        let outcome = control.next_chunk(CHUNK_BUDGET);
 
         assert_eq!(
             outcome,
             StepOutcome::Advanced,
-            "leaving the loaded image must stop Step Over cleanly, not run it \
+            "leaving the loaded image must stop Next cleanly, not run it \
              into an unintended halt"
         );
         assert!(
             !control.is_halted(),
             "Control::halted's own doc: this must never latch from running \
-             off the end of the image, or Run/Step/Step Over stay disabled \
+             off the end of the image, or Run/Step/Next stay disabled \
              until Reset for a halt the program never actually reached"
         );
         assert!(
@@ -1981,19 +2222,19 @@ mod tests {
         assert_eq!(
             control.get_pc(),
             pc_after_plain_steps,
-            "Step Over must land exactly where a plain Step would"
+            "Next must land exactly where a plain Step would"
         );
     }
 
     #[test]
-    fn step_over_stops_at_a_gap_between_loc_regions_instead_of_running_into_it() {
+    fn next_stops_at_a_gap_between_loc_regions_instead_of_running_into_it() {
         // Two `LOC` directives in the text segment leave a gap between them
         // that `write_image` never wrote -- ordinary MMIXAL, not a
         // pathology. A `[start, end]` bound over the text segment reads an
         // address in that gap as loaded when it never was, so the
         // continuation loop would keep executing through it, decoding
         // unwritten memory until it happens to read as `TRAP 0,Halt,0` --
-        // latching `halted` for a Step Over the user never asked to run
+        // latching `halted` for a Next the user never asked to run
         // that far, same class of defect as running off the program's own
         // end. `loaded_text_addresses` is a membership set, not a bound, so
         // it tells a real gap apart from loaded memory.
@@ -2010,18 +2251,18 @@ mod tests {
 
         let mut control = Control::new(GAP_BETWEEN_LOC_REGIONS_MMS, "n.mms").expect("assembles");
 
-        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+        let outcome = control.next_chunk(CHUNK_BUDGET);
 
         assert_eq!(
             outcome,
             StepOutcome::Advanced,
-            "landing in the gap must stop Step Over cleanly, not run it \
+            "landing in the gap must stop Next cleanly, not run it \
              into an unintended halt"
         );
         assert!(
             !control.is_halted(),
             "Control::halted's own doc: this must never latch from running \
-             into a gap between loaded regions, or Run/Step/Step Over stay \
+             into a gap between loaded regions, or Run/Step/Next stay \
              disabled until Reset for a halt the program never actually \
              reached"
         );
@@ -2032,12 +2273,12 @@ mod tests {
         assert_eq!(
             control.get_pc(),
             pc_after_plain_step,
-            "Step Over must land exactly where a plain Step would"
+            "Next must land exactly where a plain Step would"
         );
     }
 
     #[test]
-    fn step_over_on_a_debug_line_that_is_the_programs_last_statement_prints_once_then_halts() {
+    fn next_on_a_debug_line_that_is_the_programs_last_statement_prints_once_then_halts() {
         // When `debug` is the program's last statement, nothing real
         // follows its landing pad in the source -- but checksmix's own
         // preprocessor already guards exactly this case: it appends a
@@ -2047,13 +2288,13 @@ mod tests {
         // against `checksmix-0.3.9/src/mmixal.rs`'s `preprocess_debug`).
         // `left_loaded_image` therefore never fires here -- the halt comes
         // from `execute_instruction` itself, same as it would after enough
-        // plain Steps. This pins that Step Over still runs the whole debug
+        // plain Steps. This pins that Next still runs the whole debug
         // print in this one call and stops at that same halt, rather than
         // stopping early (missing the print) or running past it.
         const DEBUG_LAST_MMS: &str = "\tLOC\t#100\nMain\tdebug \"bye\"\n";
         let mut control = Control::new(DEBUG_LAST_MMS, "x.mms").expect("assembles");
 
-        let outcome = control.step_over_chunk(CHUNK_BUDGET);
+        let outcome = control.next_chunk(CHUNK_BUDGET);
 
         assert_eq!(outcome, StepOutcome::Halted);
         assert!(control.is_halted());
@@ -2067,5 +2308,149 @@ mod tests {
             stdout_text, "bye\n",
             "the debug print must have run exactly once in this one call"
         );
+    }
+
+    #[test]
+    fn reset_title_matches_the_owners_exact_text() {
+        assert_eq!(
+            RESET_TITLE,
+            "Reload the program and return the machine to its start state: \
+             registers, memory and output as loaded, PC at Main. Breakpoints are kept."
+        );
+    }
+
+    /// A straight-line program -- no loop, no call -- long enough that
+    /// Step or Next can land on line 3 without reaching the halt.
+    const STRAIGHT_LINE_MMS: &str =
+        "\tLOC\t#100\nMain\tSETL\t$1,1\n\tSETL\t$2,2\n\tSETL\t$3,3\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn continue_needs_a_started_session() {
+        let mut control = Control::new(STRAIGHT_LINE_MMS, "continue.mms").expect("assembles");
+
+        // A fresh load: no session yet.
+        assert!(!control.session());
+        let ready = control_enablement(
+            control.is_running(),
+            control.is_halted(),
+            control.session(),
+            false,
+        );
+        assert!(
+            ready.continue_disabled,
+            "Continue must be disabled on a fresh load"
+        );
+        assert_eq!(
+            keyboard_shortcut_for("c", false, false, false, ready),
+            None,
+            "c must map nothing on a fresh load"
+        );
+
+        // Reset (`Control::reload`): the session ends the same way.
+        control.reload(STRAIGHT_LINE_MMS).expect("still assembles");
+        assert!(!control.session());
+        let after_reset = control_enablement(
+            control.is_running(),
+            control.is_halted(),
+            control.session(),
+            false,
+        );
+        assert!(
+            after_reset.continue_disabled,
+            "Continue must be disabled after Reset"
+        );
+
+        // A breakpoint on the entry line: Run stops there before executing
+        // anything, but the session has still started.
+        assert!(control.toggle_breakpoint(2), "line 2 has an address");
+        let entry_addr = expect_addr(STRAIGHT_LINE_MMS, "continue.mms", 2);
+        assert_eq!(control.get_pc(), entry_addr, "fixture assumption");
+        assert_eq!(
+            control.run_chunk(CHUNK_BUDGET),
+            StepOutcome::Breakpoint(entry_addr)
+        );
+        assert_eq!(
+            control.machine().get_register(1),
+            0,
+            "the breakpointed instruction must not have executed"
+        );
+        assert!(
+            control.session(),
+            "a Run stopped at the entry breakpoint must still start a session -- \
+             the run-state label reads `paused` here, per `run_state_label`"
+        );
+        let paused = control_enablement(
+            control.is_running(),
+            control.is_halted(),
+            control.session(),
+            false,
+        );
+        assert!(
+            !paused.continue_disabled,
+            "Continue must be enabled once paused, even at the entry breakpoint"
+        );
+
+        // Continue is the only way past that breakpoint: it executes past
+        // it, straight through to the halt (no further breakpoints ahead).
+        assert_eq!(control.continue_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert!(control.is_halted());
+
+        // Run restarts into the same entry breakpoint again.
+        control.reload(STRAIGHT_LINE_MMS).expect("still assembles");
+        assert_eq!(
+            control.run_chunk(CHUNK_BUDGET),
+            StepOutcome::Breakpoint(entry_addr)
+        );
+    }
+
+    #[test]
+    fn continue_always_moves_past_a_breakpoint_step_or_next_landed_on() {
+        let line3_addr = expect_addr(STRAIGHT_LINE_MMS, "continue-always-moves.mms", 3);
+
+        // Step lands on the breakpointed line.
+        let mut stepped =
+            Control::new(STRAIGHT_LINE_MMS, "continue-always-moves.mms").expect("assembles");
+        assert!(stepped.toggle_breakpoint(3));
+        assert_eq!(stepped.step(), StepOutcome::Advanced);
+        assert_eq!(
+            stepped.get_pc(),
+            line3_addr,
+            "fixture assumption: Step must land on the breakpointed line"
+        );
+
+        // Deleting the fix (reverting to an entry check like `run_chunk`'s)
+        // would immediately re-report this same breakpoint without
+        // executing it, leaving the PC exactly where it started.
+        stepped.continue_chunk(CHUNK_BUDGET);
+        assert_ne!(
+            stepped.get_pc(),
+            line3_addr,
+            "Continue must execute the breakpointed instruction and move off it"
+        );
+        assert_eq!(
+            stepped.machine().get_register(2),
+            2,
+            "line 3's SETL must have executed"
+        );
+
+        // Next lands on the same breakpointed line (no call in this
+        // fixture, so Next behaves as one physical step here).
+        let mut stepped_over =
+            Control::new(STRAIGHT_LINE_MMS, "continue-always-moves.mms").expect("assembles");
+        assert!(stepped_over.toggle_breakpoint(3));
+        assert_eq!(stepped_over.next_chunk(CHUNK_BUDGET), StepOutcome::Advanced);
+        assert_eq!(
+            stepped_over.get_pc(),
+            line3_addr,
+            "fixture assumption: Next must land on the breakpointed line"
+        );
+
+        stepped_over.continue_chunk(CHUNK_BUDGET);
+        assert_ne!(
+            stepped_over.get_pc(),
+            line3_addr,
+            "Continue must execute the breakpointed instruction and move off it"
+        );
+        assert_eq!(stepped_over.machine().get_register(2), 2);
     }
 }

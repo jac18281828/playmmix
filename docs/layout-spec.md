@@ -28,23 +28,23 @@ Two-column split on desktop, replacing today's stack. Left is the program;
 right is the machine. CSS grid with named areas on `<main>`:
 
 ```
-+--------------------------------------------------------------+
-| header:  playmmix   [Run][Step][Step Over][Stop][Reset] state|
-+--------------------------------+-----------------------------+
-| editor                         | machine status (PC, depth)  |
-|   gutter | source              |-----------------------------|
-|   (existing pane, unchanged    | registers        (scroll)   |
-|    behavior)                   |   $0  0x…  0                |
-|                                |   $1  0x…  5                |
-|                                |   …one per row…             |
-|                                |-----------------------------|
-|                                | special registers           |
-|                                |   rA  0x…  0                |
-+--------------------------------+   …one per row…             |
-| output                (scroll) |-----------------------------|
-|   (program's stdout/stderr)    | memory           (scroll)   |
-|                                |   text 0x…100  f2 00 …      |
-+--------------------------------+-----------------------------+
++------------------------------------------------------------------------+
+| header:  playmmix   [Run][Continue][Step][Next][Interrupt][Reset] state|
++--------------------------------+---------------------------------------+
+| editor                         | machine status (PC, depth)            |
+|   gutter | source              |-----------------------------          |
+|   (existing pane, unchanged    | registers        (scroll)             |
+|    behavior)                   |   $0  0x…  0                          |
+|                                |   $1  0x…  5                          |
+|                                |   …one per row…                       |
+|                                |-----------------------------          |
+|                                | special registers                     |
+|                                |   rA  0x…  0                          |
++--------------------------------+   …one per row…                       |
+| output                (scroll) |-----------------------------          |
+|   (program's stdout/stderr)    | memory           (scroll)             |
+|                                |   text 0x…100  f2 00 …                |
++--------------------------------+---------------------------------------+
 ```
 
 - `grid-template-columns: minmax(0, 1fr) minmax(38rem, 42rem)` — the machine
@@ -83,34 +83,40 @@ highlighting (§ highlights) hang off.
 
 ## Run lifecycle
 
-Four states, driven by the two flags `Control` already has plus the new
-Reset:
+Four states, driven by `Control`'s `running`, `halted`, and `session` flags:
 
-| state    | Run | Step | Step Over | Stop | Reset | label     |
-|----------|-----|------|-----------|------|-------|-----------|
-| ready    | ✓   | ✓    | ✓         | ✓    | ✓     | `stopped` |
-| running  | –   | –    | –         | ✓    | –     | `running` |
-| paused   | ✓   | ✓    | ✓         | ✓    | ✓     | `paused`  |
-| halted   | ✓   | –    | –         | –    | ✓     | `halted`  |
+| state    | Run | Continue | Step | Next | Interrupt | Reset | label     |
+|----------|-----|----------|------|------|-----------|-------|-----------|
+| ready    | ✓   | –        | ✓    | ✓    | –         | ✓     | `stopped` |
+| running  | –   | –        | –    | –    | ✓         | –     | `running` |
+| paused   | ✓   | ✓        | ✓    | ✓    | –         | ✓     | `paused`  |
+| halted   | ✓   | –        | –    | –    | –         | ✓     | `halted`  |
 
 - **Reset** re-runs `Control::reload` on the current source: fresh machine at
-  the entry point, `halted` cleared, breakpoints kept (they already survive
-  reload by line number), output cleared. It is the "play again" control.
-- **Run while halted** performs Reset then Run — one click to replay, no
-  beep. Step and Step Over stay disabled when halted: single-stepping from a
-  halt is never what the user meant, and enabling them would silently replay
-  from the top.
-- `paused` is today's `stopped`-after-a-breakpoint/Step; it gets its own
-  label so the state line distinguishes "never ran" from "stopped mid-run".
+  the entry point, `halted` and the session cleared, breakpoints kept (they
+  already survive reload by line number), output cleared. It is the "play
+  again" control, and the start state Run always restarts through.
+- **Run always restarts**: it re-runs Reset's own path first -- the fresh
+  machine above -- then begins running from the entry, in every state,
+  halted included. One click to replay, no beep. Step and Next stay disabled
+  when halted: single-stepping from a halt is never what the user meant, and
+  enabling them would silently replay from the top.
+- **Continue** resumes a paused session in place, without restarting: it
+  executes the instruction at the PC, then runs to a breakpoint or halt.
+  Enabled only in `paused` -- gdb answers "The program is not being run"
+  before a session starts, and `paused` is the only state a session is both
+  started and not itself running.
+- `paused` is a started session (Run, Step, or Next issued since the last
+  load or Reset) that is neither running nor halted; it gets its own label
+  so the state line distinguishes "never ran" from "stopped mid-run" --
+  including a Run stopped at a breakpoint on the entry line, which starts a
+  session even though nothing has executed yet.
 - The halted state additionally shows `exit N` in the machine status line,
   as today.
-- **Stop** is clickable in every state but `halted` — there is nothing left
-  to interrupt once halted, but `ready`/`paused` (nothing running yet, or a
-  run paused mid-program) are exactly the states a user is most likely to
-  want to bail from. It is a no-op in `ready`/`paused`: only `running` has
-  anything to actually interrupt. Stop and Reset overlap in `ready`/
-  `paused`; each is the sole live control in exactly one state (Stop in
-  `running`, Reset in `halted`).
+- **Interrupt** is live only in `running` -- there is nothing to interrupt
+  otherwise, and a live button that does nothing in `ready`/`paused` is the
+  defect the owner found in Stop. Interrupt and Reset each is the sole live
+  control in exactly one state: Interrupt in `running`, Reset in `halted`.
 
 ## Output pane
 

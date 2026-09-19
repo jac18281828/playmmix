@@ -45,15 +45,23 @@ Main    LDA     $255,Text
 0,Fputs,StdOut` prints it. `TRAP 0,Halt,0` stops the machine. Click **Step**
 and watch `$255` pick up that address the instant the `LDA` runs.
 
-Controls, top left:
+Controls, top left, each showing its key on its face:
 
-- **Run** (`r`) — execute to completion, or the next breakpoint.
-- **Step** (`i`) — execute one source-level step, following into calls.
-- **Step Over** (`s`) — execute to the next source line, running any call
-  along the way to completion rather than stepping into it.
-- **Stop** (`x`) — interrupt a Run in progress.
+- **Run** (`r`) — restart from the start state and run to a breakpoint or
+  halt.
+- **Continue** (`c`) — resume a paused run in place: execute the instruction
+  at the PC, then run to a breakpoint or halt.
+- **Step** (`s`, `F11`) — execute one source-level step, following into
+  calls.
+- **Next** (`n`, `F10`) — execute one source line, running any call along
+  the way to completion rather than stepping into it.
+- **Interrupt** (`x`) — pause a Run, Continue, or Next in progress.
 - **Reset** — reload the current source from the top, clearing output and
-  highlights.
+  highlights; breakpoints are kept.
+
+Run always restarts from the top, even mid-program, so it never quietly does
+nothing; Continue instead picks up exactly where a paused run left off.
+Reset also returns to the top, but waits there instead of running.
 
 Press **Ctrl-S** (**Cmd-S** on macOS) anywhere on the page to reassemble
 immediately instead of waiting for the debounce.

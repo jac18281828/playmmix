@@ -733,8 +733,8 @@ impl ViewState {
     /// Recompute the changed-since-last-pause sets against the previous
     /// pause boundary's snapshot, then advance the snapshot to the current
     /// state -- called only at an actual pause boundary (a Step that
-    /// executed, a Step Over's or Run's terminal outcome, or an explicit
-    /// Stop), never on an intermediate chunk repaint.
+    /// executed, a Next's, Run's, or Continue's terminal outcome, or an
+    /// explicit Interrupt), never on an intermediate chunk repaint.
     pub fn record_pause_boundary(&mut self, control: &Control) {
         let (registers, specials, memory) = self.machine_rows(control);
 

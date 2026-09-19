@@ -112,10 +112,10 @@ main {
     flex-wrap: wrap;
 }
 
-/* Control pane: Run / Step / Step Over / Stop / Reset and the run-state
-   indicator. Real <button> elements, so every control is keyboard-reachable
-   without extra wiring; styled on its own classes per the editor pane's
-   rule below. */
+/* Control pane: Run / Continue / Step / Next / Interrupt / Reset and the
+   run-state indicator. Real <button> elements, so every control is
+   keyboard-reachable without extra wiring; styled on its own classes per
+   the editor pane's rule below. */
 
 .controls {
     display: flex;
@@ -124,6 +124,9 @@ main {
 }
 
 .controls button {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
     font: inherit;
     font-size: 0.9rem;
     padding: 0.4rem 0.9rem;
@@ -142,6 +145,14 @@ main {
 
 .controls button:not(:disabled):hover {
     background: #383838;
+}
+
+/* The key hint on each button's face (§1.4): a dimmer, smaller mark beside
+   the label so the key reads as a hint, not a second label. Reset carries
+   no `.control-key` span -- it has no keyboard shortcut. */
+.control-key {
+    font-size: 0.75rem;
+    color: #999;
 }
 
 .run-state {
@@ -672,12 +683,12 @@ main {
 }
 
 /* Changed-since-last-pause: accent text, no background, visible only while
-   paused or halted -- cleared during a Run or Step Over's intermediate
-   chunk repaints. Declared after .mem-current-instruction so a byte that is
-   both changed and part of the current instruction span keeps its changed
-   color (with mem-current-instruction's bold weight still applying, so the
-   two states stay distinguishable together rather than one silently
-   overriding the other). */
+   paused or halted -- cleared during a Run, Continue, or Next's
+   intermediate chunk repaints. Declared after .mem-current-instruction so a
+   byte that is both changed and part of the current instruction span keeps
+   its changed color (with mem-current-instruction's bold weight still
+   applying, so the two states stay distinguishable together rather than one
+   silently overriding the other). */
 .changed {
     color: #4ec9b0;
 }
