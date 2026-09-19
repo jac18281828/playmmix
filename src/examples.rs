@@ -4,10 +4,10 @@
 /// The program the editor loads on first visit: the minimal skeleton every
 /// MMIX program needs -- an entry point that halts cleanly, and an empty
 /// `Data_Segment` with `GREG @` ready for whatever a user adds -- rather
-/// than a worked example. `debug`-pseudo-op walkthroughs and multi-word
-/// pseudo-ops step confusingly (they expand into several physical
-/// instructions, only the first of which maps back to its source line);
-/// this has neither, so Step always lands on the next source line.
+/// than a worked example. Multi-word pseudo-ops step confusingly (they
+/// expand into several physical instructions, only the first of which maps
+/// back to its source line); this has none, so Step always lands on the
+/// next source line.
 ///
 /// `Main` sits alone on its own line, not compact with the instruction
 /// after it: splicing a new line in before `TRAP` (the likely first edit)

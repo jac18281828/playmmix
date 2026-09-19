@@ -130,14 +130,12 @@ pub struct Control {
     /// instruction. A membership test rather than a `[start, end]` bound:
     /// a program with more than one `LOC` in its text segment can leave a
     /// gap between two written regions, and a bound would read an address
-    /// in that gap as loaded when it never was. A `debug` stub is unmapped
-    /// in the source map but `write_image` wrote its bytes too, so they are
-    /// in this set; only running off the program's own end, or into a gap
-    /// between two `LOC`-separated regions, leaves it. Empty if
-    /// `write_image` wrote no text address at all (a program whose first
-    /// line is `LOC Data_Segment`); `left_loaded_image` then answers `true`
-    /// unconditionally, so Next degrades to a plain Step rather than
-    /// misreading nothing as everything.
+    /// in that gap as loaded when it never was. Only running off the
+    /// program's own end, into a gap between two `LOC`-separated regions,
+    /// or onto a PC at or above `Data_Segment`, leaves it. Empty for a
+    /// program with nothing below `Data_Segment`; `left_loaded_image` then
+    /// answers `true` unconditionally, so Next degrades to a plain Step
+    /// rather than misreading nothing as everything.
     loaded_text_addresses: BTreeSet<u64>,
 }
 
@@ -458,11 +456,11 @@ impl Control {
     /// statement we started on" from "reached the next one."
     ///
     /// Condition (b) existing alone would also search from an already-
-    /// unmapped PC (e.g. a second Step taken from inside the `debug`
-    /// pseudo-op's generated subroutine), silently running further and
-    /// executing side effects the user never asked for. Condition (a) rules
-    /// that out: every Step taken from an already-unmapped PC is a plain
-    /// single physical instruction, unconditionally -- if the PC just
+    /// unmapped PC -- e.g. a second Step taken after the program jumped
+    /// into code it wrote itself at run time -- silently running further
+    /// and executing side effects the user never asked for. Condition (a)
+    /// rules that out: every Step taken from an already-unmapped PC is a
+    /// plain single physical instruction, unconditionally -- if the PC just
     /// changed depth (a call) or was already unmapped, this stops
     /// immediately after the one instruction, mapped or not.
     ///
@@ -514,12 +512,12 @@ impl Control {
     }
 
     /// Whether the PC has left the loaded image: not a member of
-    /// `loaded_text_addresses`, not just unmapped in the source map. A
-    /// `debug` stub is unmapped too, but `write_image` wrote its bytes, so
-    /// they are in `loaded_text_addresses` -- only running off the
-    /// program's own end, or into a gap between two `LOC`-separated
-    /// regions, leaves it. The source map can't tell those cases apart from
-    /// a genuine exit; this can.
+    /// `loaded_text_addresses`, not just unmapped in the source map -- a
+    /// `debug` line's own `TRAP` is mapped and loaded like any other
+    /// instruction. Only running off the program's own end, into a gap
+    /// between two `LOC`-separated regions, or onto a PC at or above
+    /// `Data_Segment`, leaves it. The source map can't tell those cases
+    /// apart from a genuine exit; this can.
     fn left_loaded_image(&self) -> bool {
         !self.loaded_text_addresses.contains(&self.get_pc())
     }
@@ -527,14 +525,15 @@ impl Control {
     /// `Debugger::do_next`'s stopping rule, plus a case checksmix's own
     /// debugger never has to consider: the call depth is back at or below
     /// `target.depth` AND the PC has reached a source line other than
-    /// `target.origin` -- a depth-only rule would stop before the PC ever
-    /// leaves a `debug` line's generated stub, since a `JMP` never changes
-    /// depth; a line-only rule would stop a self-recursive call before it
-    /// actually returns, since the callee can share its caller's line -- OR
-    /// the PC has left the loaded image entirely (`left_loaded_image`),
-    /// since nothing sensible follows a PC that ran off the program's own
-    /// end. Either half alone is not enough; see `left_loaded_image`'s own
-    /// doc for why that half can't be folded into the source-map check.
+    /// `target.origin` -- depth alone would already read "reached" after
+    /// any straight-line instruction that doesn't call, since depth never
+    /// moves without one; a line-only rule would stop a self-recursive call
+    /// before it actually returns, since the callee can share its caller's
+    /// line -- OR the PC has left the loaded image entirely
+    /// (`left_loaded_image`), since nothing sensible follows a PC that ran
+    /// off the program's own end. Either half alone is not enough; see
+    /// `left_loaded_image`'s own doc for why that half can't be folded into
+    /// the source-map check.
     fn next_reached(&self, target: &NextTarget) -> bool {
         self.left_loaded_image()
             || (self.call_depth() <= target.depth && self.reached_new_line(target.origin.as_ref()))
@@ -545,8 +544,9 @@ impl Control {
     /// A fresh call (no Next already in flight) executes the statement at
     /// the current PC -- never checking a breakpoint first, same as
     /// `step` -- and, unless that alone already reached the target (see
-    /// `next_reached`), starts a chunked continuation back to it. A
-    /// `debug` line's `JMP` is exactly the case that alone-step misses.
+    /// `next_reached`), starts a chunked continuation back to it. A call
+    /// into a subroutine is exactly the case that alone-step misses: the
+    /// callee's own return is many instructions away.
     ///
     /// A continuation call (one already in flight) executes up to `budget`
     /// more instructions, stopping sooner on a halt, a resolved breakpoint,
@@ -1477,19 +1477,12 @@ mod tests {
 
     #[test]
     fn step_never_searches_past_a_call_that_lands_on_its_own_source_line() {
-        // checksmix 0.3.9 turned `debug` from a `PUSHJ` into a `JMP`, which
-        // this test used to rely on for a call whose target is unmapped
-        // generated code -- but an unmapped target already stops
-        // `step_instruction_group`'s inner search on its own (the resolved
-        // `SourceLoc` can never equal `head_loc` there), so that fixture
-        // never actually exercised condition (b) (`self.call_depth() ==
-        // pre_call_depth`, the guard above): deleting condition (b) would
-        // have left the test just as green. A self-recursive call whose
-        // target is the `PUSHJ` instruction itself does exercise it: the
-        // callee's first instruction (the same `PUSHJ`) maps to the exact
-        // same, mapped source line the call started on, so the inner
-        // search's line-equality check alone would keep going. Only
-        // condition (b) -- the call changed depth -- stops it here.
+        // A self-recursive call whose target is the `PUSHJ` instruction
+        // itself exercises condition (b): the callee's first instruction
+        // (the same `PUSHJ`) maps to the exact same, mapped source line the
+        // call started on, so the inner search's line-equality check alone
+        // would keep going. Only condition (b) -- the call changed depth --
+        // stops it here.
         let mut control = Control::new(SELF_RECURSIVE_CALL_MMS, "loop.mms").expect("assembles");
         let pre_call_depth = control.call_depth();
         let call_addr = expect_addr(SELF_RECURSIVE_CALL_MMS, "loop.mms", 2);
@@ -1510,54 +1503,65 @@ mod tests {
         );
     }
 
+    /// Writes three `ADDUI $3,$3,1` tetras, via `STTU`, to `#200` -- a text
+    /// address none of this program's own `LOC` output ever touches -- then
+    /// `GO`es there. `GO` doesn't push a register-stack frame, so it can't
+    /// separate condition (a) from condition (b) the way a call would; only
+    /// the landing PC's own absence from the source map does.
+    const SELF_WRITTEN_CODE_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,#200\n\tSETI\t$2,#23030301\n\tSTTU\t$2,$1,0\n\tSTTU\t$2,$1,4\n\tSTTU\t$2,$1,8\n\tGO\t$5,$1,0\n\tTRAP\t0,Halt,0\n";
+
     #[test]
-    fn step_from_an_unmapped_pc_never_searches_into_the_debug_stubs_trap_fputs() {
-        // The first Step on HELLO_WORLD_MMS executes the debug line's `JMP`
-        // and lands inside the generated stub (SAVE), unmapped -- condition
-        // (a) has nothing to do with that first Step, since `head_loc` there
-        // is still the mapped debug line itself. It is the SECOND Step,
-        // taken from that already-unmapped PC, that exercises condition (a):
-        // `head_loc` is now `None`, and depth alone (unchanged by SAVE)
+    fn step_from_an_unmapped_pc_the_program_wrote_itself_never_searches_past_one_instruction() {
+        // The Step that executes `GO` lands on `#200`, unmapped -- condition
+        // (a) has nothing to do with that Step, since `head_loc` there is
+        // still the mapped `GO` line itself. It is the NEXT Step, taken from
+        // that already-unmapped PC, that exercises condition (a): `head_loc`
+        // is now `None`, and depth alone (unchanged by the stored `ADDUI`s)
         // would otherwise pass condition (b) and enter the group search,
-        // which would then keep matching `None == None` through the stub's
-        // remaining instructions -- GETA, TRAP Fputs, UNSAVE -- executing a
-        // write the user never asked for. Condition (a) stops the search
-        // before it starts, so the second Step is exactly one instruction.
+        // which would then keep matching `None == None` through the other
+        // two stored instructions. Condition (a) stops the search before it
+        // starts, so this Step is exactly one instruction.
         let mut control =
-            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+            Control::new(SELF_WRITTEN_CODE_MMS, "selfwritten.mms").expect("assembles");
 
+        // Six source lines write the three tetras and GO to them.
+        for _ in 0..6 {
+            assert_eq!(control.step(), StepOutcome::Advanced, "setup must not halt");
+        }
+        let landing_pc = control.get_pc();
         assert_eq!(
-            control.step(),
-            StepOutcome::Advanced,
-            "executes the debug JMP"
-        );
-        let pc_after_jmp = control.get_pc();
-
-        assert_eq!(
-            control.step(),
-            StepOutcome::Advanced,
-            "executes one stub instruction (SAVE)"
-        );
-
-        assert_eq!(
-            control.get_pc() - pc_after_jmp,
-            4,
-            "deleting condition (a) lets the second step search the rest of \
-             the stub instead of stopping after one instruction"
+            landing_pc, 0x200,
+            "GO must land where the program wrote its own code"
         );
         assert!(
-            control.output().is_empty(),
-            "the stub's TRAP Fputs must not have executed -- deleting \
-             condition (a) runs it as a side effect of the second step alone"
+            control.assembler.source_loc(landing_pc).is_none(),
+            "the landing address must have no source mapping -- it holds \
+             only bytes the program stored at run time"
+        );
+
+        assert_eq!(
+            control.step(),
+            StepOutcome::Advanced,
+            "executes one self-written ADDUI"
+        );
+
+        assert_eq!(
+            control.get_pc() - landing_pc,
+            4,
+            "deleting condition (a) lets this step search into the other \
+             two stored instructions instead of stopping after one"
+        );
+        assert_eq!(
+            control.machine().get_register(3),
+            1,
+            "only the first stored ADDUI must have executed"
         );
     }
 
     #[test]
     fn next_on_a_debug_line_lands_on_the_next_source_line_in_one_call() {
-        // checksmix 0.3.9's `debug` compiles to a `JMP` into a generated,
-        // unmapped stub, not a `PUSHJ` (see `next_reached`'s doc for
-        // why a depth-only rule can't handle this). The fix must land past
-        // the whole `debug` line in this one call, not stop inside the stub.
+        // `debug` compiles to a single, mapped `TRAP` at its own address --
+        // Next must land on the line after it in this one call.
         let mut control =
             Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         let pre_call_depth = control.call_depth();
@@ -1569,13 +1573,12 @@ mod tests {
         assert_eq!(
             control.call_depth(),
             pre_call_depth,
-            "a JMP never pushes a call frame, so depth must be unchanged"
+            "the debug TRAP never pushes a call frame, so depth must be unchanged"
         );
         assert_eq!(
             control.get_pc(),
             next_line_addr,
-            "Next must land on the line after the debug directive, not \
-             inside its generated stub"
+            "Next must land on the line after the debug directive"
         );
         assert!(
             control.assembler.source_loc(control.marker_pc()).is_some(),
@@ -1687,36 +1690,105 @@ mod tests {
     }
 
     #[test]
-    fn next_on_a_debug_line_that_is_the_programs_last_statement_prints_once_then_halts() {
-        // When `debug` is the program's last statement, nothing real
-        // follows its landing pad in the source -- but checksmix's own
-        // preprocessor already guards exactly this case: it appends a
-        // `TRAP 0,Halt,0` "no well-formed program ever reaches" right after
-        // every real program's own code, so the landing pad falls into a
-        // REAL, recognized halt, not into undefined memory (confirmed
-        // against `checksmix-0.3.9/src/mmixal.rs`'s `preprocess_debug`).
-        // `left_loaded_image` therefore never fires here -- the halt comes
-        // from `execute_instruction` itself, same as it would after enough
-        // plain Steps. This pins that Next still runs the whole debug
-        // print in this one call and stops at that same halt, rather than
-        // stopping early (missing the print) or running past it.
+    fn next_on_a_debug_line_that_is_the_programs_last_statement_prints_once_then_stops_at_the_image_edge()
+     {
+        // When `debug` is the program's last statement, nothing follows its
+        // own `TRAP` in the loaded image: the PC lands past everything
+        // `write_image` wrote, so `left_loaded_image` fires and Next stops
+        // there with `Advanced`, not `Halted` -- the same image-edge rule
+        // `next_stops_at_the_end_of_the_image_instead_of_halting` pins for a
+        // program with no `debug` at all. This pins that the debug print
+        // still runs exactly once in this one call, and that stdout stays
+        // at one copy of "bye\n" -- not two -- across both this stop and a
+        // further Next, which then does run into truly unwritten memory and
+        // halts there.
         const DEBUG_LAST_MMS: &str = "\tLOC\t#100\nMain\tdebug \"bye\"\n";
         let mut control = Control::new(DEBUG_LAST_MMS, "x.mms").expect("assembles");
+        let stdout_text = |control: &Control| -> String {
+            control
+                .output()
+                .iter()
+                .filter(|span| span.stream == OutputStream::Stdout)
+                .map(|span| span.text.as_str())
+                .collect()
+        };
 
         let outcome = control.next_chunk(CHUNK_BUDGET);
 
-        assert_eq!(outcome, StepOutcome::Halted);
+        assert_eq!(outcome, StepOutcome::Advanced);
+        assert!(!control.is_halted());
+        assert_eq!(
+            stdout_text(&control),
+            "bye\n",
+            "the debug print must have run exactly once in this one call"
+        );
+
+        // Nothing follows the debug line -- a further Next runs into memory
+        // write_image never wrote, decodes it as TRAP 0,Halt,0, and halts.
+        let second = control.next_chunk(CHUNK_BUDGET);
+
+        assert_eq!(second, StepOutcome::Halted);
         assert!(control.is_halted());
+        assert_eq!(
+            stdout_text(&control),
+            "bye\n",
+            "a further Next must not print bye a second time"
+        );
+    }
+
+    #[test]
+    fn next_on_a_line_that_jumps_to_itself_keeps_running_until_interrupted() {
+        // `next_reached`'s line check must actually gate Next: a line that
+        // jumps to itself (`Spin JMP Spin`) never reaches a new line, and
+        // its call depth never changes either, so depth alone would already
+        // read "reached" the instant its own statement group finishes. With
+        // the line check, Next can't tell that apart from real progress, so
+        // it keeps running -- gdb's `next` on a one-line loop, stoppable
+        // only by Interrupt.
+        const SPIN_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,1\nSpin\tJMP\tSpin\n";
+        let mut control = Control::new(SPIN_MMS, "spin.mms").expect("assembles");
+        control.step(); // land on Spin's line
+        let spin_addr = expect_addr(SPIN_MMS, "spin.mms", 3);
+        assert_eq!(control.get_pc(), spin_addr, "fixture assumption");
+        assert_eq!(spin_addr, 0x104);
+
+        let outcome = control.next_chunk(10);
+
+        assert_eq!(
+            outcome,
+            StepOutcome::BudgetExhausted,
+            "deleting the line check would report Advanced here instead, \
+             since depth alone is already satisfied on a line with no call"
+        );
+        assert!(control.is_running());
+        assert_eq!(
+            control.get_pc(),
+            spin_addr,
+            "the loop never leaves its own line"
+        );
+    }
+
+    #[test]
+    fn debug_prints_after_put_rg_255_makes_dollar_254_local() {
+        // At 0.3.10, `debug`'s generated stub saved its return context with
+        // `SAVE $254,0`, which requires `X` global (`X >= rG`); `PUT rG,255`
+        // moves `$254` into the local range first, so the stub's own `SAVE`
+        // halted with "SAVE $X,0: X=254 must name a global" instead of
+        // printing. C8's `debug` compiles to one `TRAP 0,Debug,K` that
+        // touches no register, so this prints cleanly.
+        const PUT_RG_THEN_DEBUG_MMS: &str =
+            "\tLOC\t#100\nMain\tPUT\trG,255\n\tdebug \"hi\"\n\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(PUT_RG_THEN_DEBUG_MMS, "rg.mms").expect("assembles");
+
+        assert_eq!(control.run_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+
         let stdout_text: String = control
             .output()
             .iter()
             .filter(|span| span.stream == OutputStream::Stdout)
-            .map(|span| span.text.clone())
+            .map(|span| span.text.as_str())
             .collect();
-        assert_eq!(
-            stdout_text, "bye\n",
-            "the debug print must have run exactly once in this one call"
-        );
+        assert_eq!(stdout_text, "hi\n", "debug must print after PUT rG,255");
     }
 
     /// A straight-line program -- no loop, no call -- long enough that

@@ -274,10 +274,17 @@ mod tests {
         assert_eq!(&run.bytes[offset..offset + 14], b"Hello world!\n\0");
     }
 
+    /// Stores a nonzero byte to `#1000` -- a text address this program's
+    /// own `LOC` output never touches -- then halts. `write_byte` drops a
+    /// zero byte from the sparse memory map (see its own doc), so the store
+    /// must write something nonzero for `occupied()` to actually grow.
+    const STORES_A_BYTE_AT_A_NEW_ADDRESS_MMS: &str =
+        "\tLOC\t#100\nMain\tSETL\t$1,1\n\tSETL\t$2,#1000\n\tSTBU\t$1,$2,0\n\tTRAP\t0,Halt,0\n";
+
     #[test]
     fn memory_runs_stay_fixed_across_a_real_run_via_loaded_extent() {
         let mut control =
-            crate::control::Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms")
+            crate::control::Control::new(STORES_A_BYTE_AT_A_NEW_ADDRESS_MMS, "store.mms")
                 .expect("assembles");
 
         let before = memory_runs(control.machine(), control.labels());
@@ -298,11 +305,10 @@ mod tests {
         let after = memory_runs(control.machine(), control.labels());
         let after_len: usize = after.iter().map(|run| run.bytes.len()).sum();
 
-        // 90 text + 14 data, per HELLO_WORLD_MMS as embedded in examples.rs
-        // today -- unchanged by the run, since loaded_extent() tracks only
-        // what write_image loaded, not the register-stack spills a real
-        // run performs.
-        assert_eq!(before_len, 104);
+        // 4 instructions, 4 bytes each, no data segment -- unchanged by the
+        // run, since loaded_extent() tracks only what write_image loaded,
+        // not the run-time store to #1000.
+        assert_eq!(before_len, 16);
         assert_eq!(after_len, before_len);
     }
 
