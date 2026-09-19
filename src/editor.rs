@@ -29,7 +29,7 @@ pub struct EditorProps {
     /// running, since nothing should visibly track a moving PC mid-chunk.
     pub current_line: Option<usize>,
     /// The line a parsed assembly-error location names, if the error text
-    /// carried one (`main.rs`'s `parse_error_location`). Independent of
+    /// carried one (`diagnostics.rs`'s `parse_error_location`). Independent of
     /// `current_line`: an error can exist whether or not the machine has
     /// ever run.
     pub error_line: Option<usize>,
