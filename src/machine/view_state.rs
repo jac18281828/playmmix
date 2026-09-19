@@ -29,6 +29,7 @@ fn register_value_map(rows: &[RegisterRow]) -> BTreeMap<u8, u64> {
                     map.insert(i, 0);
                 }
             }
+            RegisterRow::GlobalBoundary { .. } => {}
         }
     }
     map
@@ -515,13 +516,11 @@ mod tests {
                 index: 1,
                 value: 5,
                 class: RegisterClass::Local,
-                mark: None,
             },
             RegisterRow::Register {
                 index: 2,
                 value: 9,
                 class: RegisterClass::Local,
-                mark: None,
             },
             RegisterRow::ZeroGlobalRange {
                 start: 32,
@@ -533,13 +532,11 @@ mod tests {
                 index: 1,
                 value: 5,
                 class: RegisterClass::Local,
-                mark: None,
             }, // unchanged
             RegisterRow::Register {
                 index: 2,
                 value: 10,
                 class: RegisterClass::Local,
-                mark: None,
             }, // changed
             // Newly individually visible (moved out of the collapse), but
             // still zero -- must not be flagged.
@@ -547,7 +544,6 @@ mod tests {
                 index: 40,
                 value: 0,
                 class: RegisterClass::Global,
-                mark: None,
             },
         ];
 
@@ -567,20 +563,17 @@ mod tests {
             index: 1,
             value: 5,
             class: RegisterClass::Local,
-            mark: None,
         }];
         let curr = vec![
             RegisterRow::Register {
                 index: 1,
                 value: 5,
                 class: RegisterClass::Local,
-                mark: None,
             }, // unchanged
             RegisterRow::Register {
                 index: 50,
                 value: 7,
                 class: RegisterClass::Global,
-                mark: None,
             }, // first appearance, nonzero
         ];
 
@@ -603,20 +596,17 @@ mod tests {
             index: 1,
             value: 5,
             class: RegisterClass::Local,
-            mark: None,
         }];
         let curr = vec![
             RegisterRow::Register {
                 index: 1,
                 value: 5,
                 class: RegisterClass::Local,
-                mark: None,
             }, // unchanged
             RegisterRow::Register {
                 index: 50,
                 value: 0,
                 class: RegisterClass::Global,
-                mark: None,
             }, // first appearance, still zero
         ];
 
@@ -697,5 +687,41 @@ mod tests {
 
         let diff = diff_memory(&prev, &curr);
         assert_eq!(diff, BTreeSet::from([0x101]));
+    }
+
+    #[test]
+    fn the_changed_highlight_survives_the_pop_marginalizing_a_register() {
+        // CALL_MMS steps as: SETL $1,40; SETL $2,2; PUSHJ $0,AddFunc, whose
+        // window slide moves the caller's $2 into the callee's $1 (value
+        // 2); ADDU $0,$0,$1; POP 1,0, which marginalizes the caller's frame
+        // back to rL = 1 and zeroes the caller's $1 from 2 to 0 -- the only
+        // register that step changes; SET $255,$0; TRAP. $1's 2 -> 0
+        // transition below lands on that POP step.
+        let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
+        let mut view = ViewState::new();
+        view.reset(&control);
+
+        let mut pop_boundary_changed = None;
+        for _ in 0..16 {
+            if control.is_halted() {
+                break;
+            }
+            let value_before = control.machine().get_register(1);
+            control.step();
+            view.observe(&control);
+            view.record_pause_boundary(&control);
+            let value_after = control.machine().get_register(1);
+            if value_before == 2 && value_after == 0 {
+                pop_boundary_changed = Some(view.changed_registers().clone());
+            }
+        }
+        assert!(control.is_halted(), "the run must reach a halt");
+
+        let changed = pop_boundary_changed.expect("the POP step (2 -> 0 on $1) must occur");
+        assert_eq!(
+            changed,
+            BTreeSet::from([1]),
+            "the POP must change only $1: {changed:?}"
+        );
     }
 }

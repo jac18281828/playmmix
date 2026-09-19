@@ -71,7 +71,13 @@ main {
 
 @media (max-width: 1100px) {
     main {
-        grid-template-columns: 1fr;
+        /* minmax(0, 1fr), not bare 1fr: 1fr alone still sizes the track to
+           its widest item's min-content (the memory rows, ~680px, and
+           .controls, ~676px). minmax(0, ...) caps the track at the
+           viewport instead, so every one-column pane -- machine, editor,
+           output -- scrolls its own overflow internally rather than
+           widening the page. */
+        grid-template-columns: minmax(0, 1fr);
         grid-template-rows: auto auto auto auto;
         grid-template-areas:
             "header"
@@ -562,32 +568,14 @@ main {
 }
 
 /* Every fixed-width column carries flex-shrink: 0 -- .register-row is a
-   flex container, and without it an empty tag or mark span shrinks to zero
-   under a squeezed row while a filled sibling can't, drifting the columns
-   out of alignment at narrow viewports. */
+   flex container, and without it a squeezed row compresses a column below
+   its own ch-width, drifting name/hex alignment out across rows. */
 .reg-name {
     display: inline-block;
-    width: 5ch;
+    width: 4ch;
     flex-shrink: 0;
     text-align: right;
     color: #9cdcfe;
-}
-
-/* Register class tag and rL-boundary mark: fixed widths, empty when unused,
-   so a class or mark change never reflows the row -- the no-reflow
-   invariant `docs/layout-spec.md` requires. Colour only, per class. */
-.reg-tag {
-    display: inline-block;
-    width: 8ch;
-    flex-shrink: 0;
-    color: #888;
-}
-
-.reg-mark {
-    display: inline-block;
-    width: 8ch;
-    flex-shrink: 0;
-    color: #dcdcaa;
 }
 
 .register-marginal .reg-name,
@@ -613,15 +601,14 @@ main {
     color: #ddd;
 }
 
-/* i64::MIN ("-9223372036854775808") is 21 characters -- the widest value
-   this column ever renders. Fixed rather than flex: 1 so the row hugs its
-   own content instead of stretching the decimal value to the far edge of
-   the (much wider) machine pane column. */
+/* Natural width: an inline-block sized to its own content hugs the hex
+   with no gap of its own, reading left-aligned directly after it -- fits
+   the common row (about 208px total) at the pane's own font on a 375px
+   phone. A wider decimal (|v| >= 10^15) scrolls inside the pane rather
+   than growing it. */
 .reg-dec {
     display: inline-block;
-    width: 21ch;
     flex-shrink: 0;
-    text-align: right;
     color: #888;
 }
 
@@ -631,11 +618,22 @@ main {
 }
 
 /* The collapsed range label ("$32-$254") can run to 8+ characters, well past
-   .reg-name's 5ch width sized for a single register ("$25"). Auto-width
+   .reg-name's 4ch width sized for a single register ("$255"). Auto-width
    here so the label reserves its real space instead of overflowing into
    .reg-note's box and rendering on top of it. */
 .register-collapsed .reg-name {
     width: auto;
+}
+
+/* The global · rG=N caption: smaller and more muted than a register row --
+   teaching the rL/rG split once, in the pane, rather than per row. */
+.register-boundary {
+    padding-top: 0.2rem;
+}
+
+.reg-boundary-text {
+    font-size: 0.7rem;
+    color: #666;
 }
 
 .memory-grid {

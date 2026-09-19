@@ -55,14 +55,12 @@ fn register_class(index: u8, rl: u64, rg: u64) -> RegisterClass {
 /// One row of the visible general-register table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegisterRow {
-    /// Register `$index`, individually visible under the full ISA rule.
-    /// `mark` names `rL`'s value on the one row where the local/marginal
-    /// boundary is shown; `None` on every other row.
+    /// Register `$index`, individually visible under the 3-clause rule
+    /// (`sticky || value != 0 || i < rL || i >= rG`).
     Register {
         index: u8,
         value: u64,
         class: RegisterClass,
-        mark: Option<u64>,
     },
     /// A contiguous run of zero-valued global registers within `$32..=$254`
     /// (inclusive bounds), collapsed into one row: no `GREG` directive ran
@@ -74,6 +72,10 @@ pub enum RegisterRow {
     /// splits the run around it. `$255` never folds in here; see
     /// `register_collapses`.
     ZeroGlobalRange { start: u8, end: u8 },
+    /// The `global · rG={rg}` caption, immediately before the first row (an
+    /// individual register or a `ZeroGlobalRange`) whose index is `>= rG`.
+    /// Absent when no row reaches that threshold (`rG > 255`).
+    GlobalBoundary { rg: u64 },
 }
 
 /// The 3-clause visibility rule shared by `visible_registers`'s per-index
@@ -202,20 +204,20 @@ impl SpecialContinuity {
     }
 }
 
-/// Visible general registers: `$0`-`$31` always render -- MMIX requires
-/// `rG >= 32`, so none of them is ever global -- any register satisfying
-/// [`register_included`] renders, and any register that has ever satisfied
-/// it since the last load renders too (`continuity`'s sticky set) --
-/// ascending order, a row never moves
-/// once shown. When no `GREG` ran (`has_greg`, from
-/// `Control::has_greg_allocations`) *and* `rG` still holds `initialize()`'s
-/// default, the all-zero, non-sticky run within `$32..=$254` collapses into
-/// one summary row per contiguous stretch; `$255` never folds in, whatever
-/// its value; see [`register_collapses`] for why neither signal suffices
-/// alone. Each individually-rendered row carries its [`RegisterClass`] under
-/// the same `rL`/`rG`. The first rendered marginal row (ascending index)
-/// carries the `rL` mark, naming `rL`'s value; when `rL` is 0 that row is
-/// `$0`, and a load with no marginal row rendered carries no mark at all.
+/// Visible general registers: a register renders when it satisfies
+/// [`register_included`] (`sticky || value != 0 || i < rL || i >= rG`),
+/// ascending order, a row never moves once shown. `sticky` comes from
+/// `continuity`, which remembers any index that has ever satisfied the rule
+/// since the last load -- a register `PUSHJ`/`POP`/`PUT rL`/`PUT rG` zeroes
+/// back to marginal stays listed, dimmed, rather than vanishing. When no
+/// `GREG` ran (`has_greg`, from `Control::has_greg_allocations`) *and* `rG`
+/// still holds `initialize()`'s default, the all-zero, non-sticky run
+/// within `$32..=$254` collapses into one summary row per contiguous
+/// stretch; `$255` never folds in, whatever its value; see
+/// [`register_collapses`] for why neither signal suffices alone. Each
+/// individually-rendered row carries its [`RegisterClass`] under the same
+/// `rL`/`rG`. A [`RegisterRow::GlobalBoundary`] caption precedes the first
+/// row (register or collapse) at or above `rG`.
 pub fn visible_registers(
     mmix: &MMix,
     continuity: &RegisterContinuity,
@@ -225,6 +227,7 @@ pub fn visible_registers(
     let rl = mmix.get_special(SpecialReg::RL);
     let mut rows = Vec::new();
     let mut collapse_start: Option<u8> = None;
+    let mut boundary_emitted = false;
 
     for i in 0u16..256 {
         let index = i as u8;
@@ -236,45 +239,41 @@ pub fn visible_registers(
             continue;
         }
         if let Some(start) = collapse_start.take() {
+            emit_global_boundary(&mut rows, &mut boundary_emitted, start, rg);
             rows.push(RegisterRow::ZeroGlobalRange {
                 start,
                 end: index - 1,
             });
         }
-        let pinned = index < 32;
-        if pinned || sticky || register_included(index, value, rl, rg) {
+        if sticky || register_included(index, value, rl, rg) {
+            emit_global_boundary(&mut rows, &mut boundary_emitted, index, rg);
             rows.push(RegisterRow::Register {
                 index,
                 value,
                 class: register_class(index, rl, rg),
-                mark: None,
             });
         }
     }
     if let Some(start) = collapse_start.take() {
+        emit_global_boundary(&mut rows, &mut boundary_emitted, start, rg);
         rows.push(RegisterRow::ZeroGlobalRange { start, end: 254 });
     }
-
-    mark_rl_boundary(&mut rows, rl);
 
     rows
 }
 
-/// Assign the `rL` mark to the first rendered marginal row (ascending
-/// index), naming `rL`'s value -- not necessarily the row whose index
-/// equals `rL`, since that row may not itself be rendered. A no-op when no
-/// rendered row is marginal.
-fn mark_rl_boundary(rows: &mut [RegisterRow], rl: u64) {
-    let mark = rows.iter_mut().find_map(|row| match row {
-        RegisterRow::Register {
-            class: RegisterClass::Marginal,
-            mark,
-            ..
-        } => Some(mark),
-        _ => None,
-    });
-    if let Some(mark) = mark {
-        *mark = Some(rl);
+/// Push a [`RegisterRow::GlobalBoundary`] onto `rows` the first time `index`
+/// reaches `rg`, per [`visible_registers`]'s one-caption rule. A no-op on
+/// every later call, via `boundary_emitted`.
+fn emit_global_boundary(
+    rows: &mut Vec<RegisterRow>,
+    boundary_emitted: &mut bool,
+    index: u8,
+    rg: u64,
+) {
+    if !*boundary_emitted && u64::from(index) >= rg {
+        rows.push(RegisterRow::GlobalBoundary { rg });
+        *boundary_emitted = true;
     }
 }
 
@@ -334,7 +333,7 @@ mod tests {
     use checksmix::{MMixAssembler, entry_point, start_program, write_image};
 
     use crate::machine::fixtures::{CALL_MMS, REVERTING_GLOBAL_MMS, TWO_GREG_MMS};
-    use crate::machine::pane::collapsed_range_note;
+    use crate::machine::pane::{collapsed_range_note, global_boundary_note};
 
     /// Assemble `source` and load it, unexecuted -- the same shape
     /// `Control::assemble_and_load` uses, restated here so these tests
@@ -364,25 +363,24 @@ mod tests {
         let continuity = RegisterContinuity::new();
         let indices: Vec<u8> = visible_registers(&mmix, &continuity, has_greg)
             .into_iter()
-            .map(|row| match row {
-                RegisterRow::Register { index, .. } => index,
+            .filter_map(|row| match row {
+                RegisterRow::Register { index, .. } => Some(index),
                 RegisterRow::ZeroGlobalRange { .. } => {
                     panic!("rG = 253, not 32; must not collapse")
                 }
+                RegisterRow::GlobalBoundary { .. } => None,
             })
             .collect();
 
-        // The pinned floor ($0-$31) always renders, plus the three globals
-        // via the `i >= rG` clause. Deleting the pinned floor would drop
-        // $0-$31; deleting the `i >= rG` clause would drop $253-$255.
-        let expected: Vec<u8> = (0..=31).chain([253, 254, 255]).collect();
-        assert_eq!(indices, expected);
+        // $0-$31 are unwritten (value 0) with rl = 0, so none satisfies
+        // `i < rL`; only the `i >= rG` clause admits the three globals.
+        assert_eq!(indices, vec![253, 254, 255]);
     }
 
     /// A `GREG` (raising `rG` above the no-`GREG` collapse floor) plus a
-    /// local write past index 32, so `rL` grows past 32 too -- isolating
-    /// the `i < rL` clause from both the pinned floor ($0-$31) and the
-    /// collapse (which only ever fires when `rG == 32`).
+    /// local write past index 32, so `rL` grows past 32 too -- isolates the
+    /// `i < rL` clause from the collapse, which only ever fires when
+    /// `rG == 32`.
     const GREG_AND_LOCAL_MMS: &str =
         "\tLOC\t#100\nG1\tGREG\t@\nMain\tSETL\t$40,7\n\tTRAP\t0,Halt,0\n";
 
@@ -403,8 +401,8 @@ mod tests {
         );
 
         let continuity = RegisterContinuity::new();
-        // $35 is zero-valued, 32 <= 35 < rL -- the pinned floor doesn't
-        // cover it ($0-$31) and the collapse can't reach it (rG != 32).
+        // $35 is zero-valued, 32 <= 35 < rL -- outside $0-$31 and the
+        // collapse can't reach it (rG != 32).
         let has_35 = visible_registers(&mmix, &continuity, has_greg)
             .iter()
             .any(|row| {
@@ -418,6 +416,33 @@ mod tests {
                 )
             });
         assert!(has_35, "$35 must be visible via the i < rL clause");
+
+        // $0-$4, zero-valued and below $32, render solely through the
+        // `i < rL` clause -- deleting that clause is the only way to hide
+        // them.
+        let mut below_rl = crate::control::Control::new(MARGINAL_WRITE_MMS, "marginal_write.mms")
+            .expect("assembles");
+        below_rl.step(); // SETL $5,7 raises rL to 6 before it runs
+        assert_eq!(below_rl.machine().get_special(SpecialReg::RL), 6);
+        let below_rl_continuity = RegisterContinuity::new();
+        let below_rl_rows = visible_registers(
+            below_rl.machine(),
+            &below_rl_continuity,
+            below_rl.has_greg_allocations(),
+        );
+        for index in 0u8..5 {
+            assert!(
+                below_rl_rows.iter().any(|row| matches!(
+                    row,
+                    RegisterRow::Register {
+                        index: i,
+                        value: 0,
+                        ..
+                    } if *i == index
+                )),
+                "${index} must render via i < rl"
+            );
+        }
     }
 
     /// A countdown loop with no `GREG` directive at all -- keeps
@@ -512,14 +537,14 @@ mod tests {
             .iter()
             .filter_map(|row| match row {
                 RegisterRow::Register { index, .. } => Some(*index),
-                RegisterRow::ZeroGlobalRange { .. } => None,
+                _ => None,
             })
             .collect();
         assert_eq!(
             individual,
-            (0u16..256).map(|i| i as u8).collect::<Vec<u8>>(),
-            "every register must render individually: $0-$31 pinned, \
-             $32-$255 global via the i >= rG clause"
+            (32u16..256).map(|i| i as u8).collect::<Vec<u8>>(),
+            "every register must render individually: $0-$31 stay unwritten \
+             and hidden, $32-$255 global via the i >= rG clause"
         );
     }
 
@@ -557,9 +582,9 @@ mod tests {
         // conjoining them) folds $32-$254 into one collapse row here.
         // Under the conjoined check there is no collapse row at all:
         // $100-$255 render individually via `i >= rG`, and $32-$99 render
-        // nothing -- the same empty middle range any rG > 32 produces,
-        // pinned by `visible_registers_include_allocated_zero_globals_via_
-        // i_ge_rg`.
+        // nothing -- the same empty middle range any rG > 32 produces.
+        // $0-$31 stay unwritten too: value 0 and rl = 0, so `i < rL` never
+        // holds either.
         assert!(
             !rows
                 .iter()
@@ -570,15 +595,12 @@ mod tests {
             .iter()
             .filter_map(|row| match row {
                 RegisterRow::Register { index, .. } => Some(*index),
-                RegisterRow::ZeroGlobalRange { .. } => None,
+                _ => None,
             })
             .collect();
         assert_eq!(
             individual,
-            (0u16..32)
-                .chain(100..256)
-                .map(|i| i as u8)
-                .collect::<Vec<u8>>()
+            (100u16..256).map(|i| i as u8).collect::<Vec<u8>>()
         );
     }
 
@@ -724,7 +746,7 @@ mod tests {
     const NO_GREG_HALT_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
 
     #[test]
-    fn visible_registers_classify_a_fresh_load_as_marginal_and_global() {
+    fn visible_registers_hide_marginal_rows_at_a_fresh_load_and_collapse_the_globals() {
         let (mmix, has_greg) = assemble(NO_GREG_HALT_MMS, "halt.mms");
         assert_eq!(mmix.get_special(SpecialReg::RL), 0);
         assert_eq!(mmix.get_special(SpecialReg::RG), 32);
@@ -732,30 +754,32 @@ mod tests {
         let continuity = RegisterContinuity::new();
         let rows = visible_registers(&mmix, &continuity, has_greg);
 
-        // $0-$31: rL = 0, so none of them is local -- every one is marginal.
+        // $0-$31: rL = 0, every one marginal and unwritten -- no row.
         for index in 0u8..32 {
-            let class = rows.iter().find_map(|row| match row {
-                RegisterRow::Register {
-                    index: i, class, ..
-                } if *i == index => Some(*class),
-                _ => None,
-            });
-            assert_eq!(
-                class,
-                Some(RegisterClass::Marginal),
-                "${index} must be marginal at load"
+            assert!(
+                !rows.iter().any(|row| matches!(
+                    row,
+                    RegisterRow::Register { index: i, .. } if *i == index
+                )),
+                "${index} must have no row at a fresh load"
             );
         }
 
-        let collapse = rows
+        let boundary_index = rows
             .iter()
-            .find_map(|row| match row {
-                RegisterRow::ZeroGlobalRange { start, end } => Some((*start, *end)),
-                _ => None,
-            })
-            .expect("the untouched $32-$254 range must collapse");
-        assert_eq!(collapse, (32, 254));
-        assert_eq!(collapsed_range_note(223), "223 global (0)");
+            .position(|row| matches!(row, RegisterRow::GlobalBoundary { rg: 32 }))
+            .expect("a GlobalBoundary { rg: 32 } row must precede the collapse");
+        assert!(
+            matches!(
+                rows.get(boundary_index + 1),
+                Some(RegisterRow::ZeroGlobalRange {
+                    start: 32,
+                    end: 254
+                })
+            ),
+            "the caption must immediately precede the $32-$254 collapse"
+        );
+        assert_eq!(collapsed_range_note(), "all 0");
 
         // `start_program`'s start state: $255 holds the entry address, not
         // zero -- an independent oracle, not a readback through `Control`,
@@ -816,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_registers_classify_call_mms_after_return_as_local_then_marginal() {
+    fn visible_registers_classify_call_mms_after_return_as_local_with_the_rest_hidden() {
         let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
         assert_eq!(
             control.run_chunk(1_000_000),
@@ -847,8 +871,9 @@ mod tests {
         for index in 1u8..32 {
             assert_eq!(
                 class_of(index),
-                Some(RegisterClass::Marginal),
-                "${index} must be marginal once rL falls back to 1"
+                None,
+                "${index} is marginal and unwritten once rL falls back to \
+                 1 -- with a fresh continuity it has no row"
             );
         }
     }
@@ -893,12 +918,11 @@ mod tests {
                 "${index} must be local"
             );
         }
+        // Marginal and unwritten, so none of register_included's clauses
+        // holds and none renders. Restoring `index < 32 ||` in
+        // `visible_registers` makes this fail.
         for index in 6u8..32 {
-            assert_eq!(
-                class_of(index),
-                Some(RegisterClass::Marginal),
-                "${index} must be marginal"
-            );
+            assert_eq!(class_of(index), None, "${index} must have no row");
         }
     }
 
@@ -945,36 +969,49 @@ mod tests {
     }
 
     #[test]
-    fn call_mms_rows_never_move_only_class_mark_and_value_change() {
+    fn call_mms_rows_never_move_only_class_and_value_change() {
         // Regression guard, exempt from the fail-without-the-change rule:
-        // folding the marginal range into one row would split and reflow
-        // $0-$31 as rL crosses it. This pins that it never does.
+        // dropping stickiness would let a row vanish and reappear as rL/rG
+        // move mid-run. This pins that it never does.
         let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
         let has_greg = control.has_greg_allocations();
-        let continuity = RegisterContinuity::new();
+        let mut continuity = RegisterContinuity::new();
+        continuity.observe(control.machine(), has_greg);
 
-        assert_eq!(control.machine().get_special(SpecialReg::RL), 0);
-        let rows_at_load = visible_registers(control.machine(), &continuity, has_greg);
+        let mut snapshots = vec![visible_registers(control.machine(), &continuity, has_greg)];
+        for _ in 0..16 {
+            if control.is_halted() {
+                break;
+            }
+            control.step();
+            continuity.observe(control.machine(), has_greg);
+            snapshots.push(visible_registers(control.machine(), &continuity, has_greg));
+        }
+        assert!(control.is_halted(), "the run must reach a halt");
 
-        assert_eq!(
-            control.run_chunk(1_000_000),
-            crate::control::StepOutcome::Halted
-        );
-        assert_eq!(control.machine().get_special(SpecialReg::RL), 1);
-        let rows_at_halt = visible_registers(control.machine(), &continuity, has_greg);
+        fn individual_indices(rows: &[RegisterRow]) -> Vec<u8> {
+            rows.iter()
+                .filter_map(|row| match row {
+                    RegisterRow::Register { index, .. } => Some(*index),
+                    _ => None,
+                })
+                .collect()
+        }
 
-        fn shape(row: &RegisterRow) -> (bool, u8, u8) {
-            match row {
-                RegisterRow::Register { index, .. } => (true, *index, *index),
-                RegisterRow::ZeroGlobalRange { start, end } => (false, *start, *end),
+        let halt_indices = individual_indices(snapshots.last().expect("at least one snapshot"));
+        for rows in &snapshots {
+            let indices = individual_indices(rows);
+            assert!(
+                indices.windows(2).all(|pair| pair[0] < pair[1]),
+                "individual indices must ascend within one snapshot: {indices:?}"
+            );
+            for index in &indices {
+                assert!(
+                    halt_indices.contains(index),
+                    "${index} rendered mid-run must still render at halt"
+                );
             }
         }
-        let load_shape: Vec<_> = rows_at_load.iter().map(shape).collect();
-        let halt_shape: Vec<_> = rows_at_halt.iter().map(shape).collect();
-        assert_eq!(
-            load_shape, halt_shape,
-            "row identity and order must survive rL moving from 0 to 1"
-        );
 
         let class_of = |rows: &[RegisterRow], index: u8| {
             rows.iter().find_map(|row| match row {
@@ -984,46 +1021,11 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(class_of(&rows_at_load, 0), Some(RegisterClass::Marginal));
-        assert_eq!(class_of(&rows_at_halt, 0), Some(RegisterClass::Local));
-    }
-
-    #[test]
-    fn visible_registers_marks_the_rl_boundary_on_the_first_marginal_row() {
-        let (mmix, has_greg) = assemble(NO_GREG_HALT_MMS, "halt.mms");
-        let continuity = RegisterContinuity::new();
-        let rows = visible_registers(&mmix, &continuity, has_greg);
-        let mark_of = |rows: &[RegisterRow], index: u8| {
-            rows.iter().find_map(|row| match row {
-                RegisterRow::Register { index: i, mark, .. } if *i == index => Some(*mark),
-                _ => None,
-            })
-        };
-        assert_eq!(mark_of(&rows, 0), Some(Some(0)), "rL = 0 at load marks $0");
-
-        let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
         assert_eq!(
-            control.run_chunk(1_000_000),
-            crate::control::StepOutcome::Halted
+            class_of(snapshots.last().unwrap(), 0),
+            Some(RegisterClass::Local),
+            "$0 must be local at halt"
         );
-        assert_eq!(control.machine().get_special(SpecialReg::RL), 1);
-        let continuity = RegisterContinuity::new();
-        let rows = visible_registers(
-            control.machine(),
-            &continuity,
-            control.has_greg_allocations(),
-        );
-        assert_eq!(
-            mark_of(&rows, 1),
-            Some(Some(1)),
-            "rL = 1 after CALL_MMS halts marks $1"
-        );
-
-        let mark_count = rows
-            .iter()
-            .filter(|row| matches!(row, RegisterRow::Register { mark: Some(_), .. }))
-            .count();
-        assert_eq!(mark_count, 1, "exactly one row carries the mark");
     }
 
     /// One `GREG` (`rG` = 254 at load), then a local write that raises `rL`
@@ -1036,7 +1038,7 @@ mod tests {
         "\tLOC\t#100\nG1\tGREG\t@\nMain\tSETL\t$40,1\n\tPUTI\trG,255\n\tTRAP\t0,Halt,0\n";
 
     #[test]
-    fn visible_registers_marks_the_first_rendered_marginal_row_not_index_rl() {
+    fn a_sticky_register_stays_marginal_visible_while_an_unwritten_one_hides() {
         let mut control =
             crate::control::Control::new(HIDDEN_RL_MMS, "hidden_rl.mms").expect("assembles");
         let has_greg = control.has_greg_allocations();
@@ -1078,26 +1080,6 @@ mod tests {
             Some(RegisterClass::Marginal),
             "$254 stays visible via stickiness, reclassified marginal"
         );
-
-        let mark_of = |index: u8| {
-            rows.iter().find_map(|row| match row {
-                RegisterRow::Register { index: i, mark, .. } if *i == index => Some(*mark),
-                _ => None,
-            })
-        };
-        assert_eq!(
-            mark_of(254),
-            Some(Some(41)),
-            "the mark sits on the first rendered marginal row, naming rL, \
-             even though that row's index isn't rL"
-        );
-        assert_eq!(
-            rows.iter()
-                .filter(|row| matches!(row, RegisterRow::Register { mark: Some(_), .. }))
-                .count(),
-            1,
-            "exactly one row carries the mark"
-        );
     }
 
     /// No `GREG` directive (`rG` stays 32), and the one write targets `$31`
@@ -1106,7 +1088,7 @@ mod tests {
     const RL_MEETS_RG_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$31,7\n\tTRAP\t0,Halt,0\n";
 
     #[test]
-    fn visible_registers_marks_no_row_when_none_is_marginal() {
+    fn visible_registers_render_no_marginal_row_when_rl_meets_rg() {
         let mut control =
             crate::control::Control::new(RL_MEETS_RG_MMS, "rl_meets_rg.mms").expect("assembles");
         control.step(); // SETL $31,7 -- raises rL to 32, meeting rG
@@ -1129,11 +1111,114 @@ mod tests {
             )),
             "rl == rg must leave the marginal range empty"
         );
-        assert!(
-            !rows
-                .iter()
-                .any(|row| matches!(row, RegisterRow::Register { mark: Some(_), .. })),
-            "no row is marginal, so no row may carry the mark"
+    }
+
+    #[test]
+    fn a_sticky_register_zeroed_marginal_by_a_pop_stays_listed() {
+        // The PUSHJ's window slide (push_frame) zeroes $2, and the POP
+        // (pop_frame) zeroes $1, leaving rL = 1: both are marginal and
+        // zero at halt, but sticky from rendering individually mid-call.
+        let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
+        let has_greg = control.has_greg_allocations();
+        let mut continuity = RegisterContinuity::new();
+        continuity.observe(control.machine(), has_greg);
+
+        for _ in 0..16 {
+            if control.is_halted() {
+                break;
+            }
+            control.step();
+            continuity.observe(control.machine(), has_greg);
+        }
+        assert!(control.is_halted(), "the run must reach a halt");
+        assert_eq!(control.machine().get_special(SpecialReg::RL), 1);
+        assert_eq!(control.machine().get_register(1), 0);
+        assert_eq!(control.machine().get_register(2), 0);
+
+        let rows = visible_registers(control.machine(), &continuity, has_greg);
+        let class_of = |index: u8| {
+            rows.iter().find_map(|row| match row {
+                RegisterRow::Register {
+                    index: i,
+                    value,
+                    class,
+                } if *i == index => Some((*value, *class)),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            class_of(1),
+            Some((0, RegisterClass::Marginal)),
+            "$1 must stay listed, marginal and zero, after the POP"
         );
+        assert_eq!(
+            class_of(2),
+            Some((0, RegisterClass::Marginal)),
+            "$2 must stay listed, marginal and zero, after the window slide"
+        );
+
+        // With a fresh continuity, neither has a row: unwritten and
+        // marginal, $1/$2 satisfy no clause of register_included.
+        let fresh = RegisterContinuity::new();
+        let fresh_rows = visible_registers(control.machine(), &fresh, has_greg);
+        assert!(
+            !fresh_rows
+                .iter()
+                .any(|row| matches!(row, RegisterRow::Register { index: 1, .. })),
+            "$1 must have no row under a fresh continuity"
+        );
+        assert!(
+            !fresh_rows
+                .iter()
+                .any(|row| matches!(row, RegisterRow::Register { index: 2, .. })),
+            "$2 must have no row under a fresh continuity"
+        );
+    }
+
+    #[test]
+    fn the_global_boundary_caption_sits_immediately_before_the_first_row_at_or_above_rg() {
+        let (mmix, has_greg) = assemble(TWO_GREG_MMS, "two_greg.mms");
+        assert_eq!(mmix.get_special(SpecialReg::RG), 253);
+
+        let continuity = RegisterContinuity::new();
+        let rows = visible_registers(&mmix, &continuity, has_greg);
+
+        let boundaries: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| matches!(row, RegisterRow::GlobalBoundary { .. }).then_some(i))
+            .collect();
+        assert_eq!(boundaries.len(), 1, "exactly one caption");
+        let at = boundaries[0];
+        assert_eq!(rows[at], RegisterRow::GlobalBoundary { rg: 253 });
+        assert_eq!(global_boundary_note(253), "global \u{b7} rG=253");
+        assert!(
+            matches!(rows[at + 1], RegisterRow::Register { index: 253, .. }),
+            "the caption must immediately precede $253"
+        );
+
+        // HIDDEN_RL_MMS after PUTI rG,255: the caption sits between the
+        // sticky-marginal $254 and $255.
+        let mut control =
+            crate::control::Control::new(HIDDEN_RL_MMS, "hidden_rl.mms").expect("assembles");
+        let has_greg = control.has_greg_allocations();
+        let mut continuity = RegisterContinuity::new();
+        continuity.observe(control.machine(), has_greg);
+        control.step(); // SETL $40,1
+        continuity.observe(control.machine(), has_greg);
+        control.step(); // PUTI rG,255
+        assert_eq!(control.machine().get_special(SpecialReg::RG), 255);
+        continuity.observe(control.machine(), has_greg);
+
+        let rows = visible_registers(control.machine(), &continuity, has_greg);
+        let pos_254 = rows
+            .iter()
+            .position(|row| matches!(row, RegisterRow::Register { index: 254, .. }))
+            .expect("$254 must stay listed, sticky-marginal");
+        assert_eq!(rows[pos_254 + 1], RegisterRow::GlobalBoundary { rg: 255 });
+        assert!(matches!(
+            rows[pos_254 + 2],
+            RegisterRow::Register { index: 255, .. }
+        ));
     }
 }

@@ -34,12 +34,12 @@ right is the machine. CSS grid with named areas on `<main>`:
 | editor                         | machine status (PC, depth)            |
 |   gutter | source              |---------------------------------------|
 |   (existing pane, unchanged    | registers        (scroll)             |
-|    behavior)                   |   $0  0x…  0                          |
-|                                |   $1  0x…  5                          |
+|    behavior)                   |   $0  0x… (0)                         |
+|                                |   $1  0x… (5)                         |
 |                                |   …one per row…                       |
 |                                |---------------------------------------|
 |                                | special registers                     |
-|                                |   rA  0x…  0                          |
+|                                |   rA  0x… (0)                         |
 +--------------------------------+   …one per row…                       |
 | output                (scroll) |---------------------------------------|
 |   (program's stdout/stderr)    | memory           (scroll)             |
@@ -137,19 +137,24 @@ their own class), passed to `MMix::with_host` in `assemble_and_load`.
 
 ## Registers
 
-Replace the value-driven visible set with a stable one. Three rules, applied
-in order, ascending index, one register per row:
+The visible set is built from four rules, ascending index, one register per
+row:
 
-1. **Pinned floor:** `$0`–`$31` always render, zero or not. MMIX requires
-   `rG >= 32`, so none of these is ever global; each one is local or
-   marginal by `rL`, and the pane shows which, in place, without moving
-   rows.
-2. **Globals:** every `$i >= rG` renders, as today. The no-`GREG` collapse
-   row (`$32–$254 · 223 global (0)`) survives for the untouched middle, and
-   covers at most `$32..=$254`; `$255` always renders individually.
+1. **Visible set:** a register renders when `sticky || value != 0 || i < rL
+   || i >= rG`. Checksmix zeroes a register when an instruction makes it
+   marginal (`PUSHJ`/`POP` in `push_frame`/`pop_frame`, `PUT rL`/`PUT rG` in
+   `put_rl`/`put_rg`), and a fresh load starts every marginal at zero, so an
+   unlisted marginal hides nothing. The rule governs, not the register's
+   class: a nonzero marginal reachable only through a raw `rL`/`rG` restore
+   (`UNSAVE`) still renders via `value != 0`.
+2. **Globals:** every `$i >= rG` renders. The no-`GREG` collapse row
+   (`$32–$254  all 0`) survives for the untouched middle, and covers at most
+   `$32..=$254`; `$255` always renders individually.
 3. **Sticky:** any register observed rendering individually keeps its row for
-   the life of the load, whatever its value does later. The sticky set lives
-   in `machine::ViewState`, owned by `App` (it is view state, not machine
+   the life of the load, whatever its value does later — a register a `POP`
+   or a `PUT rL`/`PUT rG` zeroes back to marginal stays listed, dimmed by the
+   marginal styling, instead of vanishing. The sticky set lives in
+   `machine::ViewState`, owned by `App` (it is view state, not machine
    state) and clears on Reset and reload.
 
    Stickiness is *sampled*, not tracked continuously: the visible set is
@@ -160,15 +165,27 @@ in order, ascending index, one register per row:
    instruction, always catches it. This is an accepted consequence of
    chunked execution — sampling finer would trade away the responsiveness
    chunking exists for — not a defect in the rule.
+4. **Global caption:** one `global · rG=N` row (U+00B7 middle dot) sits
+   immediately before the first row — an individual register or the
+   collapse — at or above `rG`. It is a fact of the visible set, not a
+   per-row tag: `rL` stays visible among the pinned special registers,
+   teaching the same boundary from the other side.
 
-A row never moves once shown; new rows insert in index order. Fixed column
-widths in `ch` so a value updates in place without reflow: name 5ch
-right-aligned, class tag 8ch, `rL` mark 8ch, hex 18ch, decimal right-aligned
-in the remainder. The class tag and `rL` mark reserve their width whether or
-not a row uses them, so a class change never reflows the row. Special-register
-rows leave the tag and mark columns out: same row format otherwise, the six
-pinned ones (`rA rG rL rO rS rJ`) first, then any other nonzero special,
-sticky under the same rule.
+A row never moves once shown; new rows insert in index order. General and
+special registers share one row format: name, then hex, then the decimal in
+parentheses directly after the hex — `$1  0x0000000000000002 (2)`, `rL
+0x0000000000000001 (1)`. Fixed `ch` widths for name (4ch, right-aligned) and
+hex (18ch) let a value update in place without reflow; the decimal takes its
+natural width, left-aligned, rather than reserving space for a value it
+isn't showing. Special-register rows are the six pinned ones (`rA rG rL rO
+rS rJ`) first, then any other nonzero special, sticky under the same rule.
+
+A row wider than its pane scrolls inside that pane (`.registers-scroll`),
+never the page — the owner's choice. At the pane's font a common row (about
+25ch) fits a 375px phone; a decimal of 16 or more digits (`|v| >= 10^15`) —
+or 15 or more with a negative sign (`|v| >= 10^14`, since the sign itself
+takes a character) — does not, and scrolls inside the pane instead of
+widening it.
 
 ## Memory pane
 

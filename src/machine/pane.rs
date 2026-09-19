@@ -81,23 +81,43 @@ fn collapsed_range_label(start: u8, end: u8) -> String {
     }
 }
 
-/// A collapsed range's note cell: `{count} global (0)` -- every register the
-/// collapse ever folds in is global by `registers::register_collapses`'s
-/// gate. Plain and `String`-returning, as [`collapsed_range_label`] is for
-/// the name cell.
-pub(super) fn collapsed_range_note(count: u32) -> String {
-    format!("{count} global (0)")
+/// A collapsed range's note cell: `all 0` -- every register the collapse
+/// ever folds in is both global (`registers::register_collapses`'s gate)
+/// and zero (the same gate's `value == 0` clause). Plain and
+/// `String`-returning, as [`collapsed_range_label`] is for the name cell.
+pub(super) fn collapsed_range_note() -> String {
+    "all 0".to_string()
 }
 
-/// The visible tag text for `class`: empty for local (no tag shown), else
-/// the class's name. Plain and `&str`-returning, as [`collapsed_range_label`]
-/// is for the collapsed row's name cell.
-fn register_class_tag(class: RegisterClass) -> &'static str {
-    match class {
-        RegisterClass::Local => "",
-        RegisterClass::Marginal => "marginal",
-        RegisterClass::Global => "global",
-    }
+/// The `global · rG={rg}` caption cell, per `docs/layout-spec.md`'s
+/// Registers section. Plain and `String`-returning, as
+/// [`collapsed_range_note`] is for the collapse row's note cell.
+pub(super) fn global_boundary_note(rg: u64) -> String {
+    format!("global \u{b7} rG={rg}")
+}
+
+/// A general-register row's name, hex and decimal cell text, in render
+/// order -- the seam `render_register_row` renders and host tests read
+/// without a browser. The decimal keeps `(value as i64).to_string()`
+/// inside parentheses, directly after the hex, per
+/// `docs/layout-spec.md`'s Registers section.
+pub(super) fn register_row_cells(index: u8, value: u64) -> [String; 3] {
+    [
+        format!("${index}"),
+        format!("0x{value:016X}"),
+        format!("({})", value as i64),
+    ]
+}
+
+/// A special-register row's name, hex and decimal cell text, in render
+/// order -- the same shared format [`register_row_cells`] renders for
+/// general registers.
+pub(super) fn special_row_cells(name: &str, value: u64) -> [String; 3] {
+    [
+        name.to_string(),
+        format!("0x{value:016X}"),
+        format!("({})", value as i64),
+    ]
 }
 
 /// The register-row spans a change of class must never add or remove: fixed
@@ -110,15 +130,13 @@ fn render_register_row(row: &RegisterRow, changed: &BTreeSet<u8>) -> Html {
             index,
             value,
             class,
-            mark,
         } => {
             let is_changed = changed.contains(index);
             let mut row_class = classes!("register-row");
             if *class == RegisterClass::Marginal {
                 row_class.push("register-marginal");
             }
-            let tag_text = register_class_tag(*class);
-            let mark_text = mark.map(|rl| format!("rL={rl}")).unwrap_or_default();
+            let [name_text, hex_text, dec_text] = register_row_cells(*index, *value);
             let mut hex_class = classes!("reg-hex");
             let mut dec_class = classes!("reg-dec");
             if is_changed {
@@ -127,20 +145,24 @@ fn render_register_row(row: &RegisterRow, changed: &BTreeSet<u8>) -> Html {
             }
             html! {
                 <div class={row_class}>
-                    <span class="reg-name">{ format!("${index}") }</span>
-                    <span class="reg-tag">{ tag_text }</span>
-                    <span class="reg-mark">{ mark_text }</span>
-                    <span class={hex_class}>{ format!("0x{value:016X}") }</span>
-                    <span class={dec_class}>{ (*value as i64).to_string() }</span>
+                    <span class="reg-name">{ name_text }</span>
+                    <span class={hex_class}>{ hex_text }</span>
+                    <span class={dec_class}>{ dec_text }</span>
                 </div>
             }
         }
         RegisterRow::ZeroGlobalRange { start, end } => {
-            let count = u32::from(*end) - u32::from(*start) + 1;
             html! {
                 <div class="register-row register-collapsed">
                     <span class="reg-name">{ collapsed_range_label(*start, *end) }</span>
-                    <span class="reg-note">{ collapsed_range_note(count) }</span>
+                    <span class="reg-note">{ collapsed_range_note() }</span>
+                </div>
+            }
+        }
+        RegisterRow::GlobalBoundary { rg } => {
+            html! {
+                <div class="register-row register-boundary">
+                    <span class="reg-boundary-text">{ global_boundary_note(*rg) }</span>
                 </div>
             }
         }
@@ -175,11 +197,12 @@ fn render_special_row(row: &SpecialRegisterRow, changed: &BTreeSet<String>) -> H
         dec_class.push("changed");
     }
     let title = pinned_special_title(&row.name);
+    let [name_text, hex_text, dec_text] = special_row_cells(&row.name, row.value);
     html! {
         <div class="register-row">
-            <span class="reg-name" title={title}>{ &row.name }</span>
-            <span class={hex_class}>{ format!("0x{:016X}", row.value) }</span>
-            <span class={dec_class}>{ (row.value as i64).to_string() }</span>
+            <span class="reg-name" title={title}>{ name_text }</span>
+            <span class={hex_class}>{ hex_text }</span>
+            <span class={dec_class}>{ dec_text }</span>
         </div>
     }
 }
@@ -269,9 +292,34 @@ mod tests {
     }
 
     #[test]
-    fn register_class_tag_maps_each_class_to_its_visible_tag() {
-        assert_eq!(register_class_tag(RegisterClass::Local), "");
-        assert_eq!(register_class_tag(RegisterClass::Marginal), "marginal");
-        assert_eq!(register_class_tag(RegisterClass::Global), "global");
+    fn register_row_cells_return_name_hex_and_decimal_in_render_order() {
+        assert_eq!(
+            register_row_cells(1, 2),
+            [
+                "$1".to_string(),
+                "0x0000000000000002".to_string(),
+                "(2)".to_string(),
+            ]
+        );
+        assert_eq!(
+            register_row_cells(255, u64::MAX),
+            [
+                "$255".to_string(),
+                "0xFFFFFFFFFFFFFFFF".to_string(),
+                "(-1)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn special_row_cells_return_name_hex_and_decimal_in_render_order() {
+        assert_eq!(
+            special_row_cells("rL", 1),
+            [
+                "rL".to_string(),
+                "0x0000000000000001".to_string(),
+                "(1)".to_string(),
+            ]
+        );
     }
 }
