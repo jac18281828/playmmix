@@ -13,6 +13,7 @@ mod editor;
 mod examples;
 mod highlight;
 mod machine;
+mod output;
 
 use control::{
     Control, ControlBar, ControlEnablement, KeyboardShortcut, StepOutcome, control_enablement,
@@ -20,7 +21,8 @@ use control::{
 };
 use editor::Editor;
 use examples::DEFAULT_MMS;
-use machine::{MachinePane, OutputPane, ViewState};
+use machine::{MachinePane, ViewState};
+use output::OutputPane;
 
 /// The filename `Control` assembles the editor's buffer under. Fixed:
 /// playmmix edits a single in-memory buffer, not a multi-file project, and

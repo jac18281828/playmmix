@@ -1,5 +1,4 @@
-//! Machine pane: general registers, special registers, loaded memory, and
-//! the program's captured output.
+//! Machine pane: general registers, special registers, and loaded memory.
 //!
 //! Computation is plain functions over `&MMix` and the assembler's label
 //! table (`AGENTS.md`'s rule that logic not needing browser APIs stays
@@ -13,10 +12,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use checksmix::{MMix, SpecialReg};
-use web_sys::Element;
 use yew::prelude::*;
 
-use crate::control::{Control, OutputSpan, OutputStream};
+use crate::control::Control;
 
 /// `rG`'s value with no `GREG` directive at all: `MMix::initialize`'s
 /// default. `write_image` only ever raises `rG` above this floor, and only
@@ -1022,94 +1020,6 @@ fn render_memory_row(row: &MemoryRow, marker_pc: u64, changed: &BTreeSet<u64>) -
             <span class="mem-label">{ labels.join(", ") }</span>
         </div>
     }
-}
-
-#[derive(Properties, PartialEq)]
-pub struct OutputPaneProps {
-    pub spans: Vec<OutputSpan>,
-    /// Mirrored from the status line once halted, per `docs/layout-spec.md`'s
-    /// Output pane section, so the result of a run reads in one place.
-    pub exit_code: Option<u64>,
-    /// Set on the `.output-pane` root element. `App`'s row splitter reads
-    /// its `client_height()` as a drag's start size -- the pane's rendered
-    /// height is content-driven (capped, not fixed, by `max-height`), so no
-    /// constant can stand in for a live DOM read.
-    #[prop_or_default]
-    pub pane_ref: NodeRef,
-}
-
-/// The output pane: the program's captured stdout/stderr/diagnostic output,
-/// pinned to the bottom while new output arrives. A user scroll-up unpins
-/// it until they scroll back to the bottom themselves -- tracked with a
-/// scroll listener rather than re-pinning on every render, which would
-/// fight a deliberate scroll-up mid-run.
-pub struct OutputPane {
-    container_ref: NodeRef,
-    pinned: bool,
-}
-
-pub enum OutputPaneMsg {
-    Scroll,
-}
-
-impl Component for OutputPane {
-    type Message = OutputPaneMsg;
-    type Properties = OutputPaneProps;
-
-    fn create(_ctx: &Context<Self>) -> Self {
-        Self {
-            container_ref: NodeRef::default(),
-            pinned: true,
-        }
-    }
-
-    fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
-        match msg {
-            OutputPaneMsg::Scroll => {
-                if let Some(el) = self.container_ref.cast::<Element>() {
-                    // A couple of pixels of slack: some browsers report a
-                    // scroll position that never quite reaches the exact
-                    // bottom due to subpixel rounding.
-                    let at_bottom = el.scroll_top() + el.client_height() >= el.scroll_height() - 2;
-                    self.pinned = at_bottom;
-                }
-                false
-            }
-        }
-    }
-
-    fn rendered(&mut self, _ctx: &Context<Self>, _first_render: bool) {
-        if self.pinned
-            && let Some(el) = self.container_ref.cast::<Element>()
-        {
-            el.set_scroll_top(el.scroll_height());
-        }
-    }
-
-    fn view(&self, ctx: &Context<Self>) -> Html {
-        let onscroll = ctx.link().callback(|_: Event| OutputPaneMsg::Scroll);
-        let header = match ctx.props().exit_code {
-            Some(code) => format!("OUTPUT  exit {code}"),
-            None => "OUTPUT".to_string(),
-        };
-        html! {
-            <div class="output-pane" ref={ctx.props().pane_ref.clone()}>
-                <div class="output-header">{ header }</div>
-                <div class="output-body" ref={self.container_ref.clone()} {onscroll}>
-                    { for ctx.props().spans.iter().map(render_output_span) }
-                </div>
-            </div>
-        }
-    }
-}
-
-fn render_output_span(span: &OutputSpan) -> Html {
-    let class = match span.stream {
-        OutputStream::Stdout => "output-stdout",
-        OutputStream::Stderr => "output-stderr",
-        OutputStream::Diagnostic => "output-diagnostic",
-    };
-    html! { <span {class}>{ &span.text }</span> }
 }
 
 #[cfg(test)]

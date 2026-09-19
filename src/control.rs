@@ -19,9 +19,13 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use checksmix::{Host, MMix, MMixAssembler, SourceLoc, entry_point, start_program, write_image};
+use checksmix::{MMix, MMixAssembler, SourceLoc, entry_point, start_program, write_image};
 use gloo_timers::callback::Timeout;
 use yew::prelude::*;
+
+#[cfg(test)]
+use crate::output::OutputStream;
+use crate::output::{CaptureHost, OutputBuffer, OutputSpan};
 
 /// The MMIX text/data segment boundary: the top three address bits select
 /// the segment (0 text, 1 data, 2 pool, 3 stack), so any address at or past
@@ -70,67 +74,6 @@ pub enum StepOutcome {
     /// The instruction budget ran out first; the operation is resumable by
     /// calling the same method again.
     BudgetExhausted,
-}
-
-/// Which stream a captured [`OutputSpan`] came from. `Diagnostic` is
-/// checksmix's own operator-facing notices (an unhandled trap, a truncated
-/// string, the HALT notice `handle_halt` always emits) -- a third class,
-/// distinct from the program's own stdout/stderr, but appended to the same
-/// buffer in arrival order so the output pane reads as one timeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputStream {
-    Stdout,
-    Stderr,
-    Diagnostic,
-}
-
-/// One captured write, in the order it arrived.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutputSpan {
-    pub stream: OutputStream,
-    pub text: String,
-}
-
-/// Shared handle to a program's captured output. `MMix::with_host` consumes
-/// the host, so this `Rc` is the only way back to what it wrote -- held by
-/// `Control`, cloned into the `Host` impl passed to `with_host`.
-type OutputBuffer = Rc<RefCell<Vec<OutputSpan>>>;
-
-/// Routes a loaded program's stdout (fd 1), stderr (fd 2), and diagnostics
-/// into the shared [`OutputBuffer`] -- the seam that replaces `StdHost`
-/// (whose `stdout()`/`stderr()` are a silent sink under
-/// `wasm32-unknown-unknown`) with something the output pane can render.
-struct CaptureHost {
-    buffer: OutputBuffer,
-}
-
-impl Host for CaptureHost {
-    fn write(&mut self, fd: u8, bytes: &[u8]) -> std::io::Result<()> {
-        // checksmix confirms only fd 1 or 2 ever reach a `Host`; an
-        // unrecognized fd (defensive only, never expected) is treated as
-        // stdout rather than dropped, so no write silently vanishes.
-        let stream = if fd == 2 {
-            OutputStream::Stderr
-        } else {
-            OutputStream::Stdout
-        };
-        let text = String::from_utf8_lossy(bytes).into_owned();
-        self.buffer.borrow_mut().push(OutputSpan { stream, text });
-        Ok(())
-    }
-
-    fn now_micros(&mut self) -> u64 {
-        // Unused by any example this prompt covers; matches checksmix's own
-        // `Host` doctest.
-        0
-    }
-
-    fn diagnostic(&mut self, msg: &str) {
-        self.buffer.borrow_mut().push(OutputSpan {
-            stream: OutputStream::Diagnostic,
-            text: format!("{msg}\n"),
-        });
-    }
 }
 
 /// The loaded machine, its assembler, and the control-pane state layered on
