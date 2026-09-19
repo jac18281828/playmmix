@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use checksmix::{Host, MMix, MMixAssembler, SourceLoc, entry_point, write_image};
+use checksmix::{Host, MMix, MMixAssembler, SourceLoc, entry_point, start_program, write_image};
 use gloo_timers::callback::Timeout;
 use yew::prelude::*;
 
@@ -277,7 +277,7 @@ impl Control {
         };
         let mut mmix = MMix::with_host(host);
         write_image(&mut mmix, &assembler);
-        mmix.set_pc(entry_point(&assembler));
+        start_program(&mut mmix, entry_point(&assembler));
         Ok((mmix, assembler, output))
     }
 
@@ -1094,6 +1094,20 @@ mod tests {
             0,
             "the entry instruction must not have executed yet"
         );
+    }
+
+    #[test]
+    fn new_starts_a_program_the_way_mmixware_does() {
+        // `start_program` sets the PC and `$255` together, MMIXware's own
+        // start state: a program that never writes `$255` halts reporting
+        // its own entry address as the exit code.
+        let mut control =
+            Control::new(crate::examples::DEFAULT_MMS, "default.mms").expect("assembles");
+        assert_eq!(control.get_pc(), 0x100);
+        assert_eq!(control.machine().get_register(255), 0x100);
+
+        assert_eq!(control.run_chunk(1_000), StepOutcome::Halted);
+        assert_eq!(control.machine().get_exit_code(), 256);
     }
 
     #[test]

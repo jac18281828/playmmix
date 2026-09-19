@@ -1114,7 +1114,7 @@ fn render_output_span(span: &OutputSpan) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use checksmix::{MMixAssembler, entry_point, write_image};
+    use checksmix::{MMixAssembler, entry_point, start_program, write_image};
 
     /// Assemble `source` and load it, unexecuted -- the same shape
     /// `Control::assemble_and_load` uses, restated here so these tests
@@ -1127,15 +1127,15 @@ mod tests {
         assembler.parse().expect("test program assembles");
         let mut mmix = MMix::new();
         write_image(&mut mmix, &assembler);
-        mmix.set_pc(entry_point(&assembler));
+        start_program(&mut mmix, entry_point(&assembler));
         (mmix, !assembler.greg_inits.is_empty())
     }
 
     /// Two `GREG`s, one initialized to a literal zero -- verified against
     /// checksmix `main` while authoring the dispatch prompt: `rG = 253`,
-    /// `rL = 0`. `$254` (from `G1 GREG 0`) and `$255` (never allocated) are
-    /// both zero but must still show, because clause 3 (`i >= rG`) marks
-    /// them global regardless of value.
+    /// `rL = 0`. `$254` (from `G1 GREG 0`) is zero and `$255` holds `Main`'s
+    /// entry address (`start_program`'s start state); both must still show,
+    /// because clause 3 (`i >= rG`) marks them global regardless of value.
     const TWO_GREG_MMS: &str = "\tLOC\t#100\nG1\tGREG\t0\nG2\tGREG\t@\nMain\tTRAP\t0,Halt,0\n";
 
     #[test]
@@ -1379,11 +1379,12 @@ mod tests {
     /// `CALL_MMS`, which only ever touches registers and specials.
     const STORE_MMS: &str = "\tLOC\tData_Segment\n\tGREG\t@\nText\tBYTE\t\"ab\",0\n\tLOC\t#100\nMain\tLDA\t$1,Text\n\tSETL\t$2,88\n\tSTB\t$2,$1,0\n\tTRAP\t0,Halt,0\n";
 
-    /// `rQ` is not one of the always-shown `PINNED_SPECIALS`, so it only
+    /// `rZ` is not one of the always-shown `PINNED_SPECIALS`, so it only
     /// ever renders via the sticky set -- isolates the special-register
     /// half of `ViewState::observe` from the register half other
-    /// `ViewState` tests already cover.
-    const PUT_RQ_MMS: &str = "\tLOC\t#100\nMain\tPUTI\trQ,7\n\tPUTI\trQ,0\n\tTRAP\t0,Halt,0\n";
+    /// `ViewState` tests already cover. `rQ` would fit the same role but is
+    /// read-only in user mode under checksmix 0.3.10; `rZ` is not.
+    const PUT_RZ_MMS: &str = "\tLOC\t#100\nMain\tPUTI\trZ,7\n\tPUTI\trZ,0\n\tTRAP\t0,Halt,0\n";
 
     #[test]
     fn visible_registers_show_a_nonzero_global_written_with_no_greg() {
@@ -1717,25 +1718,25 @@ mod tests {
     #[test]
     fn view_state_observe_tracks_special_register_continuity_too() {
         assert!(
-            !PINNED_SPECIALS.contains(&SpecialReg::RQ),
+            !PINNED_SPECIALS.contains(&SpecialReg::RZ),
             "fixture assumption"
         );
         let mut control =
-            crate::control::Control::new(PUT_RQ_MMS, "put_rq.mms").expect("assembles");
+            crate::control::Control::new(PUT_RZ_MMS, "put_rz.mms").expect("assembles");
         let mut view = ViewState::new();
         view.reset(&control);
 
-        control.step(); // PUTI rQ,7 -- rQ now nonzero
+        control.step(); // PUTI rZ,7 -- rZ now nonzero
         view.observe(&control);
-        control.step(); // PUTI rQ,0 -- rQ reverts to zero
+        control.step(); // PUTI rZ,0 -- rZ reverts to zero
 
         let (_, specials, _) = view.machine_rows(&control);
         assert!(
             specials
                 .iter()
-                .any(|row| row.name == "rQ" && row.value == 0),
+                .any(|row| row.name == "rZ" && row.value == 0),
             "ViewState::observe must wire through to SpecialContinuity::observe \
-             so rQ stays visible after reverting to zero: {specials:?}"
+             so rZ stays visible after reverting to zero: {specials:?}"
         );
     }
 
@@ -1851,10 +1852,54 @@ mod tests {
         assert_eq!(collapse, (32, 254));
         assert_eq!(collapsed_range_note(223), "223 global (0)");
 
+        // `start_program`'s start state: $255 holds the entry address, not
+        // zero -- an independent oracle, not a readback through `Control`,
+        // so this catches the helper drifting from `Control`'s own load
+        // path.
+        let mut oracle = MMixAssembler::new(NO_GREG_HALT_MMS, "halt.mms");
+        oracle.parse().expect("test program assembles");
+        let entry = entry_point(&oracle);
+
         let reg255 = rows
             .iter()
             .find(|row| matches!(row, RegisterRow::Register { index: 255, .. }))
             .expect("$255 must always render, never fold into the collapse");
+        assert!(matches!(
+            reg255,
+            RegisterRow::Register {
+                value,
+                class: RegisterClass::Global,
+                ..
+            } if *value == entry
+        ));
+    }
+
+    #[test]
+    fn a_zeroed_dollar_255_still_renders_individually_as_global() {
+        // `ViewState::reset` observes the load while $255 holds the entry
+        // address (`start_program`), which would make $255 sticky and hide
+        // the `register_collapses` exclusion this pins -- render through a
+        // fresh continuity instead, not through `ViewState`.
+        const ZERO_DOLLAR_255_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$255,0\n\tTRAP\t0,Halt,0\n";
+        let mut control =
+            crate::control::Control::new(ZERO_DOLLAR_255_MMS, "zero255.mms").expect("assembles");
+        assert_eq!(
+            control.step(),
+            crate::control::StepOutcome::Advanced,
+            "SETL must not halt"
+        );
+        assert_eq!(control.machine().get_register(255), 0, "fixture assumption");
+
+        let continuity = RegisterContinuity::new();
+        let rows = visible_registers(
+            control.machine(),
+            &continuity,
+            control.has_greg_allocations(),
+        );
+        let reg255 = rows
+            .iter()
+            .find(|row| matches!(row, RegisterRow::Register { index: 255, .. }))
+            .expect("$255 must render individually even at zero, never fold into the collapse");
         assert!(matches!(
             reg255,
             RegisterRow::Register {
