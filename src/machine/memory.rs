@@ -275,9 +275,11 @@ mod tests {
     }
 
     /// Stores a nonzero byte to `#1000` -- a text address this program's
-    /// own `LOC` output never touches -- then halts. `write_byte` drops a
-    /// zero byte from the sparse memory map (see its own doc), so the store
-    /// must write something nonzero for `occupied()` to actually grow.
+    /// own `LOC` output never touches -- then halts. checksmix's
+    /// `write_byte` drops a zero byte from the sparse memory map ("Don't
+    /// store zeros", an inline comment in its `mix/memory.rs`, not a public
+    /// doc), so the store must write something nonzero for `occupied()` to
+    /// actually grow.
     const STORES_A_BYTE_AT_A_NEW_ADDRESS_MMS: &str =
         "\tLOC\t#100\nMain\tSETL\t$1,1\n\tSETL\t$2,#1000\n\tSTBU\t$1,$2,0\n\tTRAP\t0,Halt,0\n";
 

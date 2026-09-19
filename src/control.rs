@@ -131,11 +131,13 @@ pub struct Control {
     /// a program with more than one `LOC` in its text segment can leave a
     /// gap between two written regions, and a bound would read an address
     /// in that gap as loaded when it never was. Only running off the
-    /// program's own end, into a gap between two `LOC`-separated regions,
-    /// or onto a PC at or above `Data_Segment`, leaves it. Empty for a
-    /// program with nothing below `Data_Segment`; `left_loaded_image` then
-    /// answers `true` unconditionally, so Next degrades to a plain Step
-    /// rather than misreading nothing as everything.
+    /// program's own end, jumping to any other address `write_image` never
+    /// wrote -- a gap between `LOC`-separated regions, or anywhere else
+    /// unwritten -- or landing on a PC at or above `Data_Segment`, leaves
+    /// it. Empty for a program with nothing below `Data_Segment`;
+    /// `left_loaded_image` then answers `true` unconditionally, so Next
+    /// degrades to a plain Step rather than misreading nothing as
+    /// everything.
     loaded_text_addresses: BTreeSet<u64>,
 }
 
@@ -361,8 +363,8 @@ impl Control {
     }
 
     /// The 1-based source line `marker_pc` maps to, or `None` for an address
-    /// with no source mapping (compiler-generated code, or past the end of
-    /// the program).
+    /// nothing was ever emitted at -- a gap between `LOC`-separated regions,
+    /// or past the end of the program.
     pub fn current_line(&self) -> Option<usize> {
         self.assembler
             .source_loc(self.marker_pc())
@@ -498,9 +500,9 @@ impl Control {
 
     /// Whether the PC now sits on a source line other than `origin` --
     /// `Debugger::reached_new_line`'s own rule, shared here with
-    /// `next_chunk`. An address with no source mapping (compiler-
-    /// generated code, or past the end of the program) answers false: it is
-    /// inside no line, so it is not a new one.
+    /// `next_chunk`. An address nothing was ever emitted at -- a gap
+    /// between `LOC`-separated regions, or past the end of the program --
+    /// answers false: it is inside no line, so it is not a new one.
     fn reached_new_line(&self, origin: Option<&SourceLoc>) -> bool {
         let Some(loc) = self.assembler.source_loc(self.get_pc()) else {
             return false;
@@ -512,12 +514,16 @@ impl Control {
     }
 
     /// Whether the PC has left the loaded image: not a member of
-    /// `loaded_text_addresses`, not just unmapped in the source map -- a
-    /// `debug` line's own `TRAP` is mapped and loaded like any other
-    /// instruction. Only running off the program's own end, into a gap
-    /// between two `LOC`-separated regions, or onto a PC at or above
-    /// `Data_Segment`, leaves it. The source map can't tell those cases
-    /// apart from a genuine exit; this can.
+    /// `loaded_text_addresses`, not what the source map alone would say.
+    /// The source map resolves a data-segment address to a real line too --
+    /// `HELLO_WORLD_MMS`'s `Text` label sits at `Data_Segment`, and
+    /// `source_loc` maps it to line 3 -- so a PC that wandered into data
+    /// would read as "reached a new line," not "left the image." checksmix's
+    /// own `source_loc` also scans every instruction to find the item's
+    /// size; `loaded_text_addresses` is a `BTreeSet`, one lookup per address
+    /// `next_chunk`'s continuation loop checks. Only running off the
+    /// program's own end, jumping to any other address `write_image` never
+    /// wrote, or landing on a PC at or above `Data_Segment`, leaves it.
     fn left_loaded_image(&self) -> bool {
         !self.loaded_text_addresses.contains(&self.get_pc())
     }
@@ -525,15 +531,16 @@ impl Control {
     /// `Debugger::do_next`'s stopping rule, plus a case checksmix's own
     /// debugger never has to consider: the call depth is back at or below
     /// `target.depth` AND the PC has reached a source line other than
-    /// `target.origin` -- depth alone would already read "reached" after
-    /// any straight-line instruction that doesn't call, since depth never
-    /// moves without one; a line-only rule would stop a self-recursive call
+    /// `target.origin` -- depth alone would already read "reached" the
+    /// instant a line that jumps back onto itself (`Spin JMP Spin`)
+    /// finishes its own statement group, since a same-line jump never
+    /// changes depth; a line-only rule would stop a self-recursive call
     /// before it actually returns, since the callee can share its caller's
     /// line -- OR the PC has left the loaded image entirely
     /// (`left_loaded_image`), since nothing sensible follows a PC that ran
     /// off the program's own end. Either half alone is not enough; see
-    /// `left_loaded_image`'s own doc for why that half can't be folded into
-    /// the source-map check.
+    /// `left_loaded_image`'s own doc for why the source map can't take its
+    /// place.
     fn next_reached(&self, target: &NextTarget) -> bool {
         self.left_loaded_image()
             || (self.call_depth() <= target.depth && self.reached_new_line(target.origin.as_ref()))
@@ -1766,29 +1773,48 @@ mod tests {
             spin_addr,
             "the loop never leaves its own line"
         );
+
+        // Nothing about the loop itself ever stops it -- only Interrupt
+        // (`end_in_flight`) does.
+        control.end_in_flight();
+        assert!(
+            !control.is_running(),
+            "Interrupt must stop a Next that never reaches a new line"
+        );
     }
 
     #[test]
     fn debug_prints_after_put_rg_255_makes_dollar_254_local() {
-        // At 0.3.10, `debug`'s generated stub saved its return context with
-        // `SAVE $254,0`, which requires `X` global (`X >= rG`); `PUT rG,255`
-        // moves `$254` into the local range first, so the stub's own `SAVE`
-        // halted with "SAVE $X,0: X=254 must name a global" instead of
-        // printing. C8's `debug` compiles to one `TRAP 0,Debug,K` that
-        // touches no register, so this prints cleanly.
+        // Pins that `debug` prints cleanly once `PUT rG,255` has moved
+        // `$254` into the local range: its `TRAP 0,Debug,K` touches no
+        // register, so nothing about `rG` reaches it. At 0.3.10 the same
+        // sequence halted instead -- the old stub's own `SAVE $254,0`
+        // requires `X` global (`X >= rG`), which `$254` no longer was.
+        // `next_chunk` stops on the line after `debug`, before its own
+        // trailing `TRAP 0,Halt,0` ever runs, so "no diagnostic at all"
+        // unambiguously means this printed instead of halting.
         const PUT_RG_THEN_DEBUG_MMS: &str =
             "\tLOC\t#100\nMain\tPUT\trG,255\n\tdebug \"hi\"\n\tTRAP\t0,Halt,0\n";
         let mut control = Control::new(PUT_RG_THEN_DEBUG_MMS, "rg.mms").expect("assembles");
 
-        assert_eq!(control.run_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert_eq!(control.step(), StepOutcome::Advanced, "PUT rG,255");
+        assert_eq!(control.next_chunk(CHUNK_BUDGET), StepOutcome::Advanced);
+        assert!(!control.is_halted());
 
-        let stdout_text: String = control
-            .output()
+        let output = control.output();
+        let stdout_text: String = output
             .iter()
             .filter(|span| span.stream == OutputStream::Stdout)
             .map(|span| span.text.as_str())
             .collect();
         assert_eq!(stdout_text, "hi\n", "debug must print after PUT rG,255");
+        assert!(
+            !output
+                .iter()
+                .any(|span| span.stream == OutputStream::Diagnostic),
+            "no diagnostic must appear -- the old stub's SAVE $254,0 would \
+             have halted here instead of printing"
+        );
     }
 
     /// A straight-line program -- no loop, no call -- long enough that
