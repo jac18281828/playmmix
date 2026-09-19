@@ -124,24 +124,26 @@ describe('PlaymmixStack', () => {
     });
   });
 
-  it('configures SPA behavior for the CloudFront distribution', () => {
+  it('serves playmmix.2ad.com with index.html as the root object', () => {
     template.hasResourceProperties('AWS::CloudFront::Distribution', {
-      DistributionConfig: {
+      DistributionConfig: Match.objectLike({
         Aliases: Match.arrayWith(['playmmix.2ad.com']),
         DefaultRootObject: 'index.html',
-        CustomErrorResponses: Match.arrayWith([
-          Match.objectLike({
-            ErrorCode: 403,
-            ResponseCode: 200,
-            ResponsePagePath: '/index.html',
-          }),
+      }),
+    });
+  });
+
+  it('returns a real 404 for a missing asset, with no 403 fallback', () => {
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        CustomErrorResponses: [
           Match.objectLike({
             ErrorCode: 404,
-            ResponseCode: 200,
+            ResponseCode: 404,
             ResponsePagePath: '/index.html',
           }),
-        ]),
-      },
+        ],
+      }),
     });
   });
 
@@ -163,5 +165,64 @@ describe('PlaymmixStack', () => {
         ]),
       },
     });
+  });
+
+  it('grants CloudFront ListBucket on the bucket itself, so a missing key is a 404', () => {
+    const bucketLogicalIds = Object.keys(template.findResources('AWS::S3::Bucket'));
+    expect(bucketLogicalIds).toHaveLength(1);
+    const [bucketLogicalId] = bucketLogicalIds;
+
+    const distributionLogicalIds = Object.keys(template.findResources('AWS::CloudFront::Distribution'));
+    expect(distributionLogicalIds).toHaveLength(1);
+    const [distributionLogicalId] = distributionLogicalIds;
+
+    // Built from this template's own distribution, independent of either
+    // statement, so a source ARN pointed at a different distribution fails
+    // both the ReadOnly and the ListBucket assertions below.
+    const expectedSourceCondition = {
+      StringEquals: {
+        'AWS:SourceArn': {
+          'Fn::Join': [
+            '',
+            [
+              'arn:',
+              { Ref: 'AWS::Partition' },
+              ':cloudfront::',
+              { Ref: 'AWS::AccountId' },
+              ':distribution/',
+              { Ref: distributionLogicalId },
+            ],
+          ],
+        },
+        'AWS:SourceAccount': { Ref: 'AWS::AccountId' },
+      },
+    };
+
+    template.hasResourceProperties('AWS::S3::BucketPolicy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: 'AllowCloudFrontServicePrincipalReadOnly',
+            Effect: 'Allow',
+            Action: 's3:GetObject',
+            Condition: expectedSourceCondition,
+          }),
+          Match.objectLike({
+            Sid: 'AllowCloudFrontServicePrincipalListBucket',
+            Effect: 'Allow',
+            Action: 's3:ListBucket',
+            Principal: {
+              Service: 'cloudfront.amazonaws.com',
+            },
+            Resource: {
+              'Fn::GetAtt': [bucketLogicalId, 'Arn'],
+            },
+            Condition: expectedSourceCondition,
+          }),
+        ]),
+      },
+    });
+
+    template.resourceCountIs('AWS::S3::BucketPolicy', 1);
   });
 });

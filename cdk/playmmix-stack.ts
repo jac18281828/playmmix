@@ -62,14 +62,8 @@ export class PlaymmixStack extends cdk.Stack {
       },
       errorResponses: [
         {
-          httpStatus: 403,
-          responseHttpStatus: 200,
-          responsePagePath: '/index.html',
-          ttl: cdk.Duration.minutes(5),
-        },
-        {
           httpStatus: 404,
-          responseHttpStatus: 200,
+          responseHttpStatus: 404,
           responsePagePath: '/index.html',
           ttl: cdk.Duration.minutes(5),
         },
@@ -82,6 +76,15 @@ export class PlaymmixStack extends cdk.Stack {
     // already attach statements to the bucket's single CDK-managed policy.
     // Add these directly rather than a second CfnBucketPolicy, which would
     // produce a second AWS::S3::BucketPolicy resource on the same bucket.
+    // ListBucket is granted separately so a missing key answers 404, not 403.
+    // Scopes each Allow statement below to this distribution and account.
+    const fromThisDistribution = {
+      StringEquals: {
+        'AWS:SourceArn': distributionArn,
+        'AWS:SourceAccount': cdk.Aws.ACCOUNT_ID,
+      },
+    };
+
     this.bucket.addToResourcePolicy(
       new iam.PolicyStatement({
         sid: 'AllowCloudFrontServicePrincipalReadOnly',
@@ -89,12 +92,18 @@ export class PlaymmixStack extends cdk.Stack {
         principals: [new iam.ServicePrincipal('cloudfront.amazonaws.com')],
         actions: ['s3:GetObject'],
         resources: [`${this.bucket.bucketArn}/*`],
-        conditions: {
-          StringEquals: {
-            'AWS:SourceArn': distributionArn,
-            'AWS:SourceAccount': cdk.Aws.ACCOUNT_ID,
-          },
-        },
+        conditions: fromThisDistribution,
+      }),
+    );
+
+    this.bucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowCloudFrontServicePrincipalListBucket',
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ServicePrincipal('cloudfront.amazonaws.com')],
+        actions: ['s3:ListBucket'],
+        resources: [this.bucket.bucketArn],
+        conditions: fromThisDistribution,
       }),
     );
 
