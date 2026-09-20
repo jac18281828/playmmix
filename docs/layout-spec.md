@@ -76,16 +76,25 @@ right is the machine. CSS grid with named areas on `<main>`:
   somewhat as the window keeps shrinking (measured up to ~240px at a 200px
   window height, undragged), but the editor never disappears, which an
   unguarded `1fr` row would allow.
-- On a touch device (`(hover: none) and (pointer: coarse)`, keyed on the
-  input, not the viewport width) the control bar leaves the header and
-  becomes `position: fixed` to the viewport bottom, clear of the iOS home
-  indicator and the left/right safe-area insets, and never scrolls away.
+- On a touch device (`(hover: none) and (pointer: coarse)`) the control bar
+  leaves the header and becomes `position: fixed`, clear of the notch and
+  the left/right safe-area insets, and never scrolls away. Keyed on the
+  input, not the viewport width, for the touch/non-touch split itself;
+  which edge the bar pins to keys on the viewport too, on `(max-width:
+  600px) or (max-height: 500px)` -- a phone, going by the app's own
+  viewport rather than the device, so an iPad in a narrow Split View gets
+  it too. The bar sits at the bottom on a full-screen iPad, where the
+  screen is large enough that the top is the awkward reach; there, its own
+  bottom padding clears the iOS home indicator. On a phone it sits at the
+  top instead, where the bottom is not where a user looks for it, and the
+  home indicator is `body`'s `padding-bottom` to clear, not the bar's.
   `--control-bar-h` and `--viewport-h` (`100dvh`, tracking Safari's
   collapsing toolbar) reserve the bar's space in `body`'s padding and
-  `main`'s height, in both grid layouts. Inside the bar, the run-state label
-  and status message sit on one line above a single row of six buttons, the
-  status message truncated by an ellipsis rather than wrapping; the buttons
-  carry no keyboard cue there, since a phone has no keyboard to teach.
+  `main`'s height, in both grid layouts, on whichever edge the bar sits.
+  Inside the bar, the run-state label and status message sit on one line
+  above a single row of six buttons, the status message truncated by an
+  ellipsis rather than wrapping; the buttons carry no keyboard cue there,
+  since a phone has no keyboard to teach.
 
 Registers in a column, one per row, is the load-bearing change: it makes rows
 addressable by position, which is what continuity (§ registers) and change

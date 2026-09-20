@@ -7,8 +7,9 @@ body {
     min-height: var(--viewport-h, 100vh);
     padding: 1rem;
     /* --control-bar-h is set only inside the touch query below, so this is
-       plain 1rem wherever that query doesn't match; there it grows to clear
-       the fixed control bar. */
+       plain 1rem wherever that query doesn't match; on a full-screen iPad
+       it grows to clear the bottom-fixed bar. A phone overrides this
+       padding-bottom back down, since its bar sits at the top instead. */
     padding-bottom: calc(1rem + var(--control-bar-h, 0px));
     font-family: system-ui, sans-serif;
     background: #1e1e1e;
@@ -70,9 +71,10 @@ main {
         "row-splitter col-splitter machine"
         "output       col-splitter machine";
     gap: 0.75rem;
-    /* --viewport-h and --control-bar-h are set only inside the touch query
-       below, so this is calc(100vh - 2rem) wherever that query doesn't
-       match. */
+    /* --viewport-h and --control-bar-h are set only inside the touch
+       queries below -- the shared block, and the phone-only override that
+       follows it -- so this is calc(100vh - 2rem) wherever neither
+       matches. */
     height: calc(var(--viewport-h, 100vh) - 2rem - var(--control-bar-h, 0px));
 }
 
@@ -127,13 +129,17 @@ main {
 /* Control pane: Run / Continue / Step / Next / Interrupt / Reset and the
    run-state indicator. Real <button> elements, so every control is
    keyboard-reachable without extra wiring; styled on its own classes per
-   the editor pane's rule below. Fixed to the viewport bottom on touch
-   devices -- see the (hover: none) and (pointer: coarse) query below. */
+   the editor pane's rule below. Fixed to a viewport edge on touch devices
+   -- the bottom on a full-screen iPad, the top on a phone -- see the
+   (hover: none) and (pointer: coarse) queries below. */
 
 .controls {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    /* Removes the double-tap-zoom wait on a fast tap across a button gap or
+       the status line; pinch zoom, unaffected, stays for accessibility. */
+    touch-action: manipulation;
 }
 
 .controls button {
@@ -181,25 +187,32 @@ main {
     color: #666;
 }
 
-/* Touch devices: pin the control bar to the viewport bottom instead of
-   letting it scroll away, and reserve room for it in body's and main's base
-   rules above. Keys on the input device, not the viewport width, so a
-   narrow desktop window keeps the top bar and a landscape iPad (above the
-   1100px breakpoint) still gets the bottom one; an iPad with a trackpad
-   reports a fine pointer and falls through to the desktop rule instead.
-   The owner's tuning point for this whole layout. */
+/* Touch devices: pin the control bar to a viewport edge instead of letting
+   it scroll away, and reserve room for it in body's and main's base rules
+   above. Keyed on the input device, not the viewport width, for the
+   touch/non-touch split itself: a narrow desktop window stays unfixed, and
+   an iPad with a trackpad reports a fine pointer and falls through to the
+   desktop rule. Which edge -- bottom on a full-screen iPad, top on a
+   phone, below -- keys on the viewport instead: the owner's reach argument
+   follows the pane the user actually sees, not the device. The owner's
+   tuning point for this whole layout. */
 @media (hover: none) and (pointer: coarse) {
     :root {
-        /* The bar's full rendered height, including its own bottom inset --
-           read by body's and main's base rules above to reserve exactly
-           this much room. The button row's floor is a literal 44px, not a
-           rem approximation of it, so this stays exact at any root font
-           size: 1.2rem (info row, its line-height below) + 0.3rem (the gap
-           .controls::after forces) + 0.8rem (0.4rem padding top and
-           bottom) = 2.3rem, plus the button row's own 44px, plus 1px
-           (border-top). Retune together with the rules below that set each
-           figure. */
-        --control-bar-h: calc(2.3rem + 44px + 1px + env(safe-area-inset-bottom));
+        /* The bar's chrome, everything but the safe-area inset -- shared
+           by the default --control-bar-h below and the phone override
+           after it, so the two can't drift apart. The button row's floor
+           is a literal 44px, not a rem approximation of it, so this stays
+           exact at any root font size: 1.2rem (info row, its line-height
+           below) + 0.3rem (the gap .controls::after forces) + 0.8rem
+           (0.4rem padding top and bottom) = 2.3rem, plus the button row's
+           own 44px, plus 1px (the bar's one border). Retune together with
+           the rules below that set each figure. */
+        --control-bar-chrome: calc(2.3rem + 44px + 1px);
+        /* The bar's full rendered height, including its own bottom inset
+           -- read by body's and main's base rules above to reserve exactly
+           this much room. A phone below swaps the bottom inset for the top
+           one. */
+        --control-bar-h: calc(var(--control-bar-chrome) + env(safe-area-inset-bottom));
         /* Tracks Safari's collapsing toolbar (100vh there is the
            toolbar-hidden height), so the two-column layout a landscape
            iPad gets never runs under the bar. Supported since iOS 15.4. */
@@ -293,6 +306,43 @@ main {
     .control-cue {
         font-weight: inherit;
         color: inherit;
+    }
+}
+
+/* Phone override: a small touch viewport, either orientation, reads the
+   reach the same way a full-screen iPad doesn't -- the bottom bar is not
+   where a user looks for it there, so it moves to the top instead. The
+   inner parentheses are required: Media Queries 4 forbids mixing `and` and
+   `or` at one level, and an unparseable query silently disables the whole
+   block. Keyed on the app's own viewport, not the device, so an iPad in
+   Slide Over or a narrow Split View gets the top bar too. */
+@media (hover: none) and (pointer: coarse) and ((max-width: 600px) or (max-height: 500px)) {
+    :root {
+        /* --control-bar-chrome (above), the top inset in place of the
+           bottom one. */
+        --control-bar-h: calc(var(--control-bar-chrome) + env(safe-area-inset-top));
+    }
+
+    .controls {
+        top: 0;
+        /* Exactly one edge may resolve to a length; top does. This clears
+           the shared block's bottom: 0, which otherwise leaves both edges
+           resolved and stretches the fixed bar to fill the viewport. */
+        bottom: auto;
+        /* The one border --control-bar-h counts moves with the bar: none
+           at the top, one at the bottom instead. */
+        border-top-width: 0;
+        border-bottom: 1px solid #333;
+        padding: calc(0.4rem + env(safe-area-inset-top))
+            max(0.5rem, env(safe-area-inset-right)) 0.4rem max(0.5rem, env(safe-area-inset-left));
+    }
+
+    body {
+        /* Mirrors the shared padding-bottom rule above, reserving room at
+           the top instead. */
+        padding-top: calc(1rem + var(--control-bar-h, 0px));
+        /* No bar to clear at the bottom -- just the home indicator. */
+        padding-bottom: max(1rem, env(safe-area-inset-bottom));
     }
 }
 
@@ -399,6 +449,9 @@ main {
 .gutter-line {
     cursor: pointer;
     padding-right: 0.5em;
+    /* A fast tap toggles a breakpoint without the double-tap-zoom wait;
+       pinch zoom stays. */
+    touch-action: manipulation;
 }
 
 /* iOS applies :hover on tap and leaves it stuck -- a tap toggles the
