@@ -32,12 +32,38 @@ function stepIndex(describes: (step: string) => boolean, label: string): number 
 
 const named = (name: string) => (step: string) => new RegExp(`- name: ${name}\\n`).test(step);
 
+const stepNamed = (name: string) => steps[stepIndex(named(name), `"${name}"`)];
+
 describe('deploy-static-site.yml', () => {
   it('deploys the stack cdk/www.ts names, without an approval prompt', () => {
-    const deploy = steps[stepIndex(named('Deploy infrastructure'), '"Deploy infrastructure"')];
+    const deploy = stepNamed('Deploy infrastructure');
     expect(deploy).toContain(
-      `run: bun run cdk:deploy -- ${stackId} --require-approval never --no-telemetry`,
+      `bun run cdk:deploy -- ${stackId} --require-approval never --no-telemetry`,
     );
+  });
+
+  // The invalidation reads the distribution id the deploy just wrote, so a
+  // recreated stack cannot leave it pointing at a distribution that is gone.
+  it('invalidates the distribution the deploy reports, keyed on the same stack', () => {
+    // Both steps name the file through the env entry, which must exist for
+    // either to resolve to a path at all.
+    expect(workflow).toContain('CDK_OUTPUTS_FILE: "cdk-outputs.json"');
+    expect(stepNamed('Deploy infrastructure')).toContain(
+      '--outputs-file ${{ env.CDK_OUTPUTS_FILE }}',
+    );
+
+    const invalidate = stepNamed('Invalidate CloudFront cache');
+    expect(invalidate).toContain(`jq -er '."${stackId}".DistributionId'`);
+    expect(invalidate).toContain('${{ env.CDK_OUTPUTS_FILE }}');
+    expect(invalidate).toContain('--distribution-id "${DISTRIBUTION_ID}"');
+    // Nothing may skip the invalidation or swallow its failure: both leave the
+    // bucket updated behind a stale CDN, which is what reading the output fixes.
+    expect(invalidate).not.toContain('if:');
+    expect(invalidate).not.toContain('continue-on-error');
+  });
+
+  it('carries no repository secret for the distribution id', () => {
+    expect(workflow).not.toContain('CLOUDFRONT_DISTRIBUTION_ID');
   });
 
   it('deploys after the build and before the bundle lands in the bucket', () => {
@@ -48,6 +74,7 @@ describe('deploy-static-site.yml', () => {
       stepIndex(named('Build Artifact'), '"Build Artifact"'),
       stepIndex(named('Deploy infrastructure'), '"Deploy infrastructure"'),
       stepIndex(named('Sync S3 Bucket'), '"Sync S3 Bucket"'),
+      stepIndex(named('Invalidate CloudFront cache'), '"Invalidate CloudFront cache"'),
     ];
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });

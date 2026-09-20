@@ -225,4 +225,16 @@ describe('PlaymmixStack', () => {
 
     template.resourceCountIs('AWS::S3::BucketPolicy', 1);
   });
+
+  // The deploy workflow reads this output by key, so renaming it breaks the
+  // invalidation with a template that still deploys.
+  it('publishes the distribution id as the DistributionId output', () => {
+    const distributionLogicalIds = Object.keys(template.findResources('AWS::CloudFront::Distribution'));
+    expect(distributionLogicalIds).toHaveLength(1);
+    const [distributionLogicalId] = distributionLogicalIds;
+
+    template.hasOutput('DistributionId', {
+      Value: { Ref: distributionLogicalId },
+    });
+  });
 });

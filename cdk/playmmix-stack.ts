@@ -136,9 +136,11 @@ export class PlaymmixStack extends cdk.Stack {
       target: cloudFrontTarget,
     });
 
+    // The deploy workflow reads this output by key to invalidate the
+    // distribution it just deployed, so the key is part of that contract.
     new cdk.CfnOutput(this, 'DistributionId', {
       value: this.distribution.distributionId,
-      description: 'Set this as CLOUDFRONT_DISTRIBUTION_ID in the playmmix repository secrets.',
+      description: 'CloudFront distribution the deploy workflow invalidates after syncing.',
     });
 
     new cdk.CfnOutput(this, 'DistributionArn', {

@@ -15,7 +15,7 @@ env:
   S3_BUCKET_NAME: "playmmix-us-east-1-504242000181"
   AWS_REGION: "us-east-1"
   SITE_URL: "https://playmmix.2ad.com"
-  CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+  CDK_OUTPUTS_FILE: "cdk-outputs.json"
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -77,7 +77,9 @@ jobs:
         run: |
           trunk build --release --public-url ${{ env.SITE_URL }}
       - name: Deploy infrastructure
-        run: bun run cdk:deploy -- StackPlaymmix2adCom --require-approval never --no-telemetry
+        run: |
+          bun run cdk:deploy -- StackPlaymmix2adCom --require-approval never --no-telemetry \
+            --outputs-file ${{ env.CDK_OUTPUTS_FILE }}
       - name: Sync S3 Bucket
         run: |
           aws s3 sync ./dist s3://${S3_BUCKET_NAME} --delete --region ${{ env.AWS_REGION }}
@@ -88,10 +90,11 @@ jobs:
             --cache-control "no-cache, no-store, must-revalidate" \
             --content-type "text/html; charset=utf-8"
       - name: Invalidate CloudFront cache
-        if: ${{ env.CLOUDFRONT_DISTRIBUTION_ID != '' }}
         run: |
+          DISTRIBUTION_ID=$(jq -er '."StackPlaymmix2adCom".DistributionId' \
+            ${{ env.CDK_OUTPUTS_FILE }})
           aws cloudfront create-invalidation \
-            --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --distribution-id "${DISTRIBUTION_ID}" \
             --paths "/*"
       - name: GitHub Release
         uses: softprops/action-gh-release@v2

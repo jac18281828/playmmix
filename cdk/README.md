@@ -13,11 +13,10 @@ release that carries stack changes, review them with AWS credentials:
 with `--no-telemetry`, which also drops the `AWS::CDK::Metadata` resource, so
 the local diff passes it too.
 
-One step is human-only: take the `DistributionId` output from a deploy and
-set it as the `CLOUDFRONT_DISTRIBUTION_ID` secret in this repository. Set it
-again whenever the stack is recreated: a destroy and redeploy creates a new
-distribution, and a stale id fails the invalidation step. Until the secret is
-set, the invalidation step is skipped.
+The workflow's deploy writes the stack's outputs to `cdk-outputs.json`, and the
+invalidation step reads `DistributionId` from it. A recreated stack therefore
+invalidates its new distribution on the same run, with no repository secret to
+keep in step.
 
 ## Lifecycle
 

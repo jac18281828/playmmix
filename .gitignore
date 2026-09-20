@@ -4,3 +4,4 @@
 /cdk.out
 /prompts
 .DS_Store
+/cdk-outputs.json
