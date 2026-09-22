@@ -801,8 +801,8 @@ main {
 /* Natural width: an inline-block sized to its own content hugs the hex
    with no gap of its own, reading left-aligned directly after it -- fits
    the common row (about 208px total) at the pane's own font on a 375px
-   phone. A wider decimal (|v| >= 10^15) scrolls inside the pane rather
-   than growing it. */
+   phone. A decimal cell wider than 17 characters, integer or float,
+   scrolls inside the pane rather than growing it. */
 .reg-dec {
     display: inline-block;
     flex-shrink: 0;
