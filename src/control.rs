@@ -118,7 +118,7 @@ pub struct Control {
     /// vector, an illegal rounding mode, and the like) leaves the PC exactly
     /// on the fault, and `get_exit_code` alone cannot tell the two apart.
     /// Recording the address before the call is right either way.
-    executing_pc: u64,
+    last_started_pc: u64,
     /// Set the first time Run, Step, or Next is issued since the last
     /// `new`/`reload` -- including a Run that stops at a resolved
     /// breakpoint on the entry line before executing anything. Distinguishes
@@ -165,7 +165,7 @@ impl Control {
     pub fn new(source: &str, filename: &str) -> Result<Self, String> {
         let (mmix, assembler, output) = Self::assemble_and_load(source, filename)?;
         let loaded_text_addresses = Self::loaded_text_addresses(&mmix);
-        let executing_pc = mmix.get_pc();
+        let last_started_pc = mmix.get_pc();
         Ok(Self {
             mmix,
             assembler,
@@ -175,7 +175,7 @@ impl Control {
             running: false,
             next_target: None,
             halted: false,
-            executing_pc,
+            last_started_pc,
             session: false,
             output,
             loaded_text_addresses,
@@ -202,7 +202,7 @@ impl Control {
         self.mmix = mmix;
         self.assembler = assembler;
         self.halted = false;
-        self.executing_pc = self.mmix.get_pc();
+        self.last_started_pc = self.mmix.get_pc();
         self.session = false;
         self.output = output;
         self.resolve_breakpoints();
@@ -352,13 +352,13 @@ impl Control {
     /// The address "where you are": once `halted`, the address
     /// `execute_tracked` recorded for the instruction whose
     /// `execute_instruction()` call returned `false` -- see
-    /// `executing_pc`. Otherwise identical to `get_pc()`. Both the editor's
+    /// `last_started_pc`. Otherwise identical to `get_pc()`. Both the editor's
     /// current-line lookup and the memory pane's current-row/current-
     /// instruction computation use this address, not the raw PC, so the
     /// marker lands on the halting instruction rather than past it.
     pub fn marker_pc(&self) -> u64 {
         if self.halted {
-            self.executing_pc
+            self.last_started_pc
         } else {
             self.get_pc()
         }
@@ -511,7 +511,7 @@ impl Control {
     /// call goes through here, so every loop that can halt shares one rule
     /// for naming the instruction that did.
     fn execute_tracked(&mut self) -> bool {
-        self.executing_pc = self.get_pc();
+        self.last_started_pc = self.get_pc();
         self.mmix.execute_instruction()
     }
 
@@ -1135,7 +1135,8 @@ mod tests {
         // A TRAP halt advances get_pc() 4 bytes past the halting
         // instruction, so it coincides with get_pc() - 4 here -- but
         // marker_pc() reaches that address by recording it before the call,
-        // not by subtracting from the live PC afterward (see M4-M6 for a
+        // not by subtracting from the live PC afterward (see
+        // `run_marks_the_get_that_faulted_not_a_trap_after_it` for a
         // diagnostic halt, which never advances the PC at all).
         // current_line() must resolve to the TRAP's own source line --
         // HELLO_WORLD_MMS's `TRAP 0,Halt,0` is line 10.
@@ -1381,8 +1382,8 @@ mod tests {
 
     #[test]
     fn hello_world_mms_last_stdout_span_is_the_greeting_and_its_10_newline() {
-        // checksmix 0.3.13 retired every backslash escape; `Text`'s trailing
-        // `,10,0` is the newline `Fputs` prints, not an escape.
+        // checksmix 0.3.13's grammar has no backslash escape; `Text`'s
+        // trailing `,10,0` is the newline `Fputs` prints, not an escape.
         let mut control =
             Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         assert_eq!(control.run_chunk(1_000_000), StepOutcome::Halted);
