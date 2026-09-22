@@ -107,12 +107,13 @@ pub(super) struct DecimalCell {
 /// (value >> 52) & 0x7FF`, falls in `923..=1123` -- an unbiased exponent in
 /// `-100..=100`, magnitudes from 2^-100 (about 7.9e-31) up to 2^101 (about
 /// 2.5e30) -- or when it is one of the two infinities, `E = 0x7FF` with a
-/// zero mantissa. The window itself still excludes zero, subnormals and
-/// every ordinary integer a program holds: small positive integers have
-/// `E = 0`, small negatives have `E = 0x7FF`, and segment addresses land far
-/// outside it (`Data_Segment` near 1e-154, `Stack_Segment` near 1e154). One
-/// misreading is accepted: a `Pool_Segment` pointer, `#4000000000000000`,
-/// reads as `(2.0)`. NaN (`E = 0x7FF`, mantissa nonzero) stays an integer:
+/// zero mantissa. The window itself excludes zero, subnormals and every
+/// ordinary integer a program holds: small positive integers have `E = 0`,
+/// small negatives have `E = 0x7FF`, and segment addresses land far outside
+/// it (`Data_Segment` near 1e-154, `Stack_Segment` near 1e154). Three
+/// misreadings are accepted: a `Pool_Segment` pointer, `#4000000000000000`,
+/// reads as `(2.0)`, and the infinities' patterns read the integers
+/// 9218868437227405312 and -2^52 as `(inf)` and `(-inf)`. NaN (`E = 0x7FF`, mantissa nonzero) stays an integer:
 /// every integer from -1 to -(2^52 - 1) has NaN bits, so reading NaN would
 /// misread that whole range.
 ///
