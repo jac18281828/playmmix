@@ -106,21 +106,25 @@ pub(super) struct DecimalCell {
 /// Reads `value`'s bits as a float when its biased exponent field, `E =
 /// (value >> 52) & 0x7FF`, falls in `923..=1123` -- an unbiased exponent in
 /// `-100..=100`, magnitudes from 2^-100 (about 7.9e-31) up to 2^101 (about
-/// 2.5e30). The window excludes zero, subnormals, infinities and NaN (`E =
-/// 0` or `E = 0x7FF`), and every ordinary integer a program holds: small
-/// positive integers have `E = 0`, small negatives have `E = 0x7FF`, and
-/// segment addresses land far outside it (`Data_Segment` near 1e-154,
-/// `Stack_Segment` near 1e154). One misreading is accepted: a
-/// `Pool_Segment` pointer, `#4000000000000000`, reads as `(2.0)`.
+/// 2.5e30) -- or when it is one of the two infinities, `E = 0x7FF` with a
+/// zero mantissa. The window itself still excludes zero, subnormals and
+/// every ordinary integer a program holds: small positive integers have
+/// `E = 0`, small negatives have `E = 0x7FF`, and segment addresses land far
+/// outside it (`Data_Segment` near 1e-154, `Stack_Segment` near 1e154). One
+/// misreading is accepted: a `Pool_Segment` pointer, `#4000000000000000`,
+/// reads as `(2.0)`. NaN (`E = 0x7FF`, mantissa nonzero) stays an integer:
+/// every integer from -1 to -(2^52 - 1) has NaN bits, so reading NaN would
+/// misread that whole range.
 ///
-/// A float reading prints with `{:?}`, which always shows a decimal point
-/// or an exponent and every digit needed to round-trip -- it never prints
-/// like an integer -- and its title gives the value as a signed 64-bit
-/// integer, so a random word misread as a float can be checked. An integer
-/// reading carries no title.
+/// A float reading never prints like an integer: a finite value's `{:?}`
+/// carries a decimal point or an exponent and every digit needed to
+/// round-trip, and an infinity prints as `inf` or `-inf`. Its title gives
+/// the value as a signed 64-bit integer, so a random word misread as a
+/// float can be checked. An integer reading carries no title.
 pub(super) fn decimal_cell(value: u64) -> DecimalCell {
     let exponent = (value >> 52) & 0x7FF;
-    if (923..=1123).contains(&exponent) {
+    let is_infinite = exponent == 0x7FF && value & 0x000F_FFFF_FFFF_FFFF == 0;
+    if (923..=1123).contains(&exponent) || is_infinite {
         DecimalCell {
             text: format!("({:?})", f64::from_bits(value)),
             title: Some(format!("as an integer: {}", value as i64)),
@@ -366,8 +370,8 @@ mod tests {
     #[test]
     fn decimal_cell_shows_the_signed_integer_or_the_float_reading_the_bits_hold() {
         // Window edges: E = 923 and E = 1123 read as floats, E = 922 and
-        // E = 1124 as integers. Zero, subnormals, NaN, infinities and the
-        // segment addresses stay integers.
+        // E = 1124 as integers. The infinities also read as floats. Zero,
+        // subnormals, NaN and the segment addresses stay integers.
         let cases: &[(u64, &str, Option<&str>)] = &[
             (
                 0x3FE0000000000000,
@@ -418,8 +422,20 @@ mod tests {
             (0x2000000000000000, "(2305843009213693952)", None),
             (0x6000000000000000, "(6917529027641081856)", None),
             (0x8000000000000000, "(-9223372036854775808)", None),
-            (0x7FF0000000000000, "(9218868437227405312)", None),
+            (
+                0x7FF0000000000000,
+                "(inf)",
+                Some("as an integer: 9218868437227405312"),
+            ),
+            (
+                0xFFF0000000000000,
+                "(-inf)",
+                Some("as an integer: -4503599627370496"),
+            ),
             (0x7FF8000000000000, "(9221120237041090560)", None),
+            (0xFFF8000000000000, "(-2251799813685248)", None),
+            (0x7FF0000000000001, "(9218868437227405313)", None),
+            (0xFFF0000000000001, "(-4503599627370495)", None),
         ];
 
         for (bits, text, title) in cases {

@@ -194,11 +194,15 @@ A row never moves once shown; new rows insert in index order. General and
 special registers share one row format: name, then hex, then the decimal in
 parentheses directly after the hex — `$1  0x0000000000000002 (2)`, `rL
 0x0000000000000001 (1)`. The decimal cell shows the signed integer, or, when
-the bits are float-shaped (a biased exponent `923..=1123` — see `pane.rs`'s
-`decimal_cell`), the float reading instead — `$1  0x3FE0000000000000 (0.5)`.
-A float reading always shows a decimal point or an exponent, with every
-digit needed to round-trip: `(2.0)`, `(6.02e23)`, `(0.30000000000000004)`.
-A register carries no type, so the shape is a reading, not a fact: a
+the bits are float-shaped (a biased exponent `923..=1123`, or either
+infinity — see `pane.rs`'s `decimal_cell`), the float reading instead —
+`$1  0x3FE0000000000000 (0.5)`, `$8  0x7FF0000000000000 (inf)`, `$9
+0xFFF0000000000000 (-inf)`. A float reading never prints like an integer: a
+finite value shows a decimal point or an exponent, with every digit needed
+to round-trip — `(2.0)`, `(6.02e23)`, `(0.30000000000000004)` — and an
+infinity prints as `(inf)` or `(-inf)`. NaN stays an integer: every integer
+from -1 to -(2^52 - 1) has NaN bits, so reading NaN would misread that whole
+range. A register carries no type, so the shape is a reading, not a fact: a
 `Pool_Segment` pointer, `#4000000000000000`, reads as `(2.0)`. A float
 reading's span carries the value as a signed 64-bit integer in its title,
 `title="as an integer: 4602678819172646912"`; an integer reading carries no
