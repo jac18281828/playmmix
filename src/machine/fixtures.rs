@@ -11,10 +11,10 @@ pub(super) const TWO_GREG_MMS: &str =
 /// $255,$0` writes a nonzero value into `$255` before `TRAP 0,Halt,0`.
 pub(super) const CALL_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,40\n\tSETL\t$2,2\n\tPUSHJ\t$0,AddFunc\n\tSET\t$255,$0\n\tTRAP\t0,Halt,0\nAddFunc\tADDU\t$0,$0,$1\n\tPOP\t1,0\n";
 /// `SETL $40,7` raises `rL` to 41 before writing it, so `$40` renders
-/// individually and goes sticky; `PUTI rL,0` then drops `rL` back to 0,
-/// which checksmix's `put_rl` zeroes `$40` for, marginal and unwritten
-/// again by the time `TRAP 0,Halt,0` halts. Isolates a register that
-/// renders mid-run and reverts by the end from one whose own write
-/// reverts it.
-pub(super) const REVERTING_GLOBAL_MMS: &str =
+/// individually (local, `i < rL`) and goes sticky; `PUTI rL,0` then drops
+/// `rL` back to 0, which checksmix's `put_rl` zeroes `$40` for, marginal and
+/// unwritten again by the time `TRAP 0,Halt,0` halts. Exercises a register
+/// that stops satisfying the plain visibility rule but keeps rendering
+/// through stickiness.
+pub(super) const REVERTING_MARGINAL_MMS: &str =
     "\tLOC\t#100\nMain\tSETL\t$40,7\n\tPUTI\trL,0\n\tTRAP\t0,Halt,0\n";

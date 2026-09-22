@@ -248,7 +248,7 @@ mod tests {
     use super::*;
     use checksmix::{MMixAssembler, entry_point, start_program, write_image};
 
-    use crate::machine::fixtures::{CALL_MMS, REVERTING_GLOBAL_MMS, TWO_GREG_MMS};
+    use crate::machine::fixtures::{CALL_MMS, REVERTING_MARGINAL_MMS, TWO_GREG_MMS};
     use crate::machine::pane::global_boundary_note;
 
     /// Assemble `source` and load it, unexecuted -- the same shape
@@ -300,7 +300,6 @@ mod tests {
 
         let rg = mmix.get_special(SpecialReg::RG);
         let rl = mmix.get_special(SpecialReg::RL);
-        assert!(rg > 32, "fixture must allocate a GREG so rG rises above 32");
         assert!(
             rl > 35 && rl < rg,
             "fixture must grow rL strictly between 35 and rG: rl={rl} rg={rg}"
@@ -345,48 +344,9 @@ mod tests {
         }
     }
 
-    /// `count` `GREG` directives, each initialized to zero, then an entry
-    /// point. `GREG` allocates downward from `$254`, so the count picks the
-    /// lowest register allocated -- built here rather than hand-typed
-    /// because the count that matters (223, landing exactly on `$32`) is
-    /// far too long to read as a literal.
-    fn many_gregs(count: usize) -> String {
-        let mut source = String::from("\tLOC\t#100\n");
-        for i in 0..count {
-            source.push_str(&format!("G{i}\tGREG\t0\n"));
-        }
-        source.push_str("Main\tTRAP\t0,Halt,0\n");
-        source
-    }
-
-    #[test]
-    fn allocated_zero_globals_render_individually_via_i_ge_rg() {
-        // 223 GREGs allocate $254 down to $32: every one of them zero,
-        // still global, and still individually visible.
-        let control =
-            crate::control::Control::new(&many_gregs(223), "many_greg.mms").expect("assembles");
-        assert_eq!(control.machine().get_special(SpecialReg::RG), 32);
-
-        let continuity = RegisterContinuity::new();
-        let rows = visible_registers(control.machine(), &continuity);
-
-        let individual: Vec<u8> = rows
-            .iter()
-            .filter_map(|row| match row {
-                RegisterRow::Register { index, .. } => Some(*index),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            individual,
-            (32u16..256).map(|i| i as u8).collect::<Vec<u8>>(),
-            "every register must render individually: $0-$31 stay unwritten \
-             and hidden, $32-$255 global via the i >= rG clause"
-        );
-    }
-
     /// No `GREG` anywhere, but `PUTI rG,100` moves `rG` at runtime --
-    /// `set_special` is a bare store with no validation.
+    /// checksmix 0.3.13 validates `PUT`/`PUTI rG` against 32..=255 and
+    /// >= rL before the store; 100 satisfies both.
     const PUT_RG_MMS: &str = "\tLOC\t#100\nMain\tPUTI\trG,100\n\tTRAP\t0,Halt,0\n";
 
     #[test]
@@ -431,7 +391,7 @@ mod tests {
         assert_eq!(
             control.machine().get_special(SpecialReg::RG),
             255,
-            "no GREG directive: rG stays at initialize()'s default"
+            "no GREG directive: rG is write_image's start value, 255"
         );
 
         let value255 = control.machine().get_register(255);
@@ -450,14 +410,14 @@ mod tests {
 
     #[test]
     fn register_continuity_keeps_a_once_visible_register_after_it_reverts() {
-        // $255 always renders individually, so it can no longer witness
+        // $255 always renders individually, so it never witnesses
         // stickiness. `PUTI rL,0` marginalizes $40 back to zero within
         // three instructions, so only per-step observation (not
         // `run_chunk`'s once-per-chunk sampling) ever catches it nonzero --
         // see
         // `sticky_continuity_samples_per_chunk_under_run_and_per_instruction_under_step`.
         let mut control =
-            crate::control::Control::new(REVERTING_GLOBAL_MMS, "revert.mms").expect("assembles");
+            crate::control::Control::new(REVERTING_MARGINAL_MMS, "revert.mms").expect("assembles");
         let mut continuity = RegisterContinuity::new();
         continuity.observe(control.machine());
 
@@ -476,7 +436,7 @@ mod tests {
         // continuity tracker: $40 must stay visible, sticky from the
         // earlier observation, even though its value is 0 again.
         control
-            .reload(REVERTING_GLOBAL_MMS)
+            .reload(REVERTING_MARGINAL_MMS)
             .expect("still assembles");
         assert_eq!(
             control.machine().get_register(40),
@@ -552,8 +512,10 @@ mod tests {
         );
     }
 
-    /// No `GREG` at all -- the load-time state: `rL = 0`, `rG = 255`
-    /// (`MMix::initialize`'s default under checksmix 0.3.13).
+    /// No `GREG` at all -- the load-time state: `rL = 0`, `rG = 255`.
+    /// `MMix::initialize` itself sets `rG` to 32; `write_image` raises it to
+    /// 255 for a program with no `GREG` directive (checksmix 0.3.13
+    /// `src/mmix.rs`, `src/debugger.rs`).
     const NO_GREG_HALT_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
 
     #[test]

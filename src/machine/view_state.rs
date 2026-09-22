@@ -10,12 +10,12 @@ use crate::machine::registers::{
     visible_specials,
 };
 
-/// Every individually-rendered index's value across `rows`. An index absent
-/// from the result is not itself unknown: per the visibility rules governing
-/// what `rows` holds, an index that renders neither individually necessarily
-/// has value `0` -- the 3-clause predicate would have rendered it
-/// individually otherwise. Callers comparing two snapshots (e.g. a diff)
-/// must treat an absent index as `0`, not as unknown.
+/// Every visible index's value across `rows`. An index absent from the
+/// result is not itself unknown: per the visibility rules governing what
+/// `rows` holds, an index absent from `rows` necessarily has value `0` --
+/// `register_included` would have included it otherwise. Callers comparing
+/// two snapshots (e.g. a diff) must treat an absent index as `0`, not as
+/// unknown.
 fn register_value_map(rows: &[RegisterRow]) -> BTreeMap<u8, u64> {
     let mut map = BTreeMap::new();
     for row in rows {
@@ -27,12 +27,12 @@ fn register_value_map(rows: &[RegisterRow]) -> BTreeMap<u8, u64> {
 }
 
 /// The register indices whose value differs between `prev` and `curr`. An
-/// index absent from `prev` (not yet individually visible or collapsed --
+/// index absent from `prev` (not yet visible under `register_included` --
 /// see [`register_value_map`]) is treated as value `0`, its actual value per
 /// the visibility rules, so an index's first appearance at a nonzero value
-/// -- e.g. a sticky register or a `GREG`-widened range becoming individually
-/// visible -- is flagged. An index that merely appears or disappears with an
-/// unchanged value (moving in or out of the collapse) is unaffected.
+/// -- e.g. a sticky register or a `GREG`-widened range becoming visible --
+/// is flagged. An index that merely appears or disappears with an unchanged
+/// value (crossing into or out of the visible range) is unaffected.
 pub fn diff_registers(prev: &[RegisterRow], curr: &[RegisterRow]) -> BTreeSet<u8> {
     let prev_map = register_value_map(prev);
     let curr_map = register_value_map(curr);
@@ -214,7 +214,7 @@ mod tests {
 
     use checksmix::SpecialReg;
 
-    use crate::machine::fixtures::{CALL_MMS, REVERTING_GLOBAL_MMS, TWO_GREG_MMS};
+    use crate::machine::fixtures::{CALL_MMS, REVERTING_MARGINAL_MMS, TWO_GREG_MMS};
     use crate::machine::memory::{MEMORY_ROW_WIDTH, Segment};
     use crate::machine::registers::{PINNED_SPECIALS, RegisterClass};
 
@@ -328,7 +328,7 @@ mod tests {
         // per-step observation to catch it nonzero -- see
         // register_continuity_keeps_a_once_visible_register_after_it_reverts.
         let mut control =
-            crate::control::Control::new(REVERTING_GLOBAL_MMS, "revert.mms").expect("assembles");
+            crate::control::Control::new(REVERTING_MARGINAL_MMS, "revert.mms").expect("assembles");
         let mut view = ViewState::new();
         view.reset(&control);
 
@@ -351,7 +351,7 @@ mod tests {
         // Reload alone leaves the sticky set intact -- $40 is back to zero
         // but keeps its row, which is the whole point of continuity.
         control
-            .reload(REVERTING_GLOBAL_MMS)
+            .reload(REVERTING_MARGINAL_MMS)
             .expect("still assembles");
         assert_eq!(control.machine().get_register(40), 0);
         assert!(
@@ -450,7 +450,7 @@ mod tests {
     fn sticky_continuity_samples_per_chunk_under_run_and_per_instruction_under_step() {
         // Observed once, after the whole chunk -- how `Msg::Run` samples.
         let mut chunked =
-            crate::control::Control::new(REVERTING_GLOBAL_MMS, "revert.mms").expect("assembles");
+            crate::control::Control::new(REVERTING_MARGINAL_MMS, "revert.mms").expect("assembles");
         let mut chunk_view = ViewState::new();
         chunk_view.reset(&chunked);
         assert_eq!(
@@ -461,7 +461,7 @@ mod tests {
 
         // Observed after every instruction -- how `Msg::Step` samples.
         let mut stepped =
-            crate::control::Control::new(REVERTING_GLOBAL_MMS, "revert.mms").expect("assembles");
+            crate::control::Control::new(REVERTING_MARGINAL_MMS, "revert.mms").expect("assembles");
         let mut step_view = ViewState::new();
         step_view.reset(&stepped);
         for _ in 0..16 {
@@ -536,12 +536,12 @@ mod tests {
 
     #[test]
     fn diff_registers_flags_a_nonzero_value_s_first_appearance() {
-        // Index 50 is absent from prev entirely -- not individually
-        // rendered, and not covered by the collapse (e.g. rG != 32, so the
-        // no-GREG collapse gate doesn't fire for it). Per the visibility
-        // rules, an index absent this way was value 0; becoming sticky at a
-        // nonzero value is exactly the transition a user watching the diff
-        // cares about, and must be flagged, not treated as unknown/skip.
+        // Index 50 is absent from prev entirely -- not sticky, value 0, and
+        // rL <= 50 < rG, so register_included excludes it. Per the
+        // visibility rules, an index absent this way was value 0; becoming
+        // sticky at a nonzero value is exactly the transition a user
+        // watching the diff cares about, and must be flagged, not treated
+        // as unknown/skip.
         let prev = vec![RegisterRow::Register {
             index: 1,
             value: 5,
