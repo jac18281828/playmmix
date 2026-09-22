@@ -267,24 +267,33 @@ impl Control {
     ///
     /// Tries `addr_for_line` first (a line that itself emits an
     /// instruction/directive), then falls back to treating the line's first
-    /// whitespace-delimited token as a label -- checksmix's debug info only
-    /// tags a line that emits code, so a label alone on its own line (legal
-    /// MMIXAL) has no `addr_for_line` entry even though it resolves in
-    /// `assembler.labels()`. No leading-whitespace precondition: checksmix's
-    /// grammar has none, and the fallback only runs once `addr_for_line` has
-    /// already failed for the line, so it can't collide with an ordinary
-    /// instruction line's mnemonic. The label candidate must itself have a
-    /// source mapping (`source_loc`), rejecting a trailing label past the
-    /// last instruction, whose address is real but holds no instruction and
-    /// so could never fire. Either path's address is rejected if it falls
-    /// in the data segment, which the program counter never reaches.
+    /// word as a label -- checksmix's debug info only tags a line that emits
+    /// code, so a label alone on its own line (legal MMIXAL) has no
+    /// `addr_for_line` entry even though it resolves in `assembler.labels()`.
+    /// The fallback only runs once `addr_for_line` has already failed for
+    /// the line, so it can't collide with an ordinary instruction line's
+    /// mnemonic. It requires the line's first character to be non-blank:
+    /// 0.3.13 gives an indented line no label field at all, so an indented
+    /// label line never assembles and this clause is defensive, not load-
+    /// bearing. It strips one leading `:` before the `labels` lookup:
+    /// 0.3.13 stores a root name (`:Main`) without its colon. A lone local
+    /// label (`2H`) lives outside `labels`, so the fallback rejects it. The
+    /// label candidate must itself have a source mapping (`source_loc`),
+    /// rejecting a trailing label past the last instruction, whose address
+    /// is real but holds no instruction and so could never fire. Either
+    /// path's address is rejected if it falls in the data segment, which
+    /// the program counter never reaches.
     fn resolve_breakpoint_line(&self, line: usize) -> Option<u64> {
         let addr = self
             .assembler
             .addr_for_line(&self.filename, line)
             .or_else(|| {
                 let text = self.assembler.source_text(&self.filename, line)?;
+                if text.starts_with(' ') || text.starts_with('\t') {
+                    return None;
+                }
                 let token = text.split_whitespace().next()?;
+                let token = token.strip_prefix(':').unwrap_or(token);
                 let candidate = *self.assembler.labels.get(token)?;
                 self.assembler.source_loc(candidate)?;
                 Some(candidate)
@@ -1478,6 +1487,39 @@ mod tests {
         let outcome = control.run_chunk(1_000);
         assert_eq!(outcome, StepOutcome::Breakpoint(label_addr));
         assert_eq!(control.get_pc(), label_addr);
+    }
+
+    #[test]
+    fn breakpoint_on_a_standalone_root_label_line_strips_the_leading_colon() {
+        // 0.3.13 stores a root name's own definition without its leading
+        // ':' in `labels`; the fallback must strip it before looking the
+        // token up, or a root label's own line -- the common case -- never
+        // resolves at all.
+        const ROOT_LABEL_LINE_MMS: &str = "\tLOC\t#100\n:Main\n\tSETL\t$1,7\n\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(ROOT_LABEL_LINE_MMS, "root.mms").expect("assembles");
+
+        let mut oracle = MMixAssembler::new(ROOT_LABEL_LINE_MMS, "root.mms");
+        oracle.parse().expect("test program assembles");
+        let main_addr = *oracle.labels.get("Main").expect("Main is a real label");
+        assert_eq!(main_addr, 0x100);
+
+        assert!(
+            control.toggle_breakpoint(2),
+            "a root label line must resolve via the fallback, colon stripped"
+        );
+        assert_eq!(control.run_chunk(1_000), StepOutcome::Breakpoint(main_addr));
+    }
+
+    #[test]
+    fn breakpoint_on_a_standalone_bare_label_line_resolves_the_same_way() {
+        // The same program, spelled without the leading colon: the
+        // fallback's `strip_prefix(':')` is a no-op here, so both spellings
+        // resolve identically.
+        const BARE_LABEL_LINE_MMS: &str = "\tLOC\t#100\nMain\n\tSETL\t$1,7\n\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(BARE_LABEL_LINE_MMS, "bare.mms").expect("assembles");
+
+        assert!(control.toggle_breakpoint(2));
+        assert_eq!(control.run_chunk(1_000), StepOutcome::Breakpoint(0x100));
     }
 
     #[test]
