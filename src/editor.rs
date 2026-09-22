@@ -477,12 +477,13 @@ mod tests {
             "X\tBYTE\t\"100%\"\t% real comment",
             "Main\tdebug \"hi\"",
             "\tLDA\t\t$255,Text",
+            r"'\n'",
             "\t.BYTE\t1,2,3",
             "Main' IS 3",
-            "café ; a comment with non-ASCII",
+            "café\tSET\t$1,2 % non-ASCII",
             "",
-            // H1-H20, the highlight table in
-            // playmmix-repin-checksmix-0.3.13.md §8.
+            // The rest of the highlight table this module's classify()
+            // implements.
             "Main\tSET\t$1,2 set it",
             "Main\tSETL\t$1,2 note % x; INCL $1,5",
             "Main\tSETL\t$1,2 % x; INCL $1,5",
@@ -495,13 +496,10 @@ mod tests {
             "Main\tSET\t$1,'''",
             "\tSET\t$2,'\\'",
             "\tLOCAL\t$40",
-            "\t.BYTE\t1,2,3",
-            "Main\tdebug \"hi\"",
             "Main\tDEBUG \"hi\"",
             "Main\tSETL\t$1,2;Foo INCL $1,5",
             "\tBYTE\t\";\",1",
             "Main\tSET\t$1,7%4",
-            "X\tBYTE\t\"100%\"\t% real comment",
             "Main\tSETL\t$1,2 #zz; INCL $1,5",
         ];
         for line in lines {
