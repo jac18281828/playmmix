@@ -96,16 +96,54 @@ pub(super) fn global_boundary_note(rg: u64) -> String {
     format!("global \u{b7} rG={rg}")
 }
 
+/// The decimal cell's text and optional title, as [`decimal_cell`] reads
+/// them from a register's raw bits.
+pub(super) struct DecimalCell {
+    pub(super) text: String,
+    pub(super) title: Option<String>,
+}
+
+/// Reads `value`'s bits as a float when its biased exponent field, `E =
+/// (value >> 52) & 0x7FF`, falls in `923..=1123` -- an unbiased exponent in
+/// `-100..=100`, magnitudes from 2^-100 (about 7.9e-31) up to 2^101 (about
+/// 2.5e30). The window excludes zero, subnormals, infinities and NaN (`E =
+/// 0` or `E = 0x7FF`), and every ordinary integer a program holds: small
+/// positive integers have `E = 0`, small negatives have `E = 0x7FF`, and
+/// segment addresses land far outside it (`Data_Segment` near 1e-154,
+/// `Stack_Segment` near 1e154). One misreading is accepted: a
+/// `Pool_Segment` pointer, `#4000000000000000`, reads as `(2.0)`.
+///
+/// A float reading prints with `{:?}`, which always shows a decimal point
+/// or an exponent and every digit needed to round-trip -- it never prints
+/// like an integer -- and its title gives the value as a signed 64-bit
+/// integer, so a random word misread as a float can be checked. An integer
+/// reading carries no title.
+pub(super) fn decimal_cell(value: u64) -> DecimalCell {
+    let exponent = (value >> 52) & 0x7FF;
+    if (923..=1123).contains(&exponent) {
+        DecimalCell {
+            text: format!("({:?})", f64::from_bits(value)),
+            title: Some(format!("as an integer: {}", value as i64)),
+        }
+    } else {
+        DecimalCell {
+            text: format!("({})", value as i64),
+            title: None,
+        }
+    }
+}
+
 /// A general-register row's name, hex and decimal cell text, in render
 /// order -- the seam `render_register_row` renders and host tests read
-/// without a browser. The decimal keeps `(value as i64).to_string()`
-/// inside parentheses, directly after the hex, per
+/// without a browser. The decimal cell is [`decimal_cell`]'s text: the
+/// signed integer, or the float reading when the bits are float-shaped,
+/// inside parentheses directly after the hex, per
 /// `docs/layout-spec.md`'s Registers section.
 pub(super) fn register_row_cells(index: u8, value: u64) -> [String; 3] {
     [
         format!("${index}"),
         format!("0x{value:016X}"),
-        format!("({})", value as i64),
+        decimal_cell(value).text,
     ]
 }
 
@@ -116,7 +154,7 @@ pub(super) fn special_row_cells(name: &str, value: u64) -> [String; 3] {
     [
         name.to_string(),
         format!("0x{value:016X}"),
-        format!("({})", value as i64),
+        decimal_cell(value).text,
     ]
 }
 
@@ -137,6 +175,7 @@ fn render_register_row(row: &RegisterRow, changed: &BTreeSet<u8>) -> Html {
                 row_class.push("register-marginal");
             }
             let [name_text, hex_text, dec_text] = register_row_cells(*index, *value);
+            let dec_title = decimal_cell(*value).title;
             let mut hex_class = classes!("reg-hex");
             let mut dec_class = classes!("reg-dec");
             if is_changed {
@@ -147,7 +186,7 @@ fn render_register_row(row: &RegisterRow, changed: &BTreeSet<u8>) -> Html {
                 <div class={row_class}>
                     <span class="reg-name">{ name_text }</span>
                     <span class={hex_class}>{ hex_text }</span>
-                    <span class={dec_class}>{ dec_text }</span>
+                    <span class={dec_class} title={dec_title}>{ dec_text }</span>
                 </div>
             }
         }
@@ -198,11 +237,12 @@ fn render_special_row(row: &SpecialRegisterRow, changed: &BTreeSet<String>) -> H
     }
     let title = pinned_special_title(&row.name);
     let [name_text, hex_text, dec_text] = special_row_cells(&row.name, row.value);
+    let dec_title = decimal_cell(row.value).title;
     html! {
         <div class="register-row">
             <span class="reg-name" title={title}>{ name_text }</span>
             <span class={hex_class}>{ hex_text }</span>
-            <span class={dec_class}>{ dec_text }</span>
+            <span class={dec_class} title={dec_title}>{ dec_text }</span>
         </div>
     }
 }
@@ -321,5 +361,77 @@ mod tests {
                 "(1)".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn decimal_cell_shows_the_signed_integer_or_the_float_reading_the_bits_hold() {
+        // Window edges: E = 923 and E = 1123 read as floats, E = 922 and
+        // E = 1124 as integers. Zero, subnormals, NaN, infinities and the
+        // segment addresses stay integers.
+        let cases: &[(u64, &str, Option<&str>)] = &[
+            (
+                0x3FE0000000000000,
+                "(0.5)",
+                Some("as an integer: 4602678819172646912"),
+            ),
+            (
+                0x4000000000000000,
+                "(2.0)",
+                Some("as an integer: 4611686018427387904"),
+            ),
+            (
+                0xBFE0000000000000,
+                "(-0.5)",
+                Some("as an integer: -4620693217682128896"),
+            ),
+            (
+                0x3E112E0BE826D695,
+                "(1e-9)",
+                Some("as an integer: 4472406533629990549"),
+            ),
+            (
+                0x44DFDE9F10A8D361,
+                "(6.02e23)",
+                Some("as an integer: 4962930089146241889"),
+            ),
+            (
+                0x3FD3333333333334,
+                "(0.30000000000000004)",
+                Some("as an integer: 4599075939470750516"),
+            ),
+            (
+                0x39B0000000000000,
+                "(7.888609052210118e-31)",
+                Some("as an integer: 4156822456062967808"),
+            ),
+            (0x39A0000000000000, "(4152318856435597312)", None),
+            (
+                0x4630000000000000,
+                "(1.2676506002282294e30)",
+                Some("as an integer: 5057542381537067008"),
+            ),
+            (0x4640000000000000, "(5062045981164437504)", None),
+            (0x0000000000000000, "(0)", None),
+            (0x0000000000000001, "(1)", None),
+            (0x000000001DCD6500, "(500000000)", None),
+            (0xFFFFFFFFFFFFFFFF, "(-1)", None),
+            (0x2000000000000000, "(2305843009213693952)", None),
+            (0x6000000000000000, "(6917529027641081856)", None),
+            (0x8000000000000000, "(-9223372036854775808)", None),
+            (0x7FF0000000000000, "(9218868437227405312)", None),
+            (0x7FF8000000000000, "(9221120237041090560)", None),
+        ];
+
+        for (bits, text, title) in cases {
+            let cell = decimal_cell(*bits);
+            assert_eq!(&cell.text, text, "bits {bits:#018X}");
+            assert_eq!(cell.title.as_deref(), *title, "bits {bits:#018X}");
+        }
+    }
+
+    #[test]
+    fn a_float_shaped_value_reads_the_same_through_both_row_seams() {
+        assert_eq!(register_row_cells(1, 0x3FE0000000000000)[2], "(0.5)");
+        assert_eq!(special_row_cells("rE", 0x3FE0000000000000)[2], "(0.5)");
     }
 }

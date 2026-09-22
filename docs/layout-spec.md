@@ -193,18 +193,28 @@ row:
 A row never moves once shown; new rows insert in index order. General and
 special registers share one row format: name, then hex, then the decimal in
 parentheses directly after the hex — `$1  0x0000000000000002 (2)`, `rL
-0x0000000000000001 (1)`. Fixed `ch` widths for name (4ch, right-aligned) and
-hex (18ch) let a value update in place without reflow; the decimal takes its
-natural width, left-aligned, rather than reserving space for a value it
-isn't showing. Special-register rows are the six pinned ones (`rA rG rL rO
-rS rJ`) first, then any other nonzero special, sticky under the same rule.
+0x0000000000000001 (1)`. The decimal cell shows the signed integer, or, when
+the bits are float-shaped (a biased exponent `923..=1123` — see `pane.rs`'s
+`decimal_cell`), the float reading instead — `$1  0x3FE0000000000000 (0.5)`.
+A float reading always shows a decimal point or an exponent, with every
+digit needed to round-trip: `(2.0)`, `(6.02e23)`, `(0.30000000000000004)`.
+A register carries no type, so the shape is a reading, not a fact: a
+`Pool_Segment` pointer, `#4000000000000000`, reads as `(2.0)`. A float
+reading's span carries the value as a signed 64-bit integer in its title,
+`title="as an integer: 4602678819172646912"`; an integer reading carries no
+title. Fixed `ch` widths for
+name (4ch, right-aligned) and hex (18ch) let a value update in place without
+reflow; the decimal takes its natural width, left-aligned, rather than
+reserving space for a value it isn't showing. Special-register rows are the
+six pinned ones (`rA rG rL rO rS rJ`) first, then any other nonzero special,
+sticky under the same rule.
 
 A row wider than its pane scrolls inside that pane (`.registers-scroll`),
-never the page — the owner's choice. At the pane's font a common row (about
-25ch) fits a 375px phone; a decimal of 16 or more digits (`|v| >= 10^15`) —
-or 15 or more with a negative sign (`|v| >= 10^14`, since the sign itself
-takes a character) — does not, and scrolls inside the pane instead of
-widening it.
+never the page — the owner's choice. At the pane's font a decimal cell fits
+17 characters with its parentheses on a 375px phone; a wider cell, integer
+or float, scrolls inside the pane instead of widening it. A full-precision
+float reading usually exceeds it — `(0.16666666666666666)` is 21 characters
+— and the widest, `(-1.5777218104420234e-30)`, is 25.
 
 ## Memory pane
 
