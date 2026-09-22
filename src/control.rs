@@ -111,6 +111,14 @@ pub struct Control {
     /// execute whatever uninitialized memory sits past the halt
     /// instruction.
     halted: bool,
+    /// The address `execute_tracked` was about to execute at its last call.
+    /// `marker_pc`'s only source of truth while halted: a `TRAP` halt
+    /// advances the PC before `execute_instruction` returns `false`, but a
+    /// diagnostic halt (a nonzero must-be-zero field, an unloaded trip
+    /// vector, an illegal rounding mode, and the like) leaves the PC exactly
+    /// on the fault, and `get_exit_code` alone cannot tell the two apart.
+    /// Recording the address before the call is right either way.
+    executing_pc: u64,
     /// Set the first time Run, Step, or Next is issued since the last
     /// `new`/`reload` -- including a Run that stops at a resolved
     /// breakpoint on the entry line before executing anything. Distinguishes
@@ -157,6 +165,7 @@ impl Control {
     pub fn new(source: &str, filename: &str) -> Result<Self, String> {
         let (mmix, assembler, output) = Self::assemble_and_load(source, filename)?;
         let loaded_text_addresses = Self::loaded_text_addresses(&mmix);
+        let executing_pc = mmix.get_pc();
         Ok(Self {
             mmix,
             assembler,
@@ -166,6 +175,7 @@ impl Control {
             running: false,
             next_target: None,
             halted: false,
+            executing_pc,
             session: false,
             output,
             loaded_text_addresses,
@@ -192,6 +202,7 @@ impl Control {
         self.mmix = mmix;
         self.assembler = assembler;
         self.halted = false;
+        self.executing_pc = self.mmix.get_pc();
         self.session = false;
         self.output = output;
         self.resolve_breakpoints();
@@ -329,17 +340,16 @@ impl Control {
         self.session
     }
 
-    /// The address "where you are": once `halted`, `get_pc()` already points
-    /// 4 bytes past the last real instruction (`handle_halt` advances the PC
-    /// past the halting `TRAP` before returning), so this steps back to the
-    /// instruction that actually ran. Otherwise identical to `get_pc()`.
-    /// Both the editor's current-line lookup and the memory pane's
-    /// current-row/current-instruction computation use this address, not
-    /// the raw PC, so the marker lands on the halting instruction rather
-    /// than past it.
+    /// The address "where you are": once `halted`, the address
+    /// `execute_tracked` recorded for the instruction whose
+    /// `execute_instruction()` call returned `false` -- see
+    /// `executing_pc`. Otherwise identical to `get_pc()`. Both the editor's
+    /// current-line lookup and the memory pane's current-row/current-
+    /// instruction computation use this address, not the raw PC, so the
+    /// marker lands on the halting instruction rather than past it.
     pub fn marker_pc(&self) -> u64 {
         if self.halted {
-            self.get_pc().saturating_sub(4)
+            self.executing_pc
         } else {
             self.get_pc()
         }
@@ -468,7 +478,7 @@ impl Control {
         let pre_call_depth = self.call_depth();
 
         self.session = true;
-        if !self.mmix.execute_instruction() {
+        if !self.execute_tracked() {
             self.halted = true;
             return StepOutcome::Halted;
         }
@@ -476,7 +486,7 @@ impl Control {
         if head_loc.is_some() && self.call_depth() == pre_call_depth {
             let mut budget = 3;
             while budget > 0 && self.assembler.source_loc(self.get_pc()) == head_loc.as_ref() {
-                if !self.mmix.execute_instruction() {
+                if !self.execute_tracked() {
                     self.halted = true;
                     return StepOutcome::Halted;
                 }
@@ -485,6 +495,15 @@ impl Control {
         }
 
         StepOutcome::Advanced
+    }
+
+    /// Execute one instruction, recording its address first -- `marker_pc`'s
+    /// only source of truth while halted. Every `mmix.execute_instruction()`
+    /// call goes through here, so every loop that can halt shares one rule
+    /// for naming the instruction that did.
+    fn execute_tracked(&mut self) -> bool {
+        self.executing_pc = self.get_pc();
+        self.mmix.execute_instruction()
     }
 
     /// Whether the PC now sits on a source line other than `origin` --
@@ -599,7 +618,7 @@ impl Control {
                 self.next_target = None;
                 return StepOutcome::Breakpoint(self.get_pc());
             }
-            if !self.mmix.execute_instruction() {
+            if !self.execute_tracked() {
                 self.running = false;
                 self.next_target = None;
                 self.halted = true;
@@ -658,7 +677,7 @@ impl Control {
             if count >= budget {
                 return StepOutcome::BudgetExhausted;
             }
-            if !self.mmix.execute_instruction() {
+            if !self.execute_tracked() {
                 self.running = false;
                 self.halted = true;
                 return StepOutcome::Halted;
@@ -683,7 +702,7 @@ impl Control {
             return StepOutcome::Halted;
         }
         self.running = true;
-        if !self.mmix.execute_instruction() {
+        if !self.execute_tracked() {
             self.running = false;
             self.halted = true;
             return StepOutcome::Halted;
@@ -1103,12 +1122,14 @@ mod tests {
     }
 
     #[test]
-    fn marker_pc_steps_back_from_the_halted_pc_to_the_halting_instruction() {
-        // Once halted, get_pc() sits 4 bytes past the halting TRAP
-        // (handle_halt advances it before returning). marker_pc() must step
-        // back to the instruction that actually ran, and current_line() must
-        // resolve to that instruction's source line -- HELLO_WORLD_MMS's
-        // `TRAP 0,Halt,0` is line 10.
+    fn marker_pc_is_the_halting_trap_recorded_before_it_executed() {
+        // A TRAP halt advances get_pc() 4 bytes past the halting
+        // instruction, so it coincides with get_pc() - 4 here -- but
+        // marker_pc() reaches that address by recording it before the call,
+        // not by subtracting from the live PC afterward (see M4-M6 for a
+        // diagnostic halt, which never advances the PC at all).
+        // current_line() must resolve to the TRAP's own source line --
+        // HELLO_WORLD_MMS's `TRAP 0,Halt,0` is line 10.
         let mut control =
             Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
         let outcome = control.run_chunk(1_000_000);
@@ -1117,7 +1138,7 @@ mod tests {
         assert_eq!(
             control.marker_pc(),
             control.get_pc() - 4,
-            "marker_pc must step back from the raw halted PC"
+            "marker_pc must name the halting TRAP, 4 bytes before the live PC"
         );
         assert_eq!(
             control.current_line(),
@@ -1145,6 +1166,83 @@ mod tests {
         );
         assert!(!control.is_halted());
         assert_eq!(control.marker_pc(), control.get_pc());
+    }
+
+    /// `GET` with `Z = 40` (`>= 32`) has no such special register: checksmix
+    /// 0.3.13 halts rather than reading garbage. Neither `SETL` nor the
+    /// faulting `GET` advances the PC past itself.
+    const INVALID_GET_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tGET\t$2,40\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn run_marks_the_get_that_faulted_not_a_trap_after_it() {
+        let mut control = Control::new(INVALID_GET_MMS, "get.mms").expect("assembles");
+        assert_eq!(control.run_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert_eq!(control.machine().get_exit_code(), 1);
+        assert_eq!(control.marker_pc(), 0x104, "the faulting GET, not #108");
+        assert_eq!(control.current_line(), Some(3), "the GET line");
+    }
+
+    #[test]
+    fn stepping_to_the_same_halt_marks_the_same_get() {
+        let mut control = Control::new(INVALID_GET_MMS, "get.mms").expect("assembles");
+        while control.step() != StepOutcome::Halted {}
+        assert_eq!(control.machine().get_exit_code(), 1);
+        assert_eq!(control.marker_pc(), 0x104);
+        assert_eq!(control.current_line(), Some(3));
+    }
+
+    /// `SYNC 5` falls in `4..=7`, a reserved operand checksmix 0.3.13 halts
+    /// on rather than a real synchronization mode.
+    const INVALID_SYNC_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tSYNC\t5\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn continuing_past_a_step_marks_the_sync_that_faulted() {
+        let mut control = Control::new(INVALID_SYNC_MMS, "sync.mms").expect("assembles");
+        assert_eq!(control.step(), StepOutcome::Advanced, "the SETL");
+        control.start_run();
+        assert_eq!(control.continue_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert_eq!(control.machine().get_exit_code(), 1);
+        assert_eq!(control.marker_pc(), 0x104, "the faulting SYNC");
+        assert_eq!(control.current_line(), Some(3), "the SYNC line");
+    }
+
+    const ORDINARY_HALT_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,1\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn run_marks_an_ordinary_trap_at_its_own_address() {
+        let mut control = Control::new(ORDINARY_HALT_MMS, "halt.mms").expect("assembles");
+        assert_eq!(control.run_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert_eq!(control.marker_pc(), 0x104, "the halting TRAP's own address");
+    }
+
+    /// A call into a callee whose own first instruction is the fault: `Next`
+    /// from the entry executes `PUSHJ` (landing inside `Sub`), then keeps
+    /// going through its own continuation loop and hits the invalid `GET`
+    /// there.
+    const CALL_INTO_INVALID_GET_MMS: &str =
+        "\tLOC\t#100\nMain\tPUSHJ\t$0,Sub\n\tTRAP\t0,Halt,0\nSub\tGET\t$1,40\n\tPOP\t0,0\n";
+
+    #[test]
+    fn next_from_the_entry_marks_a_fault_reached_inside_the_callee() {
+        let mut control =
+            Control::new(CALL_INTO_INVALID_GET_MMS, "call_get.mms").expect("assembles");
+        assert_eq!(control.next_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert_eq!(control.machine().get_exit_code(), 1);
+        assert_eq!(control.marker_pc(), 0x108, "the GET inside Sub");
+        assert_eq!(control.current_line(), Some(4), "the GET line");
+    }
+
+    /// A call into a callee that halts cleanly via its own `TRAP` before
+    /// returning -- `$255 = 3` at that point, so the halt reports exit 3.
+    const CALL_INTO_OWN_HALT_MMS: &str = "\tLOC\t#100\nMain\tPUSHJ\t$0,Sub\n\tTRAP\t0,Halt,0\nSub\tSETL\t$255,3\n\tTRAP\t0,Halt,0\n\tPOP\t0,0\n";
+
+    #[test]
+    fn next_from_the_entry_marks_the_callees_own_halting_trap() {
+        let mut control = Control::new(CALL_INTO_OWN_HALT_MMS, "call_halt.mms").expect("assembles");
+        assert_eq!(control.next_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        assert_eq!(control.machine().get_exit_code(), 3);
+        assert_eq!(control.marker_pc(), 0x10C, "Sub's own TRAP, not #110");
+        assert_eq!(control.current_line(), Some(5), "Sub's TRAP line");
     }
 
     #[test]

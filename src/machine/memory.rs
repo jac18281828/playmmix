@@ -421,9 +421,11 @@ mod tests {
 
     #[test]
     fn memory_row_marker_uses_the_halted_adjustment() {
-        // Mirrors Control::marker_pc: while halted, the real last
-        // instruction sat 4 bytes before get_pc(). The memory pane must
-        // flag that instruction, not the (past-the-end) raw PC.
+        // Mirrors Control::marker_pc: while halted, the marker names the
+        // instruction that halted, not the live PC past it -- a TRAP halt
+        // advances the PC 4 bytes past that instruction, the case this
+        // example models. The memory pane must flag the halting
+        // instruction's row, not the (past-the-end) raw PC's.
         let run = MemoryRun {
             segment: Segment::Text,
             start: 0x100,
@@ -434,7 +436,7 @@ mod tests {
         let row = &rows[0];
 
         let raw_pc_after_halt = 0x110; // past this run entirely
-        let halted_marker_pc = raw_pc_after_halt - 4; // the real last instruction
+        let halted_marker_pc = raw_pc_after_halt - 4; // the halting TRAP's own address
 
         assert!(
             !memory_row_is_current(row, raw_pc_after_halt),
