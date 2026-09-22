@@ -132,27 +132,29 @@ fn is_blank(c: char) -> bool {
     c == ' ' || c == '\t'
 }
 
-/// The byte offset `cs[idx]` starts at, or `line_len` past the last
-/// character -- so a scan that walked off the end of `cs` still yields a
+/// The byte offset `chars[idx]` starts at, or `line_len` past the last
+/// character -- so a scan that walked off the end of `chars` still yields a
 /// valid span end.
-fn byte_at(cs: &[(usize, char)], idx: usize, line_len: usize) -> usize {
-    cs.get(idx).map(|&(b, _)| b).unwrap_or(line_len)
+fn byte_at(chars: &[(usize, char)], idx: usize, line_len: usize) -> usize {
+    chars.get(idx).map(|&(b, _)| b).unwrap_or(line_len)
 }
 
-/// The first index at or after `i` that isn't blank (or `n`).
-fn skip_blanks(cs: &[(usize, char)], i: usize, n: usize) -> usize {
+/// The first index at or after `i` that isn't blank (or `chars.len()`).
+fn skip_blanks(chars: &[(usize, char)], i: usize) -> usize {
+    let n = chars.len();
     let mut i = i;
-    while i < n && is_blank(cs[i].1) {
+    while i < n && is_blank(chars[i].1) {
         i += 1;
     }
     i
 }
 
-/// The end index (into `cs`) of the maximal run of symbol characters
+/// The end index (into `chars`) of the maximal run of symbol characters
 /// starting at `i`.
-fn scan_word(cs: &[(usize, char)], i: usize, n: usize) -> usize {
+fn scan_word(chars: &[(usize, char)], i: usize) -> usize {
+    let n = chars.len();
     let mut i = i;
-    while i < n && is_symbol_char(cs[i].1) {
+    while i < n && is_symbol_char(chars[i].1) {
         i += 1;
     }
     i
@@ -176,44 +178,43 @@ fn op_kind(word: &str) -> TokenKind {
 fn scan_label_and_op<'a>(
     spans: &mut Vec<Span>,
     line: &'a str,
-    cs: &[(usize, char)],
+    chars: &[(usize, char)],
     i: usize,
-    n: usize,
     line_len: usize,
     label_eligible: bool,
 ) -> (usize, Option<&'a str>) {
-    let w1_end = scan_word(cs, i, n);
-    let w1_start_byte = cs[i].0;
-    let w1_end_byte = byte_at(cs, w1_end, line_len);
-    let w1 = &line[w1_start_byte..w1_end_byte];
+    let first_word_end = scan_word(chars, i);
+    let first_word_start_byte = chars[i].0;
+    let first_word_end_byte = byte_at(chars, first_word_end, line_len);
+    let first_word = &line[first_word_start_byte..first_word_end_byte];
 
-    if label_eligible && !is_keyword(w1) {
+    if label_eligible && !is_keyword(first_word) {
         spans.push(Span {
-            start: w1_start_byte,
-            end: w1_end_byte,
+            start: first_word_start_byte,
+            end: first_word_end_byte,
             kind: TokenKind::Label,
         });
-        let after_label = skip_blanks(cs, w1_end, n);
-        if after_label < n && is_symbol_char(cs[after_label].1) {
-            let w2_end = scan_word(cs, after_label, n);
-            let w2_start_byte = cs[after_label].0;
-            let w2_end_byte = byte_at(cs, w2_end, line_len);
-            let w2 = &line[w2_start_byte..w2_end_byte];
+        let after_label = skip_blanks(chars, first_word_end);
+        if after_label < chars.len() && is_symbol_char(chars[after_label].1) {
+            let op_word_end = scan_word(chars, after_label);
+            let op_word_start_byte = chars[after_label].0;
+            let op_word_end_byte = byte_at(chars, op_word_end, line_len);
+            let op_word = &line[op_word_start_byte..op_word_end_byte];
             spans.push(Span {
-                start: w2_start_byte,
-                end: w2_end_byte,
-                kind: op_kind(w2),
+                start: op_word_start_byte,
+                end: op_word_end_byte,
+                kind: op_kind(op_word),
             });
-            return (w2_end, Some(w2));
+            return (op_word_end, Some(op_word));
         }
         (after_label, None)
     } else {
         spans.push(Span {
-            start: w1_start_byte,
-            end: w1_end_byte,
-            kind: op_kind(w1),
+            start: first_word_start_byte,
+            end: first_word_end_byte,
+            kind: op_kind(first_word),
         });
-        (w1_end, Some(w1))
+        (first_word_end, Some(first_word))
     }
 }
 
@@ -226,28 +227,28 @@ fn scan_label_and_op<'a>(
 /// returns `i` unchanged, leaving the remark to the caller's own step.
 fn scan_expr(
     spans: &mut Vec<Span>,
-    cs: &[(usize, char)],
+    chars: &[(usize, char)],
     i: usize,
-    n: usize,
     line_len: usize,
     op_word: Option<&str>,
 ) -> usize {
-    if op_word == Some("ESPEC") || (i < n && cs[i].1 == '%') {
+    let n = chars.len();
+    if op_word == Some("ESPEC") || (i < n && chars[i].1 == '%') {
         return i;
     }
 
     let mut i = i;
     let mut paren_depth = 0u32;
     'expr: while i < n {
-        match cs[i].1 {
+        match chars[i].1 {
             ';' => break 'expr,
             '"' => {
-                let start_byte = cs[i].0;
+                let start_byte = chars[i].0;
                 i += 1;
                 let mut end = line_len;
                 while i < n {
-                    if cs[i].1 == '"' {
-                        end = byte_at(cs, i + 1, line_len);
+                    if chars[i].1 == '"' {
+                        end = byte_at(chars, i + 1, line_len);
                         i += 1;
                         break;
                     }
@@ -263,10 +264,10 @@ fn scan_expr(
                 // A character constant is quote, one character (possibly a
                 // quote itself), quote: always exactly three characters.
                 // 0.3.13's grammar has no backslash escape.
-                if i + 2 < n && cs[i + 2].1 == '\'' {
+                if i + 2 < n && chars[i + 2].1 == '\'' {
                     spans.push(Span {
-                        start: cs[i].0,
-                        end: byte_at(cs, i + 3, line_len),
+                        start: chars[i].0,
+                        end: byte_at(chars, i + 3, line_len),
                         kind: TokenKind::Char,
                     });
                     i += 3;
@@ -283,15 +284,15 @@ fn scan_expr(
                 i += 1;
             }
             '$' => {
-                let start_byte = cs[i].0;
+                let start_byte = chars[i].0;
                 let mut j = i + 1;
-                while j < n && cs[j].1.is_ascii_digit() {
+                while j < n && chars[j].1.is_ascii_digit() {
                     j += 1;
                 }
                 if j > i + 1 {
                     spans.push(Span {
                         start: start_byte,
-                        end: byte_at(cs, j, line_len),
+                        end: byte_at(chars, j, line_len),
                         kind: TokenKind::Register,
                     });
                     i = j;
@@ -300,12 +301,9 @@ fn scan_expr(
                 }
             }
             c if is_blank(c) && paren_depth == 0 => {
-                let prev_is_comma = i > 0 && cs[i - 1].1 == ',';
-                let mut k = i;
-                while k < n && is_blank(cs[k].1) {
-                    k += 1;
-                }
-                let next_is_comma = k < n && cs[k].1 == ',';
+                let prev_is_comma = i > 0 && chars[i - 1].1 == ',';
+                let k = skip_blanks(chars, i);
+                let next_is_comma = k < n && chars[k].1 == ',';
                 if prev_is_comma || next_is_comma {
                     i = k;
                 } else {
@@ -318,19 +316,14 @@ fn scan_expr(
     i
 }
 
-/// The remark starting at `i` (`i < n`): one opening with `%` is a comment
-/// to the end of the line, swallowing any `;`; otherwise it runs up to the
-/// next `;` (exclusive). Returns the index just past a consumed `;`, or `n`
-/// once nothing remains on the line.
-fn scan_remark(
-    spans: &mut Vec<Span>,
-    cs: &[(usize, char)],
-    i: usize,
-    n: usize,
-    line_len: usize,
-) -> usize {
-    let start = cs[i].0;
-    if cs[i].1 == '%' {
+/// The remark starting at `i` (`i < chars.len()`): one opening with `%` is a
+/// comment to the end of the line, swallowing any `;`; otherwise it runs up
+/// to the next `;` (exclusive). Returns the index just past a consumed `;`,
+/// or `chars.len()` once nothing remains on the line.
+fn scan_remark(spans: &mut Vec<Span>, chars: &[(usize, char)], i: usize, line_len: usize) -> usize {
+    let n = chars.len();
+    let start = chars[i].0;
+    if chars[i].1 == '%' {
         spans.push(Span {
             start,
             end: line_len,
@@ -339,12 +332,12 @@ fn scan_remark(
         return n;
     }
     let mut j = i;
-    while j < n && cs[j].1 != ';' {
+    while j < n && chars[j].1 != ';' {
         j += 1;
     }
     spans.push(Span {
         start,
-        end: byte_at(cs, j, line_len),
+        end: byte_at(chars, j, line_len),
         kind: TokenKind::Comment,
     });
     if j < n { j + 1 } else { n }
@@ -354,8 +347,8 @@ fn scan_remark(
 /// relative to `line` and always fall on `char` boundaries, disjoint and in
 /// order.
 pub fn classify(line: &str) -> Vec<Span> {
-    let cs: Vec<(usize, char)> = line.char_indices().collect();
-    let n = cs.len();
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let n = chars.len();
     let line_len = line.len();
     if n == 0 {
         return Vec::new();
@@ -363,7 +356,7 @@ pub fn classify(line: &str) -> Vec<Span> {
 
     // Whole-line comment: the line's own first character decides this once,
     // never re-checked per statement.
-    let first_char = cs[0].1;
+    let first_char = chars[0].1;
     if !(is_blank(first_char) || is_symbol_char(first_char)) {
         return vec![Span {
             start: 0,
@@ -381,43 +374,43 @@ pub fn classify(line: &str) -> Vec<Span> {
         // line (the first statement, undented) or directly after `;`
         // (every later statement, with or without blanks).
         let label_eligible = if first_statement {
-            !is_blank(cs[0].1)
+            !is_blank(chars[0].1)
         } else {
             true
         };
         first_statement = false;
 
-        i = skip_blanks(&cs, i, n);
+        i = skip_blanks(&chars, i);
         if i >= n {
             break;
         }
-        if cs[i].1 == ';' {
+        if chars[i].1 == ';' {
             i += 1;
             continue;
         }
 
         // A statement whose first non-blank character isn't a symbol start
         // is itself a remark.
-        if !is_symbol_char(cs[i].1) {
-            i = scan_remark(&mut spans, &cs, i, n, line_len);
+        if !is_symbol_char(chars[i].1) {
+            i = scan_remark(&mut spans, &chars, i, line_len);
             continue;
         }
 
         let (after_op, op_word) =
-            scan_label_and_op(&mut spans, line, &cs, i, n, line_len, label_eligible);
-        i = skip_blanks(&cs, after_op, n);
+            scan_label_and_op(&mut spans, line, &chars, i, line_len, label_eligible);
+        i = skip_blanks(&chars, after_op);
 
-        i = scan_expr(&mut spans, &cs, i, n, line_len, op_word);
-        i = skip_blanks(&cs, i, n);
+        i = scan_expr(&mut spans, &chars, i, line_len, op_word);
+        i = skip_blanks(&chars, i);
 
-        if i < n && cs[i].1 == ';' {
+        if i < n && chars[i].1 == ';' {
             i += 1;
             continue;
         }
         if i >= n {
             break;
         }
-        i = scan_remark(&mut spans, &cs, i, n, line_len);
+        i = scan_remark(&mut spans, &chars, i, line_len);
     }
 
     spans

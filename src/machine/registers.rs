@@ -287,8 +287,8 @@ mod tests {
         assert_eq!(indices, vec![253, 254, 255]);
     }
 
-    /// A `GREG` (raising `rG` above 32) plus a local write past index 32,
-    /// so `rL` grows past 32 too -- isolates the `i < rL` clause from the
+    /// A `GREG` plus a local write past index 32, so `rL` grows past 32 too
+    /// while staying below `rG` -- isolates the `i < rL` clause from the
     /// `i >= rG` clause.
     const GREG_AND_LOCAL_MMS: &str =
         "\tLOC\t#100\nG1\tGREG\t@\nMain\tSETL\t$40,7\n\tTRAP\t0,Halt,0\n";

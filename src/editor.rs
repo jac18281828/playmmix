@@ -482,8 +482,8 @@ mod tests {
             "Main' IS 3",
             "café\tSET\t$1,2 % non-ASCII",
             "",
-            // The rest of the highlight table this module's classify()
-            // implements.
+            // The rest of the highlight table `highlight::classify` covers
+            // (its own HIGHLIGHT_CASES).
             "Main\tSET\t$1,2 set it",
             "Main\tSETL\t$1,2 note % x; INCL $1,5",
             "Main\tSETL\t$1,2 % x; INCL $1,5",
@@ -501,6 +501,9 @@ mod tests {
             "\tBYTE\t\";\",1",
             "Main\tSET\t$1,7%4",
             "Main\tSETL\t$1,2 #zz; INCL $1,5",
+            "\tSWYM\t% note; INCL $1,5",
+            "Foo\t% entry; INCL $1,5",
+            "Main\t% entry point",
         ];
         for line in lines {
             assert_eq!(reconstruct(line), line, "line: {line:?}");
