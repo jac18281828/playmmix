@@ -243,8 +243,8 @@ Three markers, all driven by state `App` already holds or can diff at render:
 2. **Current instruction, memory:** the memory row containing the PC gets
    `mem-current` (same background as `gutter-current`), and within the row
    the 4-byte instruction span gets the accent color. Halted keeps the
-   marker on the instruction that halted -- a `TRAP` or the faulting
-   instruction: the last thing that ran stays visible.
+   marker on the instruction that halted — a `TRAP` or the faulting
+   instruction, not whatever the live PC now points at.
 3. **Changed since last pause:** registers, specials and memory bytes whose
    value differs from the previous paused render get a `changed` class
    (accent text, no background), cleared on the next advance. Diffing is a
