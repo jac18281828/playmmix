@@ -276,9 +276,11 @@ pub fn classify(line: &str) -> Vec<Span> {
         }
 
         // EXPR: the field after OP, styling only strings, character
-        // constants and registers. `ESPEC` takes no EXPR at all, so its
-        // statement's remaining text is a remark, not scanned here.
-        if op_word != Some("ESPEC") {
+        // constants and registers. `ESPEC` takes no EXPR at all, and a `%`
+        // where EXPR would otherwise start is an empty EXPR immediately
+        // followed by a remark -- either way nothing is scanned here, and
+        // the remark step below picks up at the same `i`.
+        if op_word != Some("ESPEC") && !(i < n && cs[i].1 == '%') {
             let mut paren_depth = 0u32;
             'expr: while i < n {
                 match cs[i].1 {
@@ -886,6 +888,39 @@ mod tests {
                 (TokenKind::Comment, "#zz"),
                 (TokenKind::Keyword, "INCL"),
                 (TokenKind::Register, "$1"),
+            ],
+            defines_main: true,
+            assembles: true,
+        },
+        // H21: a `%` where EXPR would start is an empty EXPR immediately
+        // followed by a remark, so the `;` and everything past it are dead
+        // text, not a second statement.
+        HighlightCase {
+            line: "\tSWYM\t% note; INCL $1,5",
+            spans: &[
+                (TokenKind::Keyword, "SWYM"),
+                (TokenKind::Comment, "% note; INCL $1,5"),
+            ],
+            defines_main: false,
+            assembles: true,
+        },
+        // H22
+        HighlightCase {
+            line: "Foo\t% entry; INCL $1,5",
+            spans: &[
+                (TokenKind::Label, "Foo"),
+                (TokenKind::Comment, "% entry; INCL $1,5"),
+            ],
+            defines_main: false,
+            assembles: true,
+        },
+        // H23: LABEL with no OP word at all -- the rest of the line is a
+        // remark from the very first character after the label.
+        HighlightCase {
+            line: "Main\t% entry point",
+            spans: &[
+                (TokenKind::Label, "Main"),
+                (TokenKind::Comment, "% entry point"),
             ],
             defines_main: true,
             assembles: true,
