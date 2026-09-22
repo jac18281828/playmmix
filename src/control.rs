@@ -1284,6 +1284,23 @@ mod tests {
     }
 
     #[test]
+    fn hello_world_mms_last_stdout_span_is_the_greeting_and_its_10_newline() {
+        // checksmix 0.3.13 retired every backslash escape; `Text`'s trailing
+        // `,10,0` is the newline `Fputs` prints, not an escape.
+        let mut control =
+            Control::new(crate::examples::HELLO_WORLD_MMS, "hello.mms").expect("assembles");
+        assert_eq!(control.run_chunk(1_000_000), StepOutcome::Halted);
+
+        let output = control.output();
+        let last_stdout = output
+            .iter()
+            .rev()
+            .find(|span| span.stream == OutputStream::Stdout)
+            .expect("a stdout span");
+        assert_eq!(last_stdout.text, "Hello world!\n");
+    }
+
+    #[test]
     fn session_tracks_whether_run_step_or_next_has_been_issued() {
         let mut control = Control::new(LOOP_MMS, "loop.mms").expect("assembles");
         assert!(!control.session(), "a fresh load must not report a session");

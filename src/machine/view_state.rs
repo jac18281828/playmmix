@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(
             chunked.machine().get_special(SpecialReg::RL),
             stepped.machine().get_special(SpecialReg::RL),
-            "$40 sits above rG, so neither path may grow rL"
+            "PUTI rL,0 leaves rL = 0 regardless of chunk granularity"
         );
 
         assert!(

@@ -11,10 +11,11 @@ pub(super) const TWO_GREG_MMS: &str =
 /// `SET $255,$0` writes a nonzero value into a register above the
 /// no-GREG collapse floor before `TRAP 0,Halt,0`.
 pub(super) const CALL_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,40\n\tSETL\t$2,2\n\tPUSHJ\t$0,AddFunc\n\tSET\t$255,$0\n\tTRAP\t0,Halt,0\nAddFunc\tADDU\t$0,$0,$1\n\tPOP\t1,0\n";
-/// No `GREG` at all, and the only register it touches is `$40` -- above
-/// `rG`'s default of 32, so `set_register` never grows `rL` and
-/// `register_included`'s `i < rL` clause can't keep `$40` visible on
-/// its own. `$40` goes nonzero and reverts within three instructions,
-/// far inside one `CHUNK_BUDGET`.
+/// `SETL $40,7` raises `rL` to 41 before writing it, so `$40` renders
+/// individually and goes sticky; `PUTI rL,0` then drops `rL` back to 0,
+/// which checksmix's `put_rl` zeroes `$40` for, marginal and unwritten
+/// again by the time `TRAP 0,Halt,0` halts. Isolates a register that
+/// renders mid-run and reverts by the end from one whose own write
+/// reverts it.
 pub(super) const REVERTING_GLOBAL_MMS: &str =
-    "\tLOC\t#100\nMain\tSETL\t$40,7\n\tSETL\t$40,0\n\tTRAP\t0,Halt,0\n";
+    "\tLOC\t#100\nMain\tSETL\t$40,7\n\tPUTI\trL,0\n\tTRAP\t0,Halt,0\n";

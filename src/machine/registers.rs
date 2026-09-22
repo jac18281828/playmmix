@@ -333,7 +333,7 @@ mod tests {
     use checksmix::{MMixAssembler, entry_point, start_program, write_image};
 
     use crate::machine::fixtures::{CALL_MMS, REVERTING_GLOBAL_MMS, TWO_GREG_MMS};
-    use crate::machine::pane::{collapsed_range_note, global_boundary_note};
+    use crate::machine::pane::global_boundary_note;
 
     /// Assemble `source` and load it, unexecuted -- the same shape
     /// `Control::assemble_and_load` uses, restated here so these tests
@@ -443,48 +443,6 @@ mod tests {
                 "${index} must render via i < rl"
             );
         }
-    }
-
-    /// A countdown loop with no `GREG` directive at all -- keeps
-    /// `initialize()`'s default `rG = 32`, the only case the collapse
-    /// applies to.
-    const NO_GREG_LOOP_MMS: &str =
-        "\tLOC\t#100\nMain\tSETL\t$1,5\nLoop\tSUBI\t$1,$1,1\n\tBNZ\t$1,Loop\n\tTRAP\t0,Halt,0\n";
-
-    #[test]
-    fn visible_registers_collapse_the_zero_valued_global_range() {
-        let (mmix, has_greg) = assemble(NO_GREG_LOOP_MMS, "loop.mms");
-        assert!(!has_greg, "no GREG directive: greg_inits must be empty");
-        assert_eq!(
-            mmix.get_special(SpecialReg::RG),
-            32,
-            "no GREG directive: rG stays at initialize()'s default"
-        );
-
-        let continuity = RegisterContinuity::new();
-        let rows = visible_registers(&mmix, &continuity, has_greg);
-        let collapsed: Vec<&RegisterRow> = rows
-            .iter()
-            .filter(|row| matches!(row, RegisterRow::ZeroGlobalRange { .. }))
-            .collect();
-        assert_eq!(
-            collapsed,
-            vec![&RegisterRow::ZeroGlobalRange {
-                start: 32,
-                end: 254
-            }],
-            "the whole $32..$254 range must collapse into one summary row"
-        );
-
-        // Deleting the collapse would instead produce one row per register
-        // in $32..$254 -- 223 individually, all zero before any register
-        // in that range is ever written. $255 always renders individually,
-        // whatever the collapse does, so it alone survives this count.
-        let individual_globals = rows
-            .iter()
-            .filter(|row| matches!(row, RegisterRow::Register { index, .. } if *index >= 32))
-            .count();
-        assert_eq!(individual_globals, 1);
     }
 
     /// `count` `GREG` directives, each initialized to zero, then an entry
@@ -612,15 +570,13 @@ mod tests {
         assert!(control.is_halted(), "the run must actually reach a halt");
         assert_eq!(
             control.machine().get_special(SpecialReg::RG),
-            32,
+            255,
             "no GREG directive: rG stays at initialize()'s default"
         );
 
         let value255 = control.machine().get_register(255);
         assert_ne!(value255, 0, "fixture must write a nonzero value into $255");
 
-        // Deleting the fix would collapse $255 into the global-range
-        // summary row, hiding its real value behind a false "(0)" label.
         let continuity = RegisterContinuity::new();
         let rows = visible_registers(
             control.machine(),
@@ -632,8 +588,7 @@ mod tests {
         });
         assert!(
             has_individual_255,
-            "$255's nonzero value must render individually, not be \
-             swallowed into the global-range collapse"
+            "$255's nonzero value must render individually"
         );
     }
 
@@ -742,20 +697,22 @@ mod tests {
         );
     }
 
-    /// No `GREG` at all -- the load-time state: `rL = 0`, `rG = 32`.
+    /// No `GREG` at all -- the load-time state: `rL = 0`, `rG = 255`
+    /// (`MMix::initialize`'s default under checksmix 0.3.13).
     const NO_GREG_HALT_MMS: &str = "\tLOC\t#100\nMain\tTRAP\t0,Halt,0\n";
 
     #[test]
-    fn visible_registers_hide_marginal_rows_at_a_fresh_load_and_collapse_the_globals() {
+    fn visible_registers_hide_every_marginal_row_at_a_fresh_load() {
         let (mmix, has_greg) = assemble(NO_GREG_HALT_MMS, "halt.mms");
         assert_eq!(mmix.get_special(SpecialReg::RL), 0);
-        assert_eq!(mmix.get_special(SpecialReg::RG), 32);
+        assert_eq!(mmix.get_special(SpecialReg::RG), 255);
 
         let continuity = RegisterContinuity::new();
         let rows = visible_registers(&mmix, &continuity, has_greg);
 
-        // $0-$31: rL = 0, every one marginal and unwritten -- no row.
-        for index in 0u8..32 {
+        // $0-$254: rL = 0 and rG = 255, every one marginal and unwritten --
+        // no row.
+        for index in 0u8..255 {
             assert!(
                 !rows.iter().any(|row| matches!(
                     row,
@@ -767,19 +724,8 @@ mod tests {
 
         let boundary_index = rows
             .iter()
-            .position(|row| matches!(row, RegisterRow::GlobalBoundary { rg: 32 }))
-            .expect("a GlobalBoundary { rg: 32 } row must precede the collapse");
-        assert!(
-            matches!(
-                rows.get(boundary_index + 1),
-                Some(RegisterRow::ZeroGlobalRange {
-                    start: 32,
-                    end: 254
-                })
-            ),
-            "the caption must immediately precede the $32-$254 collapse"
-        );
-        assert_eq!(collapsed_range_note(), "all 0");
+            .position(|row| matches!(row, RegisterRow::GlobalBoundary { rg: 255 }))
+            .expect("a GlobalBoundary { rg: 255 } row must precede $255");
 
         // `start_program`'s start state: $255 holds the entry address, not
         // zero -- an independent oracle, not a readback through `Control`,
@@ -789,18 +735,46 @@ mod tests {
         oracle.parse().expect("test program assembles");
         let entry = entry_point(&oracle);
 
-        let reg255 = rows
-            .iter()
-            .find(|row| matches!(row, RegisterRow::Register { index: 255, .. }))
-            .expect("$255 must always render, never fold into the collapse");
         assert!(matches!(
-            reg255,
-            RegisterRow::Register {
+            rows.get(boundary_index + 1),
+            Some(RegisterRow::Register {
+                index: 255,
                 value,
                 class: RegisterClass::Global,
-                ..
-            } if *value == entry
+            }) if *value == entry
         ));
+    }
+
+    #[test]
+    fn visible_registers_at_a_fresh_load_are_exactly_the_boundary_and_dollar_255() {
+        let (mmix, has_greg) = assemble(NO_GREG_HALT_MMS, "halt.mms");
+        assert_eq!(mmix.get_special(SpecialReg::RG), 255);
+        assert_eq!(mmix.get_special(SpecialReg::RL), 0);
+
+        let continuity = RegisterContinuity::new();
+        let rows = visible_registers(&mmix, &continuity, has_greg);
+        assert_eq!(rows.len(), 2, "rows: {rows:?}");
+        assert!(matches!(rows[0], RegisterRow::GlobalBoundary { rg: 255 }));
+        assert!(matches!(rows[1], RegisterRow::Register { index: 255, .. }));
+    }
+
+    #[test]
+    fn visible_specials_at_a_fresh_load_show_every_nonzero_start_state_special() {
+        // checksmix 0.3.13 starts rK, rT, rTT and rV nonzero; the specials
+        // list shows every nonzero special from the moment of load.
+        let (mmix, _) = assemble(NO_GREG_HALT_MMS, "halt.mms");
+        let continuity = SpecialContinuity::new();
+        let rows = visible_specials(&mmix, &continuity);
+
+        let value_of = |name: &str| {
+            rows.iter()
+                .find(|row| row.name == name)
+                .map(|row| row.value)
+        };
+        assert_eq!(value_of("rK"), Some(0xFFFF_FFFF_FFFF_FFFF));
+        assert_eq!(value_of("rT"), Some(0x8000_0005_0000_0000));
+        assert_eq!(value_of("rTT"), Some(0x8000_0006_0000_0000));
+        assert_eq!(value_of("rV"), Some(0x369C_2004_0000_0000));
     }
 
     #[test]
@@ -1082,18 +1056,18 @@ mod tests {
         );
     }
 
-    /// No `GREG` directive (`rG` stays 32), and the one write targets `$31`
-    /// -- the last local register below `rG` -- which raises `rL` to 32,
-    /// meeting `rG` and leaving the marginal range empty.
-    const RL_MEETS_RG_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$31,7\n\tTRAP\t0,Halt,0\n";
+    /// No `GREG` directive (`rG` stays 255), and the one write targets
+    /// `$254` -- the last local register below `rG` -- which raises `rL` to
+    /// 255, meeting `rG` and leaving the marginal range empty.
+    const RL_MEETS_RG_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$254,7\n\tTRAP\t0,Halt,0\n";
 
     #[test]
     fn visible_registers_render_no_marginal_row_when_rl_meets_rg() {
         let mut control =
             crate::control::Control::new(RL_MEETS_RG_MMS, "rl_meets_rg.mms").expect("assembles");
-        control.step(); // SETL $31,7 -- raises rL to 32, meeting rG
-        assert_eq!(control.machine().get_special(SpecialReg::RL), 32);
-        assert_eq!(control.machine().get_special(SpecialReg::RG), 32);
+        control.step(); // SETL $254,7 -- raises rL to 255, meeting rG
+        assert_eq!(control.machine().get_special(SpecialReg::RL), 255);
+        assert_eq!(control.machine().get_special(SpecialReg::RG), 255);
 
         let continuity = RegisterContinuity::new();
         let rows = visible_registers(
