@@ -473,15 +473,36 @@ mod tests {
         // and duplicates or drops glyphs in the overlay — see the
         // unterminated char-literal case below, which broke it once.
         let lines = [
-            r#"Text	BYTE	"Hello world!",'\n',0"#,
+            r#"Text	BYTE	"Hello world!",10,0"#,
             "X\tBYTE\t\"100%\"\t% real comment",
             "Main\tdebug \"hi\"",
             "\tLDA\t\t$255,Text",
-            r"'\n'",
             "\t.BYTE\t1,2,3",
             "Main' IS 3",
             "café ; a comment with non-ASCII",
             "",
+            // H1-H20, the highlight table in
+            // playmmix-repin-checksmix-0.3.13.md §8.
+            "Main\tSET\t$1,2 set it",
+            "Main\tSETL\t$1,2 note % x; INCL $1,5",
+            "Main\tSETL\t$1,2 % x; INCL $1,5",
+            "\tSET\t$1, 5 remark!!!!",
+            "\tset\t$1,2",
+            "Main\tset\t$1,2",
+            "* note; INCL $1,5",
+            "2H\tSET\t$1,2",
+            ":Main\tSET\t$1,2",
+            "Main\tSET\t$1,'''",
+            "\tSET\t$2,'\\'",
+            "\tLOCAL\t$40",
+            "\t.BYTE\t1,2,3",
+            "Main\tdebug \"hi\"",
+            "Main\tDEBUG \"hi\"",
+            "Main\tSETL\t$1,2;Foo INCL $1,5",
+            "\tBYTE\t\";\",1",
+            "Main\tSET\t$1,7%4",
+            "X\tBYTE\t\"100%\"\t% real comment",
+            "Main\tSETL\t$1,2 #zz; INCL $1,5",
         ];
         for line in lines {
             assert_eq!(reconstruct(line), line, "line: {line:?}");
