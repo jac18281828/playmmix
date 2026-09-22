@@ -166,9 +166,9 @@ row:
    unlisted marginal hides nothing. The rule governs, not the register's
    class: a nonzero marginal reachable only through a raw `rL`/`rG` restore
    (`UNSAVE`) still renders via `value != 0`.
-2. **Globals:** every `$i >= rG` renders. The no-`GREG` collapse row
-   (`$32–$254  all 0`) survives for the untouched middle, and covers at most
-   `$32..=$254`; `$255` always renders individually.
+2. **Globals:** every `$i >= rG` renders individually. A program with no
+   `GREG` directive starts at `rG = 255`, so a fresh load has exactly one
+   global, `$255`.
 3. **Sticky:** any register observed rendering individually keeps its row for
    the life of the load, whatever its value does later — a register a `POP`
    or a `PUT rL`/`PUT rG` zeroes back to marginal stays listed, dimmed by the
@@ -185,10 +185,9 @@ row:
    chunked execution — sampling finer would trade away the responsiveness
    chunking exists for — not a defect in the rule.
 4. **Global caption:** one `global · rG=N` row (U+00B7 middle dot) sits
-   immediately before the first row — an individual register or the
-   collapse — at or above `rG`. It is a fact of the visible set, not a
-   per-row tag: `rL` stays visible among the pinned special registers,
-   teaching the same boundary from the other side.
+   immediately before the first row at or above `rG`. It is a fact of the
+   visible set, not a per-row tag: `rL` stays visible among the pinned
+   special registers, teaching the same boundary from the other side.
 
 A row never moves once shown; new rows insert in index order. General and
 special registers share one row format: name, then hex, then the decimal in
@@ -211,7 +210,8 @@ name (4ch, right-aligned) and hex (18ch) let a value update in place without
 reflow; the decimal takes its natural width, left-aligned, rather than
 reserving space for a value it isn't showing. Special-register rows are the
 six pinned ones (`rA rG rL rO rS rJ`) first, then any other nonzero special,
-sticky under the same rule.
+sticky under the same rule. A fresh load already shows `rK`, `rT`, `rTT` and
+`rV`: checksmix starts each of them nonzero.
 
 A row wider than its pane scrolls inside that pane (`.registers-scroll`),
 never the page — the owner's choice. At the pane's font a decimal cell fits
@@ -243,7 +243,8 @@ Three markers, all driven by state `App` already holds or can diff at render:
 2. **Current instruction, memory:** the memory row containing the PC gets
    `mem-current` (same background as `gutter-current`), and within the row
    the 4-byte instruction span gets the accent color. Halted keeps the
-   marker on the halting TRAP: the last thing that ran stays visible.
+   marker on the instruction that halted -- a `TRAP` or the faulting
+   instruction: the last thing that ran stays visible.
 3. **Changed since last pause:** registers, specials and memory bytes whose
    value differs from the previous paused render get a `changed` class
    (accent text, no background), cleared on the next advance. Diffing is a

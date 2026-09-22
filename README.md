@@ -121,6 +121,9 @@ and TRAP handling all live there. playmmix calls only its public API
 (`MMixAssembler`, `MMix`) and builds the editor, the run/step controls and
 the machine-pane rendering around it.
 
+playmmix requires checksmix 0.3.13 or later and reads MMIXAL exactly as that
+release does; see checksmix's own `CHANGELOG.md` for the language rules.
+
 Want MMIX outside a browser — a real debugger, `.mmo` object files,
 gdb-style stepping from a shell? [Get checksmix
 here](https://github.com/jac18281828/checksmix).
