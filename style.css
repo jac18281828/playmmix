@@ -809,19 +809,6 @@ main {
     color: #888;
 }
 
-.register-collapsed {
-    color: #666;
-    font-style: italic;
-}
-
-/* The collapsed range label ("$32-$254") can run to 8+ characters, well past
-   .reg-name's 4ch width sized for a single register ("$255"). Auto-width
-   here so the label reserves its real space instead of overflowing into
-   .reg-note's box and rendering on top of it. */
-.register-collapsed .reg-name {
-    width: auto;
-}
-
 /* The global · rG=N caption: smaller and more muted than a register row --
    teaching the rL/rG split once, in the pane, rather than per row. */
 .register-boundary {

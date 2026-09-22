@@ -1353,8 +1353,8 @@ mod tests {
             changed_after_step.contains(&1),
             "the step must flag $1 as changed: {changed_after_step:?}"
         );
-        // `SETL $1,7` also grows `rL` (from `$1 < rG`'s default of 32), so
-        // this fixture exercises the specials side of the diff too.
+        // `SETL $1,7` also grows `rL` (from `$1 < rG`'s default of 255),
+        // so this fixture exercises the specials side of the diff too.
         let changed_specials_after_step = view_state.changed_specials().clone();
         assert!(
             changed_specials_after_step.contains("rL"),
@@ -1449,8 +1449,8 @@ mod tests {
             changed_registers_before.contains(&1),
             "the step must flag $1 as changed: {changed_registers_before:?}"
         );
-        // `SETL $1,7` also grows `rL` (from `$1 < rG`'s default of 32), so
-        // this fixture exercises the specials side of the diff too.
+        // `SETL $1,7` also grows `rL` (from `$1 < rG`'s default of 255),
+        // so this fixture exercises the specials side of the diff too.
         let changed_specials_before = view_state.changed_specials().clone();
         assert!(
             changed_specials_before.contains("rL"),

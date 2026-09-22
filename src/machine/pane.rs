@@ -13,9 +13,10 @@ pub struct MachinePaneProps {
     pub specials: Vec<SpecialRegisterRow>,
     pub memory: Vec<MemoryRow>,
     pub pc: u64,
-    /// "Where you are": `get_pc()` while running/paused, `get_pc() - 4`
-    /// once halted -- see `Control::marker_pc`. Drives the memory pane's
-    /// current-row and current-instruction highlights.
+    /// "Where you are": `get_pc()` while running/paused, the address of the
+    /// instruction that halted once halted -- see `Control::marker_pc`.
+    /// Drives the memory pane's current-row and current-instruction
+    /// highlights.
     pub marker_pc: u64,
     /// The exit code from `TRAP 0,Halt,0`, meaningful only once the
     /// machine has halted.
@@ -69,29 +70,9 @@ pub fn machine_pane(props: &MachinePaneProps) -> Html {
     }
 }
 
-/// A collapsed range's name cell: `$32-$254` (en-dash) for a real range,
-/// plain `$41` when the range is one register, where the dash form would
-/// read as a typo. Plain and `String`-returning so it is testable without
-/// rendering `Html`.
-fn collapsed_range_label(start: u8, end: u8) -> String {
-    if start == end {
-        format!("${start}")
-    } else {
-        format!("${start}\u{2013}${end}")
-    }
-}
-
-/// A collapsed range's note cell: `all 0` -- every register the collapse
-/// ever folds in is both global (`registers::register_collapses`'s gate)
-/// and zero (the same gate's `value == 0` clause). Plain and
-/// `String`-returning, as [`collapsed_range_label`] is for the name cell.
-pub(super) fn collapsed_range_note() -> String {
-    "all 0".to_string()
-}
-
 /// The `global · rG={rg}` caption cell, per `docs/layout-spec.md`'s
-/// Registers section. Plain and `String`-returning, as
-/// [`collapsed_range_note`] is for the collapse row's note cell.
+/// Registers section. Plain and `String`-returning so it is testable
+/// without rendering `Html`.
 pub(super) fn global_boundary_note(rg: u64) -> String {
     format!("global \u{b7} rG={rg}")
 }
@@ -192,14 +173,6 @@ fn render_register_row(row: &RegisterRow, changed: &BTreeSet<u8>) -> Html {
                     <span class="reg-name">{ name_text }</span>
                     <span class={hex_class}>{ hex_text }</span>
                     <span class={dec_class} title={dec_title}>{ dec_text }</span>
-                </div>
-            }
-        }
-        RegisterRow::ZeroGlobalRange { start, end } => {
-            html! {
-                <div class="register-row register-collapsed">
-                    <span class="reg-name">{ collapsed_range_label(*start, *end) }</span>
-                    <span class="reg-note">{ collapsed_range_note() }</span>
                 </div>
             }
         }
@@ -328,12 +301,6 @@ mod tests {
                  this register's tooltip with no compile error"
             );
         }
-    }
-
-    #[test]
-    fn a_singleton_collapse_range_reads_as_one_register_not_a_range() {
-        assert_eq!(collapsed_range_label(41, 41), "$41");
-        assert_eq!(collapsed_range_label(32, 254), "$32\u{2013}$254");
     }
 
     #[test]

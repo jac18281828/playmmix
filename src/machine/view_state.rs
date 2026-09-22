@@ -10,26 +10,17 @@ use crate::machine::registers::{
     visible_specials,
 };
 
-/// Every individually-rendered or collapsed index's value across `rows`. An
-/// index absent from the result is not itself unknown: per the visibility
-/// rules governing what `rows` holds, an index that renders neither
-/// individually nor via the collapse necessarily has value `0` -- the
-/// 3-clause predicate would have rendered it individually otherwise. Callers
-/// comparing two snapshots (e.g. a diff) must treat an absent index as `0`,
-/// not as unknown.
+/// Every individually-rendered index's value across `rows`. An index absent
+/// from the result is not itself unknown: per the visibility rules governing
+/// what `rows` holds, an index that renders neither individually necessarily
+/// has value `0` -- the 3-clause predicate would have rendered it
+/// individually otherwise. Callers comparing two snapshots (e.g. a diff)
+/// must treat an absent index as `0`, not as unknown.
 fn register_value_map(rows: &[RegisterRow]) -> BTreeMap<u8, u64> {
     let mut map = BTreeMap::new();
     for row in rows {
-        match row {
-            RegisterRow::Register { index, value, .. } => {
-                map.insert(*index, *value);
-            }
-            RegisterRow::ZeroGlobalRange { start, end } => {
-                for i in *start..=*end {
-                    map.insert(i, 0);
-                }
-            }
-            RegisterRow::GlobalBoundary { .. } => {}
+        if let RegisterRow::Register { index, value, .. } = row {
+            map.insert(*index, *value);
         }
     }
     map
@@ -111,8 +102,7 @@ pub fn diff_memory(prev: &[MemoryRow], curr: &[MemoryRow]) -> BTreeSet<u64> {
 /// Plain and `Control`-driven rather than Yew-coupled -- the same
 /// extraction `Control` itself is, for the same reason (`AGENTS.md`'s rule
 /// that logic not needing browser APIs stays host-testable). One `&Control`
-/// supplies everything these methods need: `machine()`, `labels()`, and
-/// `has_greg_allocations()`.
+/// supplies everything these methods need: `machine()` and `labels()`.
 #[derive(Debug, Default)]
 pub struct ViewState {
     register_continuity: RegisterContinuity,
@@ -140,8 +130,7 @@ impl ViewState {
     /// at every pause boundary and every chunk yield, which is what
     /// `docs/layout-spec.md`'s Sticky rule documents.
     pub fn observe(&mut self, control: &Control) {
-        self.register_continuity
-            .observe(control.machine(), control.has_greg_allocations());
+        self.register_continuity.observe(control.machine());
         self.special_continuity.observe(control.machine());
     }
 
@@ -154,11 +143,7 @@ impl ViewState {
         control: &Control,
     ) -> (Vec<RegisterRow>, Vec<SpecialRegisterRow>, Vec<MemoryRow>) {
         let mmix = control.machine();
-        let registers = visible_registers(
-            mmix,
-            &self.register_continuity,
-            control.has_greg_allocations(),
-        );
+        let registers = visible_registers(mmix, &self.register_continuity);
         let specials = visible_specials(mmix, &self.special_continuity);
         let memory = memory_rows(&memory_runs(mmix, control.labels()));
         (registers, specials, memory)
@@ -522,10 +507,7 @@ mod tests {
                 value: 9,
                 class: RegisterClass::Local,
             },
-            RegisterRow::ZeroGlobalRange {
-                start: 32,
-                end: 254,
-            },
+            RegisterRow::GlobalBoundary { rg: 255 },
         ];
         let curr = vec![
             RegisterRow::Register {
@@ -538,8 +520,9 @@ mod tests {
                 value: 10,
                 class: RegisterClass::Local,
             }, // changed
-            // Newly individually visible (moved out of the collapse), but
-            // still zero -- must not be flagged.
+            RegisterRow::GlobalBoundary { rg: 255 },
+            // Newly individually visible, but still zero -- must not be
+            // flagged.
             RegisterRow::Register {
                 index: 40,
                 value: 0,

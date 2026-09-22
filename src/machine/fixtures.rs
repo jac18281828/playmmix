@@ -7,9 +7,8 @@
 /// because clause 3 (`i >= rG`) marks them global regardless of value.
 pub(super) const TWO_GREG_MMS: &str =
     "\tLOC\t#100\nG1\tGREG\t0\nG2\tGREG\t@\nMain\tTRAP\t0,Halt,0\n";
-/// Same fixture as `control.rs`'s `CALL_MMS`: no `GREG` at all, but
-/// `SET $255,$0` writes a nonzero value into a register above the
-/// no-GREG collapse floor before `TRAP 0,Halt,0`.
+/// Same fixture as `control.rs`'s `CALL_MMS`: no `GREG` at all; `SET
+/// $255,$0` writes a nonzero value into `$255` before `TRAP 0,Halt,0`.
 pub(super) const CALL_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,40\n\tSETL\t$2,2\n\tPUSHJ\t$0,AddFunc\n\tSET\t$255,$0\n\tTRAP\t0,Halt,0\nAddFunc\tADDU\t$0,$0,$1\n\tPOP\t1,0\n";
 /// `SETL $40,7` raises `rL` to 41 before writing it, so `$40` renders
 /// individually and goes sticky; `PUTI rL,0` then drops `rL` back to 0,
