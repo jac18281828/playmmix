@@ -2140,7 +2140,10 @@ mod tests {
     }
 
     #[test]
-    fn load_shared_drops_breakpoints_and_loads_the_shared_program() {
+    fn load_shared_loads_the_shared_programs_own_machine() {
+        // A fixture that does not already hold `DEFAULT_MMS`, so the
+        // assertions below prove Share actually replaces the machine
+        // rather than merely finding it already in that shape.
         let mut control = Control::new(DEFAULT_MMS, "share-load-fixture.mms").expect("assembles");
         assert!(
             control.toggle_breakpoint(5),
@@ -2169,22 +2172,45 @@ mod tests {
         );
         assert!(error.is_none());
         assert!(error_line.is_none());
-        let fresh =
-            Control::new(RESTART_STRAIGHT_LINE_MMS, "share-load-compare.mms").expect("assembles");
-        assert_eq!(control.get_pc(), fresh.get_pc());
+        // Prove the loaded machine is the shared program's own, not
+        // `DEFAULT_MMS`'s: stepping runs `SETL $1,1`, which only this
+        // fixture's own entry point contains.
+        assert_eq!(control.step(), StepOutcome::Advanced);
+        assert_eq!(
+            control.machine().get_register(1),
+            1,
+            "the machine must be the shared program's own fresh load"
+        );
     }
 
     #[test]
     fn load_shared_that_fails_to_assemble_falls_back_to_default_mms_with_its_error_set() {
+        // A fixture that does not already hold `DEFAULT_MMS`, with a
+        // breakpoint set and one step taken, so a register holds a nonzero
+        // value and shows as changed -- proving the fallback below actually
+        // replaces the machine and resets the view state, rather than
+        // merely finding them already in that shape.
         const BOGUS_MMS: &str = "\tLOC\t#100\nMain\tBOGUS\t$1,1\n";
-        let mut control = Control::new(DEFAULT_MMS, "share-bad-fixture.mms").expect("assembles");
-        let default_pc = control.get_pc();
+        let mut control =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "share-bad-fixture.mms").expect("assembles");
+        assert!(
+            control.toggle_breakpoint(3),
+            "line 3 has an address in this fixture"
+        );
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        assert_eq!(control.step(), StepOutcome::Advanced); // SETL $1,1
+        view_state.observe(&control);
+        view_state.record_pause_boundary(&control);
+        assert!(
+            view_state.changed_registers().contains(&1),
+            "fixture assumption: the step must flag $1 changed"
+        );
+
         let mut chunk_timeout = None;
         let mut debounce_timeout = None;
         let mut error = None;
         let mut error_line = None;
-        let mut view_state = ViewState::new();
-        view_state.reset(&control);
 
         load_shared(
             &mut chunk_timeout,
@@ -2201,9 +2227,22 @@ mod tests {
             "the shared program's own error must surface"
         );
         assert_eq!(
-            control.get_pc(),
-            default_pc,
-            "the machine must fall back to DEFAULT_MMS's own load"
+            error_line,
+            Some(2),
+            "error_line must name BOGUS_MMS's own bad line"
+        );
+        assert!(
+            control.breakpoint_lines().is_empty(),
+            "a failed shared load must still start with no breakpoints from the program it replaced"
+        );
+        assert_eq!(
+            control.machine().get_register(1),
+            0,
+            "the machine must fall back to DEFAULT_MMS's own fresh load, not the prior program's $1==1"
+        );
+        assert!(
+            view_state.changed_registers().is_empty(),
+            "the fallback must reset the view state, dropping the prior program's changed marks"
         );
     }
 }
