@@ -2,10 +2,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gloo_timers::callback::Timeout;
+use js_sys::Promise;
 use log::info;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{BeforeUnloadEvent, Event, MouseEvent};
+use web_sys::{BeforeUnloadEvent, Event, MouseEvent, ShareData};
+use yew::html::Scope;
 use yew::{Callback, Component, Context, Html, NodeRef, Renderer, html};
 
 mod autosave;
@@ -218,7 +220,7 @@ type HashchangeHandler = Closure<dyn FnMut(Event)>;
 /// fragment and reloads nothing, so the page's own hash-change event is the
 /// only signal such a paste gives. Returns the `Closure` backing the
 /// handler; the caller must keep it alive (see [`HashchangeHandler`]).
-fn install_hashchange_handler(link: yew::html::Scope<App>) -> HashchangeHandler {
+fn install_hashchange_handler(link: Scope<App>) -> HashchangeHandler {
     let handler = Closure::wrap(Box::new(move |_event: Event| {
         link.send_message(Msg::CheckSharedLink);
     }) as Box<dyn FnMut(Event)>);
@@ -473,8 +475,8 @@ fn has_property(object: &impl AsRef<JsValue>, name: &str) -> bool {
 /// called through `js_sys::Reflect` since it takes two plain values here,
 /// not the typed closures `Promise::then2` expects.
 fn watch_share_settlement(
-    link: yew::html::Scope<App>,
-    promise: js_sys::Promise,
+    link: Scope<App>,
+    promise: Promise,
     on_resolve: &'static str,
     on_reject: impl Fn(&str) -> Option<&'static str> + 'static,
 ) {
@@ -505,7 +507,7 @@ fn watch_share_settlement(
 /// grants `share`/`clipboard` only inside the user gesture, which a
 /// message round-tripped through Yew's update queue would already have
 /// left. Reports the settled status back through `link`.
-fn share_program(link: yew::html::Scope<App>, source: &str) {
+fn share_program(link: Scope<App>, source: &str) {
     const COULDNT_SHARE: &str = "Couldn't share the link";
     const COULDNT_COPY: &str = "Couldn't copy the link";
 
@@ -517,7 +519,7 @@ fn share_program(link: yew::html::Scope<App>, source: &str) {
     let url = share::share_url(&page, source);
 
     if has_property(&navigator, "share") {
-        let data = web_sys::ShareData::new();
+        let data = ShareData::new();
         data.set_url(&url);
         data.set_title("playmmix program");
         let promise = navigator.share_with_data(&data);
