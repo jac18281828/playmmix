@@ -54,8 +54,8 @@ right is the machine. CSS grid with named areas on `<main>`:
 - Share sits after New: a plain, always-enabled button that puts the
   editor's program into a link and shares or copies it. Same rule as New,
   for the same reason -- sharing never depends on a paused machine either.
-- The header also carries the status readout (§1.4), a short echo of the
-  last action taken; the diagram above drops it for width.
+- The header also carries the run-state label and the status message, the
+  last action's result; the diagram above drops both for width.
 - `grid-template-columns: minmax(0, 1fr) minmax(38rem, 42rem)` — the machine
   column is sized by its content (fixed-width rows, below); the editor takes
   the rest.
