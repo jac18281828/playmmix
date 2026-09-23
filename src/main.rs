@@ -2405,8 +2405,8 @@ mod tests {
     }
 
     /// A fresh `Control` loaded from `source`, paired with a `ViewState`
-    /// seeded from it -- the repeated setup the `first_chunk_outcome` tests
-    /// below start from.
+    /// seeded from it -- the repeated setup every `execution_stops` test in
+    /// this module starts from.
     fn fresh_control_and_view_state(source: &str, filename: &str) -> (Control, ViewState) {
         let control = Control::new(source, filename).expect("assembles");
         let mut view_state = ViewState::new();
