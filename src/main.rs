@@ -52,17 +52,16 @@ const SOURCE_DEBOUNCE_MS: u32 = 400;
 /// says the editor holds a program distinct from the minimal skeleton.
 const NEW_CONFIRM_MESSAGE: &str = "Replace your program with the minimal skeleton?";
 
-/// A shared link's replace-confirmation prompt (share-link decision 4),
-/// exact per the owner's settled text -- shown only when
+/// A shared link's replace-confirmation prompt, shown only when
 /// `autosave::confirm_needed` says loading the shared program would
 /// replace different work.
 const SHARE_LOAD_CONFIRM_MESSAGE: &str = "Replace your program with the shared one?";
 
-/// A shared program's status once loaded (decision 5).
+/// A shared program's status once loaded.
 const SHARE_LOADED_STATUS: &str = "Loaded shared program";
 
-/// An unreadable share link's status (decision 7): the editor and saved
-/// work stay as they were.
+/// An unreadable share link's status: the editor and saved work stay as
+/// they were.
 const SHARE_UNREADABLE_STATUS: &str = "The shared link could not be read";
 
 /// The status readout's text for a chunked Run, Continue, or Next's
@@ -357,10 +356,10 @@ fn confirm_new(current: &str, replacement: &str) -> bool {
 }
 
 /// What a `hashchange`, or the check scheduled after the first paint, does
-/// with a share link (decisions 3, 4, 6 and 7) -- computed by
-/// `decide_shared_link`, a plain function so a host test drives every
-/// branch directly. `Msg::CheckSharedLink` turns each variant into
-/// `window.confirm`, the load itself, and the fragment strip.
+/// with a share link -- computed by `decide_shared_link`, a plain function
+/// so a host test drives every branch directly. `Msg::CheckSharedLink`
+/// turns each variant into `window.confirm`, the load itself, and the
+/// fragment strip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SharedLinkDecision {
     /// No `share::FRAGMENT_PREFIX` fragment at all: do nothing.
@@ -373,11 +372,10 @@ enum SharedLinkDecision {
     Load { source: String, ask: bool },
 }
 
-/// Decisions 3, 4, 6 and 7's whole triage: given `hash`
-/// (`Location::hash()`'s value) and the editor's current text, what to do
-/// next. `share::program_from_hash` alone can't distinguish a fragment to
-/// ignore from an unreadable link -- both read `None` -- so the prefix is
-/// checked here first.
+/// The whole hash-triage: given `hash` (`Location::hash()`'s value) and the
+/// editor's current text, what to do next. `share::program_from_hash`
+/// alone can't distinguish a fragment to ignore from an unreadable link --
+/// both read `None` -- so the prefix is checked here first.
 fn decide_shared_link(hash: &str, current: &str) -> SharedLinkDecision {
     if !hash.starts_with(share::FRAGMENT_PREFIX) {
         return SharedLinkDecision::Ignore;
@@ -391,15 +389,14 @@ fn decide_shared_link(hash: &str, current: &str) -> SharedLinkDecision {
     }
 }
 
-/// A shared program's load (decision 5), testable without a live
-/// `Context`: `start_over` (New) delegates here with `DEFAULT_MMS`. Builds
-/// a fresh `Control` from `shared` -- like New, so no breakpoint from the
-/// replaced program carries over -- and, on a parse error, falls back to
-/// `DEFAULT_MMS`'s own machine, showing `shared`'s error exactly as a
-/// restored program shows one (autosave's decision 3, `restore_source`).
-/// The caller assigns `shared` as the editor's new text and saves it;
-/// `shared` isn't returned here since it's already the caller's own,
-/// owned string.
+/// A shared program's load, testable without a live `Context`: `start_over`
+/// (New) delegates here with `DEFAULT_MMS`. Builds a fresh `Control` from
+/// `shared` -- like New, so no breakpoint from the replaced program
+/// carries over -- and, on a parse error, falls back to `DEFAULT_MMS`'s own
+/// machine, showing `shared`'s error exactly as a restored program shows
+/// one (`restore_source`). The caller assigns `shared` as the editor's new
+/// text and saves it; `shared` isn't returned here since it's already the
+/// caller's own, owned string.
 fn load_shared(
     chunk_timeout: &mut Option<Timeout>,
     debounce_timeout: &mut Option<Timeout>,
@@ -427,9 +424,9 @@ fn load_shared(
 }
 
 /// The page's own URL with no fragment: `origin + pathname + search`. The
-/// one page identity a stripped share link (decision 6) and a link Share
-/// builds (decision 8) must agree on. `None` on any failure to read
-/// `Location`'s parts -- both callers treat that as nothing to do.
+/// one page identity a stripped share link and a link Share builds must
+/// agree on. `None` on any failure to read `Location`'s parts -- both
+/// callers treat that as nothing to do.
 fn page_url() -> Option<String> {
     let window = web_sys::window()?;
     let location = window.location();
@@ -439,11 +436,11 @@ fn page_url() -> Option<String> {
     Some(format!("{origin}{pathname}{search}"))
 }
 
-/// Replaces the current URL with the same URL minus its fragment (decision
-/// 6): once a share link is handled -- loaded, or found unreadable --
-/// autosave already owns the program, and a reload must not load the same
-/// link again. Best-effort: any failure leaves the fragment in the address
-/// bar, no worse off than before this ran.
+/// Replaces the current URL with the same URL minus its fragment: once a
+/// share link is handled -- loaded, or found unreadable -- autosave
+/// already owns the program, and a reload must not load the same link
+/// again. Best-effort: any failure leaves the fragment in the address bar,
+/// no worse off than before this ran.
 fn strip_fragment() {
     let Some(window) = web_sys::window() else {
         return;
@@ -464,16 +461,16 @@ fn has_property(object: &impl AsRef<JsValue>, name: &str) -> bool {
     js_sys::Reflect::has(object.as_ref(), &JsValue::from_str(name)).unwrap_or(false)
 }
 
-/// Attaches `promise`'s settlement to `Msg::ShareSettled` (decision 8):
-/// `on_resolve` on success. On rejection, reads the error's `name`
-/// (`js_sys::Reflect::get`) and asks `on_reject` for the status to show, or
-/// `None` to leave the status unchanged (an `AbortError` -- the user
-/// dismissed the share sheet). Each closure is one-shot and converted
-/// straight into the `JsValue` `.then` takes (`Closure::once_into_js`), so
-/// the closure that fires is freed on invocation, with no separate
-/// `Closure` handle to leak or manage; `.then` itself is fetched and
-/// called through `js_sys::Reflect` since it takes two plain values here,
-/// not the typed closures `Promise::then2` expects.
+/// Attaches `promise`'s settlement to `Msg::ShareSettled`: `on_resolve` on
+/// success. On rejection, reads the error's `name` (`js_sys::Reflect::get`)
+/// and asks `on_reject` for the status to show, or `None` to leave the
+/// status unchanged (an `AbortError` -- the user dismissed the share
+/// sheet). Each closure is one-shot and converted straight into the
+/// `JsValue` `.then` takes (`Closure::once_into_js`), so the closure that
+/// fires is freed on invocation, with no separate `Closure` handle to
+/// leak or manage; `.then` itself is fetched and called through
+/// `js_sys::Reflect` since it takes two plain values here, not the typed
+/// closures `Promise::then2` expects.
 fn watch_share_settlement(
     link: Scope<App>,
     promise: Promise,
@@ -501,8 +498,8 @@ fn watch_share_settlement(
     }
 }
 
-/// The Share button's onclick core (decision 8): builds the link from
-/// `source` and the current page, then shares or copies it. Runs directly
+/// The Share button's onclick core: builds the link from `source` and the
+/// current page, then shares or copies it. Runs directly
 /// in the click handler, not through a dispatched `Msg` first -- Safari
 /// grants `share`/`clipboard` only inside the user gesture, which a
 /// message round-tripped through Yew's update queue would already have
@@ -704,13 +701,12 @@ pub enum Msg {
     /// first when the editor holds a program that differs from the
     /// skeleton (`autosave::confirm_needed`).
     New,
-    /// Checks the URL fragment for a shared program (decisions 3, 4, 6 and
-    /// 7): sent once after the first paint and on every `hashchange`, since
-    /// pasting a link into an open tab changes only the fragment and
-    /// reloads nothing.
+    /// Checks the URL fragment for a shared program: sent once after the
+    /// first paint and on every `hashchange`, since pasting a link into an
+    /// open tab changes only the fragment and reloads nothing.
     CheckSharedLink,
-    /// The Share button's `navigator.share`/clipboard call has settled
-    /// (decision 8); carries the status text to show.
+    /// The Share button's `navigator.share`/clipboard call has settled;
+    /// carries the status text to show.
     ShareSettled(String),
     /// One chunk boundary: reschedule if the run isn't finished, or if an
     /// `Interrupt` landed while this tick was scheduled, do nothing.
@@ -1276,7 +1272,7 @@ impl Component for App {
         // Runs `share_program` directly, not through a dispatched `Msg`:
         // Safari grants `share`/`clipboard` only inside the click's own
         // gesture, which a round trip through Yew's update queue would
-        // already have left (decision 8).
+        // already have left.
         let on_share = {
             let link = ctx.link().clone();
             let source = self.source.clone();
