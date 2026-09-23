@@ -466,9 +466,12 @@ fn has_property(object: &impl AsRef<JsValue>, name: &str) -> bool {
 /// `on_resolve` on success. On rejection, reads the error's `name`
 /// (`js_sys::Reflect::get`) and asks `on_reject` for the status to show, or
 /// `None` to leave the status unchanged (an `AbortError` -- the user
-/// dismissed the share sheet). One-shot and leaked (`Closure::once`,
-/// `forget`): nothing here outlives the single settlement to hold the
-/// closures for.
+/// dismissed the share sheet). Each closure is one-shot and converted
+/// straight into the `JsValue` `.then` takes (`Closure::once_into_js`), so
+/// the closure that fires is freed on invocation, with no separate
+/// `Closure` handle to leak or manage; `.then` itself is fetched and
+/// called through `js_sys::Reflect` since it takes two plain values here,
+/// not the typed closures `Promise::then2` expects.
 fn watch_share_settlement(
     link: yew::html::Scope<App>,
     promise: js_sys::Promise,
@@ -476,10 +479,10 @@ fn watch_share_settlement(
     on_reject: impl Fn(&str) -> Option<&'static str> + 'static,
 ) {
     let resolve_link = link.clone();
-    let resolve = Closure::once(move |_value: JsValue| {
+    let resolve = Closure::once_into_js(move |_value: JsValue| {
         resolve_link.send_message(Msg::ShareSettled(on_resolve.to_string()));
     });
-    let reject = Closure::once(move |value: JsValue| {
+    let reject = Closure::once_into_js(move |value: JsValue| {
         let name = js_sys::Reflect::get(&value, &JsValue::from_str("name"))
             .ok()
             .and_then(|name| name.as_string())
@@ -488,9 +491,12 @@ fn watch_share_settlement(
             link.send_message(Msg::ShareSettled(status.to_string()));
         }
     });
-    let _ = promise.then2(&resolve, &reject);
-    resolve.forget();
-    reject.forget();
+    let then = js_sys::Reflect::get(promise.as_ref(), &JsValue::from_str("then"))
+        .ok()
+        .and_then(|value| value.dyn_into::<js_sys::Function>().ok());
+    if let Some(then) = then {
+        let _ = then.call2(promise.as_ref(), &resolve, &reject);
+    }
 }
 
 /// The Share button's onclick core (decision 8): builds the link from
