@@ -105,11 +105,13 @@ fn restarted_status(outcome: StepOutcome, restart_signal: bool) -> String {
 /// `restart_signal` composes onto the status (`restarted_status`) only
 /// once the outcome is terminal, never a `BudgetExhausted` tick, and is
 /// cleared there -- so it reaches exactly the Run that set it, and no
-/// later command's own outcome.
+/// later command's own outcome. Increments `execution_stops` on that same
+/// terminal outcome, never on `BudgetExhausted`.
 fn advance_chunk_once(
     control: &mut Control,
     view_state: &mut ViewState,
     restart_signal: &mut bool,
+    execution_stops: &mut u64,
 ) -> (String, bool) {
     let outcome = control.resume_chunk(control::CHUNK_BUDGET);
     view_state.observe(control);
@@ -119,6 +121,7 @@ fn advance_chunk_once(
             let status = restarted_status(outcome, *restart_signal);
             *restart_signal = false;
             view_state.record_pause_boundary(control);
+            *execution_stops += 1;
             (status, false)
         }
     }
@@ -126,21 +129,23 @@ fn advance_chunk_once(
 
 /// Continue's and Next's shared "first chunk landed" tail: observe the
 /// resulting state, and on every terminal outcome (not `BudgetExhausted`)
-/// record the pause boundary too. Takes the outcome already computed, not
-/// the call that produced it -- Continue's unconditional first instruction
-/// and Next's own statement-then-target-check are the one part that isn't
-/// shared. Returns the status text plus whether the caller must schedule
-/// another chunk tick.
+/// record the pause boundary and increment `execution_stops` too. Takes the
+/// outcome already computed, not the call that produced it -- Continue's
+/// unconditional first instruction and Next's own statement-then-target-check
+/// are the one part that isn't shared. Returns the status text plus whether
+/// the caller must schedule another chunk tick.
 fn first_chunk_outcome(
     control: &mut Control,
     view_state: &mut ViewState,
     outcome: StepOutcome,
+    execution_stops: &mut u64,
 ) -> (String, bool) {
     view_state.observe(control);
     match outcome {
         StepOutcome::BudgetExhausted => (status_for(outcome).to_string(), true),
         StepOutcome::Advanced | StepOutcome::Halted | StepOutcome::Breakpoint(_) => {
             view_state.record_pause_boundary(control);
+            *execution_stops += 1;
             (status_for(outcome).to_string(), false)
         }
     }
@@ -158,13 +163,50 @@ fn first_chunk_outcome(
 /// already changed state, so this is a true no-op, not a fallback path.
 /// Clears the changed-value highlights before executing, same as Run and
 /// Next (`docs/layout-spec.md`'s Highlights §3).
-fn continue_pressed(control: &mut Control, view_state: &mut ViewState) -> Option<(String, bool)> {
+fn continue_pressed(
+    control: &mut Control,
+    view_state: &mut ViewState,
+    execution_stops: &mut u64,
+) -> Option<(String, bool)> {
     if control.is_running() || !control.session() {
         return None;
     }
     view_state.clear_changed();
     let outcome = control.continue_chunk(control::CHUNK_BUDGET);
-    Some(first_chunk_outcome(control, view_state, outcome))
+    Some(first_chunk_outcome(
+        control,
+        view_state,
+        outcome,
+        execution_stops,
+    ))
+}
+
+/// `Msg::Step`'s core, factored out for the same reason `continue_pressed`
+/// is: testable without a live `Context`. `None` -- `execution_stops`
+/// untouched -- while the machine is already halted; the caller's own
+/// `flush_pending_reassemble` already guards the other refusal, an assembly
+/// error, before this runs. Otherwise steps once, increments
+/// `execution_stops`, and returns the outcome for the caller's own status
+/// text.
+fn step_pressed(
+    control: &mut Control,
+    view_state: &mut ViewState,
+    restart_signal: &mut bool,
+    execution_stops: &mut u64,
+) -> Option<StepOutcome> {
+    if control.is_running() {
+        return None;
+    }
+    let was_halted = control.is_halted();
+    let outcome = control.step();
+    if was_halted {
+        return None;
+    }
+    *restart_signal = false;
+    view_state.observe(control);
+    view_state.record_pause_boundary(control);
+    *execution_stops += 1;
+    Some(outcome)
 }
 
 /// Whether `window.onbeforeunload` should arm the native leave-this-page
@@ -233,19 +275,24 @@ fn install_hashchange_handler(link: Scope<App>) -> HashchangeHandler {
 
 /// `Msg::Interrupt`'s core logic, factored out of `App::update` so it is
 /// testable without a live `Context`: ends a chunked Run, Continue, or Next
-/// in flight and records the resulting pause boundary. A true no-op
-/// otherwise -- `ready`/`paused` have nothing left to interrupt, and
-/// recording a boundary with nothing having moved since the last one would
-/// diff the current state against itself and silently clear the
-/// changed-value highlights that boundary already set. Returns whether
-/// anything actually happened.
-fn interrupt_if_running(control: &mut Control, view_state: &mut ViewState) -> bool {
+/// in flight, records the resulting pause boundary, and increments
+/// `execution_stops`. A true no-op otherwise -- `ready`/`paused` have
+/// nothing left to interrupt, and recording a boundary with nothing having
+/// moved since the last one would diff the current state against itself and
+/// silently clear the changed-value highlights that boundary already set.
+/// Returns whether anything actually happened.
+fn interrupt_if_running(
+    control: &mut Control,
+    view_state: &mut ViewState,
+    execution_stops: &mut u64,
+) -> bool {
     if !control.is_running() {
         return false;
     }
     control.end_in_flight();
     view_state.observe(control);
     view_state.record_pause_boundary(control);
+    *execution_stops += 1;
     true
 }
 
@@ -817,6 +864,16 @@ pub struct App {
     /// `window.onhashchange`, the handler pasting a share link into an
     /// open tab relies on. Never read directly.
     _hashchange_handler: HashchangeHandler,
+    /// Counts execution stops: increments once whenever Step, Next, Run, or
+    /// Continue leaves the machine stopped, an Interrupt actually
+    /// interrupts, or a Reset's reload succeeds. An edit, a re-assemble,
+    /// New, and a loaded program never increment it -- nor does loading a
+    /// shared link (`Msg::CheckSharedLink`), the same "a loaded program
+    /// never increments" rule `restore_source` already follows. Passed to
+    /// `Editor`, which compares it against the count it last saw to decide
+    /// whether to scroll the current line into view (`docs/layout-spec.md`'s
+    /// Highlights).
+    execution_stops: u64,
 }
 
 impl App {
@@ -848,6 +905,7 @@ impl App {
             &mut self.control,
             &mut self.view_state,
             &mut self.restart_signal,
+            &mut self.execution_stops,
         );
         self.status_message = status;
         if needs_tick {
@@ -950,6 +1008,7 @@ impl Component for App {
             shortcut_enablement,
             _keydown_handler: keydown_handler,
             _hashchange_handler: hashchange_handler,
+            execution_stops: 0,
         };
         // Seed continuity and the diff baseline off the freshly loaded
         // machine -- not about the first render (`visible_registers`
@@ -1063,9 +1122,11 @@ impl Component for App {
                     // touched once Continue actually proceeds, so a no-op
                     // Continue never wipes a restarting Run's own
                     // `Restarted ·`.
-                    if let Some((status, needs_tick)) =
-                        continue_pressed(&mut self.control, &mut self.view_state)
-                    {
+                    if let Some((status, needs_tick)) = continue_pressed(
+                        &mut self.control,
+                        &mut self.view_state,
+                        &mut self.execution_stops,
+                    ) {
                         self.restart_signal = false;
                         self.status_message = status;
                         if needs_tick {
@@ -1079,20 +1140,18 @@ impl Component for App {
                 if !self.flush_pending_reassemble() {
                     true
                 } else {
-                    if !self.control.is_running() {
-                        let was_halted = self.control.is_halted();
-                        let outcome = self.control.step();
-                        if !was_halted {
-                            self.restart_signal = false;
-                            self.view_state.observe(&self.control);
-                            self.view_state.record_pause_boundary(&self.control);
-                            self.status_message = if outcome == StepOutcome::Halted {
-                                "Halted"
-                            } else {
-                                "Stepped"
-                            }
-                            .to_string();
+                    if let Some(outcome) = step_pressed(
+                        &mut self.control,
+                        &mut self.view_state,
+                        &mut self.restart_signal,
+                        &mut self.execution_stops,
+                    ) {
+                        self.status_message = if outcome == StepOutcome::Halted {
+                            "Halted"
+                        } else {
+                            "Stepped"
                         }
+                        .to_string();
                     }
                     true
                 }
@@ -1105,8 +1164,12 @@ impl Component for App {
                         self.restart_signal = false;
                         self.view_state.clear_changed();
                         let outcome = self.control.next_chunk(control::CHUNK_BUDGET);
-                        let (status, needs_tick) =
-                            first_chunk_outcome(&mut self.control, &mut self.view_state, outcome);
+                        let (status, needs_tick) = first_chunk_outcome(
+                            &mut self.control,
+                            &mut self.view_state,
+                            outcome,
+                            &mut self.execution_stops,
+                        );
                         self.status_message = status;
                         if needs_tick {
                             self.schedule_chunk_tick(ctx);
@@ -1117,7 +1180,11 @@ impl Component for App {
             }
             Msg::Interrupt => {
                 self.restart_signal = false;
-                if interrupt_if_running(&mut self.control, &mut self.view_state) {
+                if interrupt_if_running(
+                    &mut self.control,
+                    &mut self.view_state,
+                    &mut self.execution_stops,
+                ) {
                     self.chunk_timeout = None;
                     self.status_message = "Interrupted".to_string();
                     true
@@ -1128,6 +1195,7 @@ impl Component for App {
             Msg::Reset => {
                 self.reload_source();
                 if self.error.is_none() {
+                    self.execution_stops += 1;
                     self.status_message = "Reset".to_string();
                 }
                 true
@@ -1352,6 +1420,7 @@ impl Component for App {
                     {on_change}
                     breakpoints={self.control.breakpoint_lines().clone()}
                     {current_line}
+                    execution_stops={self.execution_stops}
                     error_line={self.error_line}
                     {on_toggle_breakpoint}
                 />
@@ -1558,7 +1627,12 @@ mod tests {
         );
 
         // Interrupt before any `resume_chunk`/`run_chunk` call at all.
-        assert!(interrupt_if_running(&mut control, &mut view_state));
+        let mut execution_stops = 0;
+        assert!(interrupt_if_running(
+            &mut control,
+            &mut view_state,
+            &mut execution_stops
+        ));
 
         assert!(
             control.session(),
@@ -1665,9 +1739,14 @@ mod tests {
                 view_state,
             );
             assert!(error.is_none(), "fixture must still assemble");
+            let mut execution_stops = 0;
             loop {
-                let (status, needs_tick) =
-                    advance_chunk_once(control, view_state, &mut restart_signal);
+                let (status, needs_tick) = advance_chunk_once(
+                    control,
+                    view_state,
+                    &mut restart_signal,
+                    &mut execution_stops,
+                );
                 if !needs_tick {
                     return status;
                 }
@@ -1743,10 +1822,15 @@ mod tests {
         let mut view_state = ViewState::new();
         view_state.reset(&control);
         let mut restart_signal = false;
+        let mut execution_stops = 0;
         control.start_run();
 
-        let (_, needs_tick) =
-            advance_chunk_once(&mut control, &mut view_state, &mut restart_signal);
+        let (_, needs_tick) = advance_chunk_once(
+            &mut control,
+            &mut view_state,
+            &mut restart_signal,
+            &mut execution_stops,
+        );
         assert!(needs_tick, "fixture must outlast one chunk budget");
         assert!(control.is_running(), "a BudgetExhausted tick stays running");
 
@@ -1809,7 +1893,12 @@ mod tests {
         // reverting the `is_running()` guard would re-diff the current
         // state against itself (the snapshot `record_pause_boundary` just
         // advanced to) and silently clear it to empty.
-        assert!(!interrupt_if_running(&mut control, &mut view_state));
+        let mut execution_stops = 0;
+        assert!(!interrupt_if_running(
+            &mut control,
+            &mut view_state,
+            &mut execution_stops
+        ));
         assert_eq!(
             view_state.changed_registers(),
             &changed_after_step,
@@ -1834,7 +1923,8 @@ mod tests {
         view_state.reset(&control);
         assert!(!control.session(), "fixture assumption: fresh load");
 
-        assert!(continue_pressed(&mut control, &mut view_state).is_none());
+        let mut execution_stops = 0;
+        assert!(continue_pressed(&mut control, &mut view_state, &mut execution_stops).is_none());
     }
 
     #[test]
@@ -1858,8 +1948,9 @@ mod tests {
             "fixture assumption: the second step must flag $1 changed"
         );
 
-        let (_, needs_tick) =
-            continue_pressed(&mut control, &mut view_state).expect("a paused session proceeds");
+        let mut execution_stops = 0;
+        let (_, needs_tick) = continue_pressed(&mut control, &mut view_state, &mut execution_stops)
+            .expect("a paused session proceeds");
         assert!(needs_tick, "fixture must outlast one chunk budget");
         assert!(
             !view_state.changed_registers().contains(&1),
@@ -2245,6 +2336,146 @@ mod tests {
         assert!(
             view_state.changed_registers().is_empty(),
             "the fallback must reset the view state, dropping the prior program's changed marks"
+        );
+    }
+
+    #[test]
+    fn advance_chunk_once_leaves_execution_stops_unchanged_on_budget_exhausted() {
+        // A chunk that reschedules itself hasn't stopped anything yet.
+        let mut control = Control::new(INFINITE_LOOP_MMS, "stops-budget.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        control.start_run();
+        let mut restart_signal = false;
+        let mut execution_stops = 0;
+
+        let (_, needs_tick) = advance_chunk_once(
+            &mut control,
+            &mut view_state,
+            &mut restart_signal,
+            &mut execution_stops,
+        );
+        assert!(needs_tick, "fixture must outlast one chunk budget");
+        assert_eq!(
+            execution_stops, 0,
+            "a BudgetExhausted chunk must not count as a stop"
+        );
+    }
+
+    #[test]
+    fn advance_chunk_once_increments_execution_stops_once_on_a_terminal_outcome() {
+        // Halted: the straight-line fixture halts within its first chunk.
+        let mut halts =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "stops-halt.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&halts);
+        halts.start_run();
+        let mut restart_signal = false;
+        let mut execution_stops = 0;
+        let (_, needs_tick) = advance_chunk_once(
+            &mut halts,
+            &mut view_state,
+            &mut restart_signal,
+            &mut execution_stops,
+        );
+        assert!(!needs_tick, "fixture must halt within one chunk");
+        assert_eq!(execution_stops, 1, "a Halted outcome must count as a stop");
+
+        // Breakpoint: same fixture, a breakpoint set before the halt.
+        let mut hits_breakpoint =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "stops-breakpoint.mms").expect("assembles");
+        assert!(
+            hits_breakpoint.toggle_breakpoint(3),
+            "line 3 has an address"
+        );
+        let mut view_state2 = ViewState::new();
+        view_state2.reset(&hits_breakpoint);
+        hits_breakpoint.start_run();
+        let mut restart_signal2 = false;
+        let mut execution_stops2 = 0;
+        let (_, needs_tick2) = advance_chunk_once(
+            &mut hits_breakpoint,
+            &mut view_state2,
+            &mut restart_signal2,
+            &mut execution_stops2,
+        );
+        assert!(
+            !needs_tick2,
+            "fixture must hit the breakpoint within one chunk"
+        );
+        assert_eq!(
+            execution_stops2, 1,
+            "a Breakpoint outcome must count as a stop"
+        );
+    }
+
+    #[test]
+    fn interrupt_if_running_increments_execution_stops_once_when_it_interrupts() {
+        let mut control =
+            Control::new(INFINITE_LOOP_MMS, "stops-interrupt.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        control.start_run();
+        let mut execution_stops = 0;
+
+        assert!(interrupt_if_running(
+            &mut control,
+            &mut view_state,
+            &mut execution_stops
+        ));
+        assert_eq!(
+            execution_stops, 1,
+            "an Interrupt that actually interrupted must count as a stop"
+        );
+    }
+
+    #[test]
+    fn step_pressed_increments_execution_stops_once_when_it_steps() {
+        let mut control =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "stops-step.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        let mut restart_signal = false;
+        let mut execution_stops = 0;
+
+        let outcome = step_pressed(
+            &mut control,
+            &mut view_state,
+            &mut restart_signal,
+            &mut execution_stops,
+        );
+        assert!(outcome.is_some(), "a Step that ran must return its outcome");
+        assert_eq!(execution_stops, 1, "a Step that ran must count as a stop");
+    }
+
+    #[test]
+    fn step_pressed_leaves_execution_stops_unchanged_when_already_halted() {
+        // Decision: a Step refused by a halt, same as one refused by an
+        // assembly error (guarded a level up, in `flush_pending_reassemble`,
+        // before `step_pressed` ever runs), must not count as a stop.
+        let mut control =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "stops-halted.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        while !control.is_halted() {
+            control.step();
+        }
+        let mut restart_signal = false;
+        let mut execution_stops = 0;
+
+        let outcome = step_pressed(
+            &mut control,
+            &mut view_state,
+            &mut restart_signal,
+            &mut execution_stops,
+        );
+        assert!(
+            outcome.is_none(),
+            "a Step refused by a halt must be a no-op"
+        );
+        assert_eq!(
+            execution_stops, 0,
+            "a refused Step must not count as a stop"
         );
     }
 }

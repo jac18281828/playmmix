@@ -11,9 +11,14 @@
 //! of scrolling the viewport (or translating the viewport itself, which
 //! would drag its own clip box along with it) is what keeps the two layers
 //! from visibly desyncing under fast or inertial scrolling.
+//!
+//! `Editor` also scrolls itself once, right after an execution stop moves
+//! `current_line` somewhere outside the textarea's visible rows -- see
+//! `should_follow_current_line` and `scroll_top_to_reveal_line`.
 
 use std::collections::BTreeSet;
 
+use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
@@ -28,6 +33,10 @@ pub struct EditorProps {
     /// The line the paused machine's PC maps to, if any. `None` while
     /// running, since nothing should visibly track a moving PC mid-chunk.
     pub current_line: Option<usize>,
+    /// Counts execution stops (`App::execution_stops`). `Editor` compares
+    /// this against the count it last saw to decide whether to scroll
+    /// `current_line` into view.
+    pub execution_stops: u64,
     /// The line a parsed assembly-error location names, if the error text
     /// carried one (`diagnostics.rs`'s `parse_error_location`). Independent of
     /// `current_line`: an error can exist whether or not the machine has
@@ -40,6 +49,14 @@ pub struct Editor {
     textarea_ref: NodeRef,
     overlay_content_ref: NodeRef,
     gutter_content_ref: NodeRef,
+    /// The last `execution_stops` this component has seen through
+    /// `changed`, or `None` before the first props update -- the case the
+    /// first mount must never follow (`should_follow_current_line`).
+    last_execution_stops: Option<u64>,
+    /// Set by `changed` when this props update should scroll the current
+    /// line into view, and acted on -- then cleared -- by the next
+    /// `rendered`, once the DOM holds the rows the new props produced.
+    pending_scroll: bool,
 }
 
 pub enum EditorMsg {
@@ -62,6 +79,8 @@ impl Component for Editor {
             textarea_ref: NodeRef::default(),
             overlay_content_ref: NodeRef::default(),
             gutter_content_ref: NodeRef::default(),
+            last_execution_stops: None,
+            pending_scroll: false,
         }
     }
 
@@ -77,22 +96,29 @@ impl Component for Editor {
                 let Some(textarea) = self.textarea_ref.cast::<HtmlElement>() else {
                     return false;
                 };
-                let scroll_top = textarea.scroll_top();
-                let scroll_left = textarea.scroll_left();
-                if let Some(overlay_content) = self.overlay_content_ref.cast::<Element>() {
-                    let style = format!(
-                        "transform: translate({}px, {}px)",
-                        -scroll_left, -scroll_top
-                    );
-                    let _ = overlay_content.set_attribute("style", &style);
-                }
-                if let Some(gutter_content) = self.gutter_content_ref.cast::<Element>() {
-                    let style = format!("transform: translateY({}px)", -scroll_top);
-                    let _ = gutter_content.set_attribute("style", &style);
-                }
+                self.sync_scrolled_content(textarea.scroll_left(), textarea.scroll_top());
                 false
             }
         }
+    }
+
+    fn changed(&mut self, ctx: &Context<Self>, _old_props: &Self::Properties) -> bool {
+        let execution_stops = ctx.props().execution_stops;
+        self.pending_scroll = should_follow_current_line(
+            self.last_execution_stops,
+            execution_stops,
+            ctx.props().current_line,
+        );
+        self.last_execution_stops = Some(execution_stops);
+        true
+    }
+
+    fn rendered(&mut self, _ctx: &Context<Self>, _first_render: bool) {
+        if !self.pending_scroll {
+            return;
+        }
+        self.pending_scroll = false;
+        self.scroll_current_line_into_view();
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
@@ -175,6 +201,108 @@ impl Component for Editor {
             </div>
         }
     }
+}
+
+impl Editor {
+    /// Writes `.overlay-content`'s and `.gutter-content`'s `transform` to
+    /// match a scroll position -- the module doc comment's sync step, run
+    /// both by the native `scroll` event (`EditorMsg::Scroll`) and,
+    /// idempotently, right after `scroll_current_line_into_view` sets
+    /// `scroll_top` itself.
+    fn sync_scrolled_content(&self, scroll_left: i32, scroll_top: i32) {
+        if let Some(overlay_content) = self.overlay_content_ref.cast::<Element>() {
+            let style = format!(
+                "transform: translate({}px, {}px)",
+                -scroll_left, -scroll_top
+            );
+            let _ = overlay_content.set_attribute("style", &style);
+        }
+        if let Some(gutter_content) = self.gutter_content_ref.cast::<Element>() {
+            let style = format!("transform: translateY({}px)", -scroll_top);
+            let _ = gutter_content.set_attribute("style", &style);
+        }
+    }
+
+    /// Scrolls the textarea so the current line clears the viewport
+    /// (`scroll_top_to_reveal_line`), then syncs the overlay and gutter to
+    /// match. A no-op when any element is missing, or the placement rule
+    /// finds the line already visible. `query_selector` finding no
+    /// `.overlay-current` row -- `current_line` is `None` -- is itself a
+    /// no-op, needing no separate check. Never calls `focus()`: raising the
+    /// iPad keyboard or moving the caret for a Step the user didn't type
+    /// would be worse than the marker staying briefly off-screen.
+    fn scroll_current_line_into_view(&self) {
+        let Some(textarea) = self.textarea_ref.cast::<HtmlElement>() else {
+            return;
+        };
+        let Some(overlay_content) = self.overlay_content_ref.cast::<Element>() else {
+            return;
+        };
+        let Some(current_row) = overlay_content
+            .query_selector(".overlay-current")
+            .ok()
+            .flatten()
+            .and_then(|row| row.dyn_into::<HtmlElement>().ok())
+        else {
+            return;
+        };
+
+        let viewport_height = textarea.client_height();
+        let max_scroll_top = textarea.scroll_height() - viewport_height;
+        let target = scroll_top_to_reveal_line(
+            current_row.offset_top() as f64,
+            current_row.offset_height() as f64,
+            textarea.scroll_top() as f64,
+            viewport_height as f64,
+            max_scroll_top as f64,
+        );
+        let Some(scroll_top) = target else {
+            return;
+        };
+
+        textarea.set_scroll_top(scroll_top as i32);
+        self.sync_scrolled_content(textarea.scroll_left(), scroll_top as i32);
+    }
+}
+
+/// The textarea's scroll top that brings a line fully into view, or `None`
+/// when it already is. `line_top`/`line_height` are the line's own offset
+/// within the textarea's scroll coordinates; `viewport_scroll_top`/
+/// `viewport_height` the textarea's own `scroll_top`/`client_height`;
+/// `max_scroll_top` its `scroll_height - client_height`. Places the line a
+/// third down the viewport rather than at its very top, since the lines
+/// that follow the marker are what a stepping user reads next.
+fn scroll_top_to_reveal_line(
+    line_top: f64,
+    line_height: f64,
+    viewport_scroll_top: f64,
+    viewport_height: f64,
+    max_scroll_top: f64,
+) -> Option<f64> {
+    let line_bottom = line_top + line_height;
+    let viewport_bottom = viewport_scroll_top + viewport_height;
+    if line_top < viewport_scroll_top || line_bottom > viewport_bottom {
+        Some((line_top - viewport_height / 3.0).clamp(0.0, max_scroll_top))
+    } else {
+        None
+    }
+}
+
+/// Whether `Editor` should scroll to the current line: the execution-stop
+/// count differs from the last one it saw, and a current line exists.
+/// `None` stands for no props seen yet, the state right after `create` --
+/// so the very first count `Editor` ever compares against never follows,
+/// whatever it is, and an edit that re-assembles without moving the marker
+/// (the count unchanged) never does either.
+fn should_follow_current_line(
+    last_execution_stops: Option<u64>,
+    execution_stops: u64,
+    current_line: Option<usize>,
+) -> bool {
+    let Some(last) = last_execution_stops else {
+        return false;
+    };
+    current_line.is_some() && execution_stops != last
 }
 
 /// Render one gutter row: the line number, styled for a breakpoint and/or
@@ -551,6 +679,67 @@ mod tests {
         let error_line = Some(2);
         for i in 0..4 {
             assert_eq!(overlay_row_is_error(i, error_line), i == 1, "row {i}");
+        }
+    }
+
+    #[test]
+    fn scroll_top_to_reveal_line_matches_the_placement_table() {
+        // A 20 px line, a 400 px viewport, a 2,000 px maximum scroll top.
+        const LINE_HEIGHT: f64 = 20.0;
+        const VIEWPORT_HEIGHT: f64 = 400.0;
+        const MAX_SCROLL_TOP: f64 = 2_000.0;
+
+        // (line_top, viewport_scroll_top, expected)
+        let cases: [(f64, f64, Option<f64>); 8] = [
+            (100.0, 0.0, None),                                    // F1: visible
+            (380.0, 0.0, None),                                    // F2: bottom == viewport bottom
+            (390.0, 0.0, Some(390.0 - VIEWPORT_HEIGHT / 3.0)),     // F3
+            (1_000.0, 0.0, Some(1_000.0 - VIEWPORT_HEIGHT / 3.0)), // F4
+            (400.0, 500.0, Some(400.0 - VIEWPORT_HEIGHT / 3.0)),   // F5: above the viewport
+            (10.0, 500.0, Some(0.0)),                              // F6: clamped at the top
+            (2_380.0, 0.0, Some(2_000.0)),                         // F7: clamped at the bottom
+            (500.0, 500.0, None),                                  // F8: top == viewport top
+        ];
+
+        for (i, (line_top, viewport_scroll_top, expected)) in cases.into_iter().enumerate() {
+            let actual = scroll_top_to_reveal_line(
+                line_top,
+                LINE_HEIGHT,
+                viewport_scroll_top,
+                VIEWPORT_HEIGHT,
+                MAX_SCROLL_TOP,
+            );
+            match (actual, expected) {
+                (None, None) => {}
+                (Some(actual), Some(expected)) => assert!(
+                    (actual - expected).abs() < 1e-9,
+                    "row F{}: expected {expected}, got {actual}",
+                    i + 1
+                ),
+                _ => panic!("row F{}: expected {expected:?}, got {actual:?}", i + 1),
+            }
+        }
+    }
+
+    #[test]
+    fn should_follow_current_line_matches_the_trigger_table() {
+        // (last_execution_stops, execution_stops, current_line, expected)
+        let cases: [(Option<u64>, u64, Option<usize>, bool); 6] = [
+            (None, 0, Some(4), false),    // T1: first mount
+            (Some(0), 1, Some(9), true),  // T2
+            (Some(1), 1, Some(9), false), // T3: a re-render
+            (Some(1), 1, Some(4), false), // T4: an edit re-assembled
+            (Some(1), 2, Some(9), true),  // T5: a stop onto the line it left
+            (Some(1), 2, None, false),    // T6
+        ];
+
+        for (i, (last, execution_stops, current_line, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                should_follow_current_line(last, execution_stops, current_line),
+                expected,
+                "row T{}",
+                i + 1
+            );
         }
     }
 }
