@@ -2489,9 +2489,9 @@ mod tests {
 
     #[test]
     fn step_pressed_leaves_execution_stops_unchanged_when_already_halted() {
-        // Decision: a Step refused by a halt, same as one refused by an
-        // assembly error (guarded a level up, in `flush_pending_reassemble`,
-        // before `step_pressed` ever runs), must not count as a stop.
+        // A Step refused by a halt, same as one refused by an assembly
+        // error (guarded a level up, in `flush_pending_reassemble`, before
+        // `step_pressed` ever runs), must not count as a stop.
         let (mut control, mut view_state) =
             fresh_control_and_view_state(RESTART_STRAIGHT_LINE_MMS, "stops-halted.mms");
         while !control.is_halted() {

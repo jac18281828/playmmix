@@ -248,12 +248,11 @@ float reading usually exceeds it — `(0.16666666666666666)` is 21 characters
 Three markers, all driven by state `App` already holds or can diff at render:
 
 1. **Current instruction, editor:** the existing `gutter-current` line,
-   unchanged — hidden mid-run, shown when ready/paused/halted. The editor
-   also scrolls itself, once, to bring the current line into view whenever
-   an execution stop (Step, Next, Run, Continue, Interrupt, or a successful
-   Reset — never an edit) moves it outside the textarea's visible rows,
-   placing it a third down the viewport rather than nudging an
-   already-visible line.
+   hidden mid-run, shown when ready/paused/halted. The editor also scrolls
+   itself, once, to bring the current line into view when an execution stop
+   (Step, Next, Run, Continue, Interrupt, or a successful Reset — never an
+   edit) leaves it outside the textarea's visible rows. It places the line a
+   third down the viewport; an already-visible line stays untouched.
 2. **Current instruction, memory:** the memory row containing the PC gets
    `mem-current` (same background as `gutter-current`), and within the row
    the 4-byte instruction span gets the accent color. Halted keeps the
