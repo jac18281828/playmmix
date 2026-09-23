@@ -1376,14 +1376,13 @@ impl Component for App {
         }
     }
 
-    /// Schedules the shared-link check (decisions 3, 4, 6 and 7) once,
-    /// after the first paint: `rendered` and a Yew message both run before
-    /// the browser paints, so a zero-delay `Timeout` -- the next macrotask,
-    /// necessarily after paint -- is what makes a replace-confirmation
-    /// show over the program it asks about rather than under it.
-    /// `hashchange` (`install_hashchange_handler`) takes the same path for
-    /// every fragment change after this first one. Leaked (`forget`): nothing
-    /// needs to cancel this one-shot timer.
+    /// Schedules the shared-link check once, after the first render's own
+    /// task: `rendered` runs synchronously within that task, so a
+    /// zero-delay `Timeout` -- deferred to its own, later task -- is what
+    /// lets a replace-confirmation show over the program it asks about
+    /// instead of racing it. `hashchange` (`install_hashchange_handler`)
+    /// takes the same path for every fragment change after this first one.
+    /// Leaked (`forget`): nothing needs to cancel this one-shot timer.
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         if first_render {
             let link = ctx.link().clone();
