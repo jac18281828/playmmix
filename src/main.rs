@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use gloo_timers::callback::Timeout;
 use log::info;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{BeforeUnloadEvent, Event};
 use yew::{Component, Context, Html, NodeRef, Renderer, html};
 
@@ -49,6 +49,19 @@ const SOURCE_DEBOUNCE_MS: u32 = 400;
 /// New's confirmation prompt, shown only when `autosave::confirm_needed`
 /// says the editor holds a program distinct from the minimal skeleton.
 const NEW_CONFIRM_MESSAGE: &str = "Replace your program with the minimal skeleton?";
+
+/// A shared link's replace-confirmation prompt (share-link decision 4),
+/// exact per the owner's settled text -- shown only when
+/// `autosave::confirm_needed` says loading the shared program would
+/// replace different work.
+const SHARE_LOAD_CONFIRM_MESSAGE: &str = "Replace your program with the shared one?";
+
+/// A shared program's status once loaded (decision 5).
+const SHARE_LOADED_STATUS: &str = "Loaded shared program";
+
+/// An unreadable share link's status (decision 7): the editor and saved
+/// work stay as they were.
+const SHARE_UNREADABLE_STATUS: &str = "The shared link could not be read";
 
 /// The status readout's text for a chunked Run, Continue, or Next's
 /// outcome -- shared because all three drive the same chunk-yield loop
@@ -195,6 +208,28 @@ fn install_beforeunload_handler() -> (Rc<RefCell<bool>>, BeforeUnloadHandler) {
     (armed, handler)
 }
 
+/// The JS closure backing `window.onhashchange` -- must stay alive for as
+/// long as the handler should stay registered, same as
+/// [`BeforeUnloadHandler`].
+type HashchangeHandler = Closure<dyn FnMut(Event)>;
+
+/// Registers `window.onhashchange`, sending `Msg::CheckSharedLink` on every
+/// fire: pasting a share link's fragment into an open tab changes only the
+/// fragment and reloads nothing, so the page's own hash-change event is the
+/// only signal such a paste gives. Returns the `Closure` backing the
+/// handler; the caller must keep it alive (see [`HashchangeHandler`]).
+fn install_hashchange_handler(link: yew::html::Scope<App>) -> HashchangeHandler {
+    let handler = Closure::wrap(Box::new(move |_event: Event| {
+        link.send_message(Msg::CheckSharedLink);
+    }) as Box<dyn FnMut(Event)>);
+
+    if let Some(window) = web_sys::window() {
+        window.set_onhashchange(Some(handler.as_ref().unchecked_ref()));
+    }
+
+    handler
+}
+
 /// `Msg::Interrupt`'s core logic, factored out of `App::update` so it is
 /// testable without a live `Context`: ends a chunked Run, Continue, or Next
 /// in flight and records the resulting pause boundary. A true no-op
@@ -312,6 +347,107 @@ fn confirm_new(current: &str, replacement: &str) -> bool {
         || web_sys::window()
             .and_then(|window| window.confirm_with_message(NEW_CONFIRM_MESSAGE).ok())
             .unwrap_or(false)
+}
+
+/// What a `hashchange`, or the check scheduled after the first paint, does
+/// with a share link (decisions 3, 4, 6 and 7) -- computed by
+/// `decide_shared_link`, a plain function so a host test drives every
+/// branch directly. `Msg::CheckSharedLink` turns each variant into
+/// `window.confirm`, the load itself, and the fragment strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SharedLinkDecision {
+    /// No `share::FRAGMENT_PREFIX` fragment at all: do nothing.
+    Ignore,
+    /// A `share::FRAGMENT_PREFIX` fragment whose payload didn't decode:
+    /// show the failure and strip it.
+    Unreadable,
+    /// A `share::FRAGMENT_PREFIX` fragment that decoded to `source`: load
+    /// it, asking first when `ask` is true.
+    Load { source: String, ask: bool },
+}
+
+/// Decisions 3, 4, 6 and 7's whole triage: given `hash`
+/// (`Location::hash()`'s value) and the editor's current text, what to do
+/// next. `share::program_from_hash` alone can't distinguish a fragment to
+/// ignore from an unreadable link -- both read `None` -- so the prefix is
+/// checked here first.
+fn decide_shared_link(hash: &str, current: &str) -> SharedLinkDecision {
+    if !hash.starts_with(share::FRAGMENT_PREFIX) {
+        return SharedLinkDecision::Ignore;
+    }
+    match share::program_from_hash(hash) {
+        None => SharedLinkDecision::Unreadable,
+        Some(source) => {
+            let ask = autosave::confirm_needed(current, &source);
+            SharedLinkDecision::Load { source, ask }
+        }
+    }
+}
+
+/// A shared program's load (decision 5), factored out for the same reason
+/// `start_over` is: testable without a live `Context`. Builds a fresh
+/// `Control` from `shared` -- like New, so no breakpoint from the replaced
+/// program carries over -- and, on a parse error, falls back to
+/// `DEFAULT_MMS`'s own machine, showing `shared`'s error exactly as a
+/// restored program shows one (autosave's decision 3, `restore_source`).
+/// The caller assigns `shared` as the editor's new text and saves it;
+/// `shared` isn't returned here since it's the caller's own, already
+/// owned, `SharedLinkDecision::Load` payload.
+fn load_shared(
+    chunk_timeout: &mut Option<Timeout>,
+    debounce_timeout: &mut Option<Timeout>,
+    control: &mut Control,
+    error: &mut Option<String>,
+    error_line: &mut Option<usize>,
+    view_state: &mut ViewState,
+    shared: &str,
+) {
+    *chunk_timeout = None;
+    *debounce_timeout = None;
+    match Control::new(shared, SOURCE_FILENAME) {
+        Ok(fresh) => {
+            *control = fresh;
+            *error = None;
+            *error_line = None;
+        }
+        Err(err) => {
+            *control = default_control();
+            *error_line = parse_error_location(&err).map(|(line, _)| line);
+            *error = Some(describe_source_error(shared, &err));
+        }
+    }
+    view_state.reset(control);
+}
+
+/// The page's own URL with no fragment: `origin + pathname + search`. The
+/// one page identity a stripped share link (decision 6) and a link Share
+/// builds (decision 8) must agree on. `None` on any failure to read
+/// `Location`'s parts -- both callers treat that as nothing to do.
+fn page_url() -> Option<String> {
+    let window = web_sys::window()?;
+    let location = window.location();
+    let origin = location.origin().ok()?;
+    let pathname = location.pathname().ok()?;
+    let search = location.search().ok()?;
+    Some(format!("{origin}{pathname}{search}"))
+}
+
+/// Replaces the current URL with the same URL minus its fragment (decision
+/// 6): once a share link is handled -- loaded, or found unreadable --
+/// autosave already owns the program, and a reload must not load the same
+/// link again. Best-effort: any failure leaves the fragment in the address
+/// bar, no worse off than before this ran.
+fn strip_fragment() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(history) = window.history() else {
+        return;
+    };
+    let Some(url) = page_url() else {
+        return;
+    };
+    let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&url));
 }
 
 /// `Msg::Run`'s restart-and-run core, factored out for the same reason
@@ -480,6 +616,11 @@ pub enum Msg {
     /// first when the editor holds a program that differs from the
     /// skeleton (`autosave::confirm_needed`).
     New,
+    /// Checks the URL fragment for a shared program (decisions 3, 4, 6 and
+    /// 7): sent once after the first paint and on every `hashchange`, since
+    /// pasting a link into an open tab changes only the fragment and
+    /// reloads nothing.
+    CheckSharedLink,
     /// One chunk boundary: reschedule if the run isn't finished, or if an
     /// `Interrupt` landed while this tick was scheduled, do nothing.
     ChunkTick,
@@ -583,6 +724,11 @@ pub struct App {
     /// Kept alive for as long as `App` is, same reason as
     /// `_beforeunload_handler`. Never read directly.
     _keydown_handler: KeydownHandler,
+    /// Kept alive for as long as `App` is, same reason as
+    /// `_beforeunload_handler`: dropping it would unregister
+    /// `window.onhashchange`, the handler pasting a share link into an
+    /// open tab relies on. Never read directly.
+    _hashchange_handler: HashchangeHandler,
 }
 
 impl App {
@@ -675,6 +821,7 @@ impl Component for App {
         let (leave_warning_armed, beforeunload_handler) = install_beforeunload_handler();
         let (shortcut_enablement, keydown_handler) =
             install_keyboard_shortcuts(_ctx.link().clone());
+        let hashchange_handler = install_hashchange_handler(_ctx.link().clone());
 
         // Restore a saved program, if any: the machine above already holds
         // `DEFAULT_MMS`, so a saved program that fails to assemble leaves
@@ -713,6 +860,7 @@ impl Component for App {
             _beforeunload_handler: beforeunload_handler,
             shortcut_enablement,
             _keydown_handler: keydown_handler,
+            _hashchange_handler: hashchange_handler,
         };
         // Seed continuity and the diff baseline off the freshly loaded
         // machine -- not about the first render (`visible_registers`
@@ -913,6 +1061,48 @@ impl Component for App {
                     true
                 }
             }
+            Msg::CheckSharedLink => {
+                let hash = web_sys::window()
+                    .and_then(|window| window.location().hash().ok())
+                    .unwrap_or_default();
+                match decide_shared_link(&hash, &self.source) {
+                    SharedLinkDecision::Ignore => false,
+                    SharedLinkDecision::Unreadable => {
+                        self.status_message = SHARE_UNREADABLE_STATUS.to_string();
+                        strip_fragment();
+                        true
+                    }
+                    SharedLinkDecision::Load { source, ask } => {
+                        // A confirm error counts as No (decision 4), the
+                        // same reading New's own confirm takes.
+                        let proceeds = !ask
+                            || web_sys::window()
+                                .and_then(|window| {
+                                    window.confirm_with_message(SHARE_LOAD_CONFIRM_MESSAGE).ok()
+                                })
+                                .unwrap_or(false);
+                        if !proceeds {
+                            false
+                        } else {
+                            load_shared(
+                                &mut self.chunk_timeout,
+                                &mut self.debounce_timeout,
+                                &mut self.control,
+                                &mut self.error,
+                                &mut self.error_line,
+                                &mut self.view_state,
+                                &source,
+                            );
+                            self.source = source;
+                            self.restart_signal = false;
+                            self.status_message = SHARE_LOADED_STATUS.to_string();
+                            self.save_and_arm_warning();
+                            strip_fragment();
+                            true
+                        }
+                    }
+                }
+            }
             Msg::FlushSource => {
                 let flushed = flush_pending_source(
                     &mut self.debounce_timeout,
@@ -1086,6 +1276,21 @@ impl Component for App {
                 />
                 <div class="machine-slot">{ machine_view }</div>
             </main>
+        }
+    }
+
+    /// Schedules the shared-link check (decisions 3, 4, 6 and 7) once,
+    /// after the first paint: `rendered` and a Yew message both run before
+    /// the browser paints, so a zero-delay `Timeout` -- the next macrotask,
+    /// necessarily after paint -- is what makes a replace-confirmation
+    /// show over the program it asks about rather than under it.
+    /// `hashchange` (`install_hashchange_handler`) takes the same path for
+    /// every fragment change after this first one. Leaked (`forget`): nothing
+    /// needs to cancel this one-shot timer.
+    fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
+        if first_render {
+            let link = ctx.link().clone();
+            Timeout::new(0, move || link.send_message(Msg::CheckSharedLink)).forget();
         }
     }
 }
@@ -1429,10 +1634,10 @@ mod tests {
         // this cell, which Yew 0.23's scheduler can starve for a chunked
         // run's entire span (`run_scheduler`'s `can_yield` ignores the
         // rendered queue while `ChunkTick` messages keep the update queue
-        // non-empty) -- `App::rendered` no longer exists at all, and
-        // `App::update` refreshes this cell itself, at the end, on every
-        // message. That structural half can't be driven host-side without a
-        // live `yew::Context` (`AGENTS.md`'s Component-lifecycle exemption);
+        // non-empty) -- `App::update` refreshes this cell itself, at the
+        // end, on every message, regardless of what `App::rendered` does.
+        // That structural half can't be driven host-side without a live
+        // `yew::Context` (`AGENTS.md`'s Component-lifecycle exemption);
         // this test pins the state the choke point must compute from.
         let mut control = Control::new(INFINITE_LOOP_MMS, "loop.mms").expect("assembles");
         let mut view_state = ViewState::new();
@@ -1783,5 +1988,124 @@ mod tests {
         let fresh = Control::new(DEFAULT_MMS, "new-compare.mms").expect("assembles");
         assert_eq!(control.get_pc(), fresh.get_pc());
         assert_eq!(control.session(), fresh.session());
+    }
+
+    /// Work distinct from both `DEFAULT_MMS` and `RESTART_STRAIGHT_LINE_MMS`
+    /// -- the row `decide_shared_link` must ask before replacing.
+    const OTHER_WORK_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$9,9\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn decide_shared_link_covers_every_row() {
+        // No fragment at all: ignored.
+        assert_eq!(
+            decide_shared_link("", RESTART_STRAIGHT_LINE_MMS),
+            SharedLinkDecision::Ignore
+        );
+        // A fragment present but not a share link: ignored, never decoded.
+        assert_eq!(
+            decide_shared_link("#x=abc", RESTART_STRAIGHT_LINE_MMS),
+            SharedLinkDecision::Ignore
+        );
+        // A `#p=` fragment whose payload doesn't decode: unreadable.
+        assert_eq!(
+            decide_shared_link("#p=", RESTART_STRAIGHT_LINE_MMS),
+            SharedLinkDecision::Unreadable
+        );
+        // The shared program equals the editor's current text: load, no
+        // question -- nothing would change.
+        let hash_same = format!("#p={}", share::encode(RESTART_STRAIGHT_LINE_MMS));
+        assert_eq!(
+            decide_shared_link(&hash_same, RESTART_STRAIGHT_LINE_MMS),
+            SharedLinkDecision::Load {
+                source: RESTART_STRAIGHT_LINE_MMS.to_string(),
+                ask: false,
+            }
+        );
+        // The editor holds only the skeleton: load, no question -- nothing
+        // to lose.
+        let hash_other = format!("#p={}", share::encode(RESTART_STRAIGHT_LINE_MMS));
+        assert_eq!(
+            decide_shared_link(&hash_other, DEFAULT_MMS),
+            SharedLinkDecision::Load {
+                source: RESTART_STRAIGHT_LINE_MMS.to_string(),
+                ask: false,
+            }
+        );
+        // The editor holds different work: ask first.
+        assert_eq!(
+            decide_shared_link(&hash_other, OTHER_WORK_MMS),
+            SharedLinkDecision::Load {
+                source: RESTART_STRAIGHT_LINE_MMS.to_string(),
+                ask: true,
+            }
+        );
+    }
+
+    #[test]
+    fn load_shared_drops_breakpoints_and_loads_the_shared_program() {
+        let mut control = Control::new(DEFAULT_MMS, "share-load-fixture.mms").expect("assembles");
+        assert!(
+            control.toggle_breakpoint(5),
+            "line 5 (the TRAP) must resolve in DEFAULT_MMS"
+        );
+        let mut chunk_timeout = None;
+        let mut debounce_timeout = None;
+        let mut error = Some("stale error".to_string());
+        let mut error_line = Some(5);
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        load_shared(
+            &mut chunk_timeout,
+            &mut debounce_timeout,
+            &mut control,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+            RESTART_STRAIGHT_LINE_MMS,
+        );
+
+        assert!(
+            control.breakpoint_lines().is_empty(),
+            "a shared program must start with no breakpoints from the program it replaced"
+        );
+        assert!(error.is_none());
+        assert!(error_line.is_none());
+        let fresh =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "share-load-compare.mms").expect("assembles");
+        assert_eq!(control.get_pc(), fresh.get_pc());
+    }
+
+    #[test]
+    fn load_shared_that_fails_to_assemble_falls_back_to_default_mms_with_its_error_set() {
+        const BOGUS_MMS: &str = "\tLOC\t#100\nMain\tBOGUS\t$1,1\n";
+        let mut control = Control::new(DEFAULT_MMS, "share-bad-fixture.mms").expect("assembles");
+        let default_pc = control.get_pc();
+        let mut chunk_timeout = None;
+        let mut debounce_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        load_shared(
+            &mut chunk_timeout,
+            &mut debounce_timeout,
+            &mut control,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+            BOGUS_MMS,
+        );
+
+        assert!(
+            error.is_some(),
+            "the shared program's own error must surface"
+        );
+        assert_eq!(
+            control.get_pc(),
+            default_pc,
+            "the machine must fall back to DEFAULT_MMS's own load"
+        );
     }
 }
