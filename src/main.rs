@@ -8,6 +8,7 @@ use wasm_bindgen::closure::Closure;
 use web_sys::{BeforeUnloadEvent, Event};
 use yew::{Component, Context, Html, NodeRef, Renderer, html};
 
+mod autosave;
 mod control;
 mod control_bar;
 mod diagnostics;
@@ -147,28 +148,38 @@ fn continue_pressed(control: &mut Control, view_state: &mut ViewState) -> Option
     Some(first_chunk_outcome(control, view_state, outcome))
 }
 
+/// Whether `window.onbeforeunload` should arm the native leave-this-page
+/// confirmation: the most recent save failed, and the editor holds
+/// something other than `DEFAULT_MMS` to lose. A successful save means
+/// leaving costs nothing; the untouched skeleton has nothing to lose even
+/// after a failed save.
+fn leave_warning_needed(last_save_succeeded: bool, source: &str) -> bool {
+    !last_save_succeeded && source != DEFAULT_MMS
+}
+
 /// The JS closure backing `window.onbeforeunload` -- must stay alive for as
 /// long as the handler should stay registered; dropping it frees the JS
 /// function `onbeforeunload` points at.
 type BeforeUnloadHandler = Closure<dyn FnMut(Event)>;
 
-/// Registers `window.onbeforeunload`: when `dirty` (shared with `App`) is
-/// set at unload time, calls `Event::prevent_default` and sets
-/// `BeforeUnloadEvent`'s `returnValue` -- the modern and legacy triggers,
-/// respectively, for a browser's native "leave this page? changes may not
-/// be saved" prompt, since browsers vary in which one they still honor.
-/// Returns the shared flag alongside the `Closure` backing the handler; the
-/// caller must keep it alive (see [`BeforeUnloadHandler`]).
+/// Registers `window.onbeforeunload`: when `armed` (shared with `App`, see
+/// `leave_warning_needed`) is set at unload time, calls
+/// `Event::prevent_default` and sets `BeforeUnloadEvent`'s `returnValue` --
+/// the modern and legacy triggers, respectively, for a browser's native
+/// "leave this page? changes may not be saved" prompt, since browsers vary
+/// in which one they still honor. Returns the shared flag alongside the
+/// `Closure` backing the handler; the caller must keep it alive (see
+/// [`BeforeUnloadHandler`]).
 fn install_beforeunload_handler() -> (Rc<RefCell<bool>>, BeforeUnloadHandler) {
-    let dirty = Rc::new(RefCell::new(false));
-    let dirty_for_handler = dirty.clone();
+    let armed = Rc::new(RefCell::new(false));
+    let armed_for_handler = armed.clone();
     let handler = Closure::wrap(Box::new(move |event: Event| {
-        if !*dirty_for_handler.borrow() {
+        if !*armed_for_handler.borrow() {
             return;
         }
         event.prevent_default();
         if let Ok(event) = event.dyn_into::<BeforeUnloadEvent>() {
-            event.set_return_value("Changes you made may not be saved.");
+            event.set_return_value("The last save failed; changes may not be saved.");
         }
     }) as Box<dyn FnMut(Event)>);
 
@@ -176,7 +187,7 @@ fn install_beforeunload_handler() -> (Rc<RefCell<bool>>, BeforeUnloadHandler) {
         window.set_onbeforeunload(Some(handler.as_ref().unchecked_ref()));
     }
 
-    (dirty, handler)
+    (armed, handler)
 }
 
 /// `Msg::Interrupt`'s core logic, factored out of `App::update` so it is
@@ -220,6 +231,39 @@ fn reload_and_record(
             *error_line = parse_error_location(&err).map(|(line, _)| line);
             *error = Some(describe_source_error(source, &err));
         }
+    }
+}
+
+/// `App::create`'s restore step, the plain seam a host test can drive
+/// without a live `Context`: given what `autosave::load` returned, decide
+/// the editor's starting text. `control` must already hold `DEFAULT_MMS`
+/// (`Control::new`'s own infallible load); a saved program loads through
+/// `reload_and_record`, the same path `Msg::SourceChanged`'s debounced
+/// reassemble takes, so one that fails to assemble shows its error exactly
+/// as an edit would -- and leaves `control` on `DEFAULT_MMS`'s machine,
+/// `reload`'s own guarantee on a parse error. Nothing saved, or an empty
+/// entry, starts from `DEFAULT_MMS` with no reload needed.
+fn restore_source(
+    saved: Option<String>,
+    chunk_timeout: &mut Option<Timeout>,
+    control: &mut Control,
+    error: &mut Option<String>,
+    error_line: &mut Option<usize>,
+    view_state: &mut ViewState,
+) -> String {
+    match saved {
+        Some(source) => {
+            reload_and_record(
+                chunk_timeout,
+                control,
+                &source,
+                error,
+                error_line,
+                view_state,
+            );
+            source
+        }
+        None => DEFAULT_MMS.to_string(),
     }
 }
 
@@ -463,16 +507,16 @@ pub struct App {
     /// silently drop an in-flight drag the moment that happened.
     drag_state: Rc<RefCell<Option<DragState>>>,
     /// Whether `window.onbeforeunload`'s handler (`_beforeunload_handler`)
-    /// currently arms the native confirmation dialog -- `self.source !=
-    /// DEFAULT_MMS`, re-evaluated at the same point `self.source` itself
-    /// changes. Shared with that handler rather than read from `self`
-    /// directly: the handler is a `'static` JS closure, registered once at
-    /// `create` and outliving any single `view()`/`update()` call.
-    source_dirty: Rc<RefCell<bool>>,
+    /// currently arms the native confirmation dialog -- `leave_warning_needed`,
+    /// re-evaluated at each save (`Msg::SourceChanged`, decision 2). Shared
+    /// with that handler rather than read from `self` directly: the handler
+    /// is a `'static` JS closure, registered once at `create` and outliving
+    /// any single `view()`/`update()` call.
+    leave_warning_armed: Rc<RefCell<bool>>,
     /// Kept alive for as long as `App` is -- dropping a `Closure` frees the
     /// JS function it backs, which would leave `window.onbeforeunload`
-    /// pointing at freed memory. Never read directly; `source_dirty` is the
-    /// live channel to it.
+    /// pointing at freed memory. Never read directly; `leave_warning_armed`
+    /// is the live channel to it.
     _beforeunload_handler: BeforeUnloadHandler,
     /// Live enablement `window.onkeydown`'s handler reads on every keydown --
     /// kept current by the end of `update`, since the handler itself runs
@@ -525,12 +569,11 @@ impl App {
         }
     }
 
-    /// Whether `window.onbeforeunload` should arm the native leave-this-
-    /// page confirmation: there is something the user typed that a silent
-    /// reload would lose. `false` for the untouched default program, so a
-    /// visitor who loads the page and changes nothing is never nagged.
-    fn should_confirm_before_leaving(&self) -> bool {
-        self.source != DEFAULT_MMS
+    /// Saves `self.source` and re-arms the leave-page warning from the
+    /// result (`leave_warning_needed`) -- the one path every save takes.
+    fn save_and_arm_warning(&mut self) {
+        let saved = autosave::save(&self.source);
+        *self.leave_warning_armed.borrow_mut() = leave_warning_needed(saved, &self.source);
     }
 
     /// Reload the current source -- Reset's own step, and the start state
@@ -575,19 +618,37 @@ impl Component for App {
     type Properties = ();
 
     fn create(_ctx: &Context<Self>) -> Self {
-        let control = Control::new(DEFAULT_MMS, SOURCE_FILENAME)
+        let mut control = Control::new(DEFAULT_MMS, SOURCE_FILENAME)
             .expect("DEFAULT_MMS assembles; pinned by examples::tests::default_mms_assembles");
-        let (source_dirty, beforeunload_handler) = install_beforeunload_handler();
+        let (leave_warning_armed, beforeunload_handler) = install_beforeunload_handler();
         let (shortcut_enablement, keydown_handler) =
             install_keyboard_shortcuts(_ctx.link().clone());
+
+        // Restore a saved program, if any (decision 3): the machine above
+        // already holds `DEFAULT_MMS`, so a saved program that fails to
+        // assemble leaves it there, showing its error exactly as an edit
+        // would.
+        let mut chunk_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        let source = restore_source(
+            autosave::load(),
+            &mut chunk_timeout,
+            &mut control,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+
         let mut app = Self {
-            source: DEFAULT_MMS.to_string(),
+            source,
             control,
-            error: None,
-            error_line: None,
-            chunk_timeout: None,
+            error,
+            error_line,
+            chunk_timeout,
             debounce_timeout: None,
-            view_state: ViewState::new(),
+            view_state,
             status_message: "Loaded".to_string(),
             restart_signal: false,
             left_column_width: None,
@@ -597,7 +658,7 @@ impl Component for App {
             row_splitter_ref: NodeRef::default(),
             output_pane_ref: NodeRef::default(),
             drag_state: Rc::new(RefCell::new(None)),
-            source_dirty,
+            leave_warning_armed,
             _beforeunload_handler: beforeunload_handler,
             shortcut_enablement,
             _keydown_handler: keydown_handler,
@@ -629,7 +690,7 @@ impl Component for App {
                 // Run's chunk sequence never reaches its own terminal
                 // outcome.
                 self.source = source;
-                *self.source_dirty.borrow_mut() = self.should_confirm_before_leaving();
+                self.save_and_arm_warning();
                 self.control.end_in_flight();
                 self.chunk_timeout = None;
                 self.restart_signal = false;
@@ -1490,4 +1551,101 @@ mod tests {
             "a no-op flush must not touch the changed-specials set"
         );
     }
+
+    #[test]
+    fn restore_source_with_nothing_saved_starts_from_default() {
+        let mut control = Control::new(DEFAULT_MMS, "restore-none.mms").expect("assembles");
+        let mut chunk_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        let source = restore_source(
+            None,
+            &mut chunk_timeout,
+            &mut control,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+        assert_eq!(source, DEFAULT_MMS);
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn restore_source_loads_a_saved_program_that_assembles() {
+        let mut control = Control::new(DEFAULT_MMS, "restore-ok.mms").expect("assembles");
+        let mut chunk_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        let source = restore_source(
+            Some(RESTART_STRAIGHT_LINE_MMS.to_string()),
+            &mut chunk_timeout,
+            &mut control,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+        assert_eq!(source, RESTART_STRAIGHT_LINE_MMS);
+        assert!(error.is_none());
+        let restarted =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "restore-compare.mms").expect("assembles");
+        assert_eq!(control.get_pc(), restarted.get_pc());
+    }
+
+    #[test]
+    fn restore_source_shows_a_saved_programs_own_error_but_keeps_default_mms_running() {
+        // A6: a saved program that fails to assemble still becomes the
+        // editor text, but the machine stays on `DEFAULT_MMS`'s own load --
+        // `Control::reload` leaves the previous machine untouched on a
+        // parse error.
+        const BOGUS_MMS: &str = "\tLOC\t#100\nMain\tBOGUS\t$1,1\n";
+        let mut control = Control::new(DEFAULT_MMS, "restore-bad.mms").expect("assembles");
+        let default_pc = control.get_pc();
+        let mut chunk_timeout = None;
+        let mut error = None;
+        let mut error_line = None;
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        let source = restore_source(
+            Some(BOGUS_MMS.to_string()),
+            &mut chunk_timeout,
+            &mut control,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+        assert_eq!(source, BOGUS_MMS, "the editor must show the saved text");
+        assert!(
+            error.is_some(),
+            "the saved program's own error must surface"
+        );
+        assert_eq!(
+            control.get_pc(),
+            default_pc,
+            "the machine must stay on DEFAULT_MMS's own load"
+        );
+    }
+
+    #[test]
+    fn leave_warning_needed_arms_only_on_a_failed_save_with_work_to_lose() {
+        assert!(
+            leave_warning_needed(false, RESTART_STRAIGHT_LINE_MMS),
+            "a failed save with work to lose must arm the warning"
+        );
+        assert!(
+            !leave_warning_needed(false, DEFAULT_MMS),
+            "a failed save with nothing but the skeleton must not arm the warning"
+        );
+        assert!(
+            !leave_warning_needed(true, RESTART_STRAIGHT_LINE_MMS),
+            "a successful save must not arm the warning"
+        );
+    }
+
 }
