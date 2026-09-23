@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn decode_rejects_a_payload_past_the_inflate_limit() {
         let huge = "\0".repeat(2 << 20);
-        assert_eq!(decode(&encode(&huge)), None);
+        assert!(decode(&encode(&huge)).is_none());
     }
 
     #[test]
