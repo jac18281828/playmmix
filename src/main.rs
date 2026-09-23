@@ -2409,6 +2409,54 @@ mod tests {
         );
     }
 
+    /// A fresh `Control` loaded from `source`, paired with a `ViewState`
+    /// seeded from it -- the repeated setup the `first_chunk_outcome` tests
+    /// below start from.
+    fn fresh_control_and_view_state(source: &str, filename: &str) -> (Control, ViewState) {
+        let control = Control::new(source, filename).expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        (control, view_state)
+    }
+
+    #[test]
+    fn first_chunk_outcome_increments_execution_stops_once_on_halted() {
+        // `first_chunk_outcome` is Continue's and Next's own first chunk;
+        // its increment needs direct coverage, since neither command's own
+        // caller-side test reaches a terminal outcome on the first chunk.
+        let (mut control, mut view_state) =
+            fresh_control_and_view_state(DEFAULT_MMS, "first-chunk-halted.mms");
+        let mut execution_stops = 0;
+
+        let (_, needs_tick) = first_chunk_outcome(
+            &mut control,
+            &mut view_state,
+            StepOutcome::Halted,
+            &mut execution_stops,
+        );
+        assert!(!needs_tick, "a Halted outcome is terminal");
+        assert_eq!(execution_stops, 1, "a Halted outcome must count as a stop");
+    }
+
+    #[test]
+    fn first_chunk_outcome_leaves_execution_stops_unchanged_on_budget_exhausted() {
+        let (mut control, mut view_state) =
+            fresh_control_and_view_state(DEFAULT_MMS, "first-chunk-budget.mms");
+        let mut execution_stops = 0;
+
+        let (_, needs_tick) = first_chunk_outcome(
+            &mut control,
+            &mut view_state,
+            StepOutcome::BudgetExhausted,
+            &mut execution_stops,
+        );
+        assert!(needs_tick, "a BudgetExhausted outcome needs another tick");
+        assert_eq!(
+            execution_stops, 0,
+            "a BudgetExhausted chunk must not count as a stop"
+        );
+    }
+
     #[test]
     fn interrupt_if_running_increments_execution_stops_once_when_it_interrupts() {
         let mut control =
