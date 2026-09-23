@@ -314,12 +314,10 @@ fn restore_source(
     }
 }
 
-/// New's core: cancel any pending debounce and chunk tick, replace
-/// `control` with a fresh load of `DEFAULT_MMS` -- a fresh `Control` holds
-/// no breakpoints, unlike a reload, which keeps every breakpoint line that
-/// still resolves -- and clear `error`, `error_line`, and `view_state` to
-/// match. Returns `DEFAULT_MMS`, for the caller to assign as the editor's
-/// text and save.
+/// New's core: delegates to `load_shared` with `DEFAULT_MMS` -- a fresh
+/// `Control` holds no breakpoints, unlike a reload, which keeps every
+/// breakpoint line that still resolves. Returns `DEFAULT_MMS`, for the
+/// caller to assign as the editor's text and save.
 fn start_over(
     chunk_timeout: &mut Option<Timeout>,
     debounce_timeout: &mut Option<Timeout>,
@@ -328,25 +326,32 @@ fn start_over(
     error_line: &mut Option<usize>,
     view_state: &mut ViewState,
 ) -> String {
-    *chunk_timeout = None;
-    *debounce_timeout = None;
-    *control = default_control();
-    view_state.reset(control);
-    *error = None;
-    *error_line = None;
+    load_shared(
+        chunk_timeout,
+        debounce_timeout,
+        control,
+        error,
+        error_line,
+        view_state,
+        DEFAULT_MMS,
+    );
     DEFAULT_MMS.to_string()
 }
 
+/// The browser's native confirm dialog, `true` when the user accepts. A
+/// confirm error counts as No: there is no way to ask again, so the safer
+/// reading of "couldn't confirm" is "didn't confirm".
+fn confirm(message: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.confirm_with_message(message).ok())
+        .unwrap_or(false)
+}
+
 /// Whether New may proceed: `true` outright when `current` matches the
-/// skeleton or `replacement` (`autosave::confirm_needed`), otherwise the
-/// browser's native confirm dialog decides. A confirm error counts as
-/// Cancel: there is no way to ask again, so the safer reading of
-/// "couldn't confirm" is "didn't confirm".
+/// skeleton or `replacement` (`autosave::confirm_needed`), otherwise
+/// `confirm` decides.
 fn confirm_new(current: &str, replacement: &str) -> bool {
-    !autosave::confirm_needed(current, replacement)
-        || web_sys::window()
-            .and_then(|window| window.confirm_with_message(NEW_CONFIRM_MESSAGE).ok())
-            .unwrap_or(false)
+    !autosave::confirm_needed(current, replacement) || confirm(NEW_CONFIRM_MESSAGE)
 }
 
 /// What a `hashchange`, or the check scheduled after the first paint, does
@@ -384,15 +389,15 @@ fn decide_shared_link(hash: &str, current: &str) -> SharedLinkDecision {
     }
 }
 
-/// A shared program's load (decision 5), factored out for the same reason
-/// `start_over` is: testable without a live `Context`. Builds a fresh
-/// `Control` from `shared` -- like New, so no breakpoint from the replaced
-/// program carries over -- and, on a parse error, falls back to
+/// A shared program's load (decision 5), testable without a live
+/// `Context`: `start_over` (New) delegates here with `DEFAULT_MMS`. Builds
+/// a fresh `Control` from `shared` -- like New, so no breakpoint from the
+/// replaced program carries over -- and, on a parse error, falls back to
 /// `DEFAULT_MMS`'s own machine, showing `shared`'s error exactly as a
 /// restored program shows one (autosave's decision 3, `restore_source`).
 /// The caller assigns `shared` as the editor's new text and saves it;
-/// `shared` isn't returned here since it's the caller's own, already
-/// owned, `SharedLinkDecision::Load` payload.
+/// `shared` isn't returned here since it's already the caller's own,
+/// owned string.
 fn load_shared(
     chunk_timeout: &mut Option<Timeout>,
     debounce_timeout: &mut Option<Timeout>,
@@ -1152,14 +1157,7 @@ impl Component for App {
                         true
                     }
                     SharedLinkDecision::Load { source, ask } => {
-                        // A confirm error counts as No (decision 4), the
-                        // same reading New's own confirm takes.
-                        let proceeds = !ask
-                            || web_sys::window()
-                                .and_then(|window| {
-                                    window.confirm_with_message(SHARE_LOAD_CONFIRM_MESSAGE).ok()
-                                })
-                                .unwrap_or(false);
+                        let proceeds = !ask || confirm(SHARE_LOAD_CONFIRM_MESSAGE);
                         if !proceeds {
                             false
                         } else {
