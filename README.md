@@ -17,6 +17,11 @@ point — nothing runs until you ask it to.
 
 ## How it works
 
+The editor keeps its program in this browser as you type, shared by its
+tabs — the last edit wins. iOS Safari can clear a site's storage after days
+unused, so treat it as a convenience, not permanent storage. **New** starts
+over from the minimal skeleton, asking first when there is work to lose.
+
 The page loads with a minimal skeleton: an entry point that halts cleanly,
 and an empty data segment ready to build on.
 
