@@ -2342,9 +2342,8 @@ mod tests {
     #[test]
     fn advance_chunk_once_leaves_execution_stops_unchanged_on_budget_exhausted() {
         // A chunk that reschedules itself hasn't stopped anything yet.
-        let mut control = Control::new(INFINITE_LOOP_MMS, "stops-budget.mms").expect("assembles");
-        let mut view_state = ViewState::new();
-        view_state.reset(&control);
+        let (mut control, mut view_state) =
+            fresh_control_and_view_state(INFINITE_LOOP_MMS, "stops-budget.mms");
         control.start_run();
         let mut restart_signal = false;
         let mut execution_stops = 0;
@@ -2363,48 +2362,44 @@ mod tests {
     }
 
     #[test]
-    fn advance_chunk_once_increments_execution_stops_once_on_a_terminal_outcome() {
-        // Halted: the straight-line fixture halts within its first chunk.
-        let mut halts =
-            Control::new(RESTART_STRAIGHT_LINE_MMS, "stops-halt.mms").expect("assembles");
-        let mut view_state = ViewState::new();
-        view_state.reset(&halts);
-        halts.start_run();
+    fn advance_chunk_once_increments_execution_stops_once_on_halted() {
+        // The straight-line fixture halts within its first chunk.
+        let (mut control, mut view_state) =
+            fresh_control_and_view_state(RESTART_STRAIGHT_LINE_MMS, "stops-halt.mms");
+        control.start_run();
         let mut restart_signal = false;
         let mut execution_stops = 0;
         let (_, needs_tick) = advance_chunk_once(
-            &mut halts,
+            &mut control,
             &mut view_state,
             &mut restart_signal,
             &mut execution_stops,
         );
         assert!(!needs_tick, "fixture must halt within one chunk");
         assert_eq!(execution_stops, 1, "a Halted outcome must count as a stop");
+    }
 
-        // Breakpoint: same fixture, a breakpoint set before the halt.
-        let mut hits_breakpoint =
-            Control::new(RESTART_STRAIGHT_LINE_MMS, "stops-breakpoint.mms").expect("assembles");
-        assert!(
-            hits_breakpoint.toggle_breakpoint(3),
-            "line 3 has an address"
-        );
-        let mut view_state2 = ViewState::new();
-        view_state2.reset(&hits_breakpoint);
-        hits_breakpoint.start_run();
-        let mut restart_signal2 = false;
-        let mut execution_stops2 = 0;
-        let (_, needs_tick2) = advance_chunk_once(
-            &mut hits_breakpoint,
-            &mut view_state2,
-            &mut restart_signal2,
-            &mut execution_stops2,
+    #[test]
+    fn advance_chunk_once_increments_execution_stops_once_on_breakpoint() {
+        // Same fixture, a breakpoint set before the halt.
+        let (mut control, mut view_state) =
+            fresh_control_and_view_state(RESTART_STRAIGHT_LINE_MMS, "stops-breakpoint.mms");
+        assert!(control.toggle_breakpoint(3), "line 3 has an address");
+        control.start_run();
+        let mut restart_signal = false;
+        let mut execution_stops = 0;
+        let (_, needs_tick) = advance_chunk_once(
+            &mut control,
+            &mut view_state,
+            &mut restart_signal,
+            &mut execution_stops,
         );
         assert!(
-            !needs_tick2,
+            !needs_tick,
             "fixture must hit the breakpoint within one chunk"
         );
         assert_eq!(
-            execution_stops2, 1,
+            execution_stops, 1,
             "a Breakpoint outcome must count as a stop"
         );
     }
@@ -2459,10 +2454,8 @@ mod tests {
 
     #[test]
     fn interrupt_if_running_increments_execution_stops_once_when_it_interrupts() {
-        let mut control =
-            Control::new(INFINITE_LOOP_MMS, "stops-interrupt.mms").expect("assembles");
-        let mut view_state = ViewState::new();
-        view_state.reset(&control);
+        let (mut control, mut view_state) =
+            fresh_control_and_view_state(INFINITE_LOOP_MMS, "stops-interrupt.mms");
         control.start_run();
         let mut execution_stops = 0;
 
@@ -2479,10 +2472,8 @@ mod tests {
 
     #[test]
     fn step_pressed_increments_execution_stops_once_when_it_steps() {
-        let mut control =
-            Control::new(RESTART_STRAIGHT_LINE_MMS, "stops-step.mms").expect("assembles");
-        let mut view_state = ViewState::new();
-        view_state.reset(&control);
+        let (mut control, mut view_state) =
+            fresh_control_and_view_state(RESTART_STRAIGHT_LINE_MMS, "stops-step.mms");
         let mut restart_signal = false;
         let mut execution_stops = 0;
 
@@ -2501,10 +2492,8 @@ mod tests {
         // Decision: a Step refused by a halt, same as one refused by an
         // assembly error (guarded a level up, in `flush_pending_reassemble`,
         // before `step_pressed` ever runs), must not count as a stop.
-        let mut control =
-            Control::new(RESTART_STRAIGHT_LINE_MMS, "stops-halted.mms").expect("assembles");
-        let mut view_state = ViewState::new();
-        view_state.reset(&control);
+        let (mut control, mut view_state) =
+            fresh_control_and_view_state(RESTART_STRAIGHT_LINE_MMS, "stops-halted.mms");
         while !control.is_halted() {
             control.step();
         }

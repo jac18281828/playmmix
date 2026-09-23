@@ -56,8 +56,9 @@ pub struct Editor {
     /// `pending_scroll` starts `false`, before `changed` ever runs.
     last_execution_stops: Option<u64>,
     /// Set by `changed` when this props update should scroll the current
-    /// line into view, and acted on -- then cleared -- by the next
-    /// `rendered`, once the DOM holds the rows the new props produced.
+    /// line into view, and left set -- sticky -- until the next `rendered`
+    /// consumes and clears it, so an intervening props update that itself
+    /// has nothing to follow can't clear a scroll still owed.
     pending_scroll: bool,
 }
 
@@ -106,11 +107,12 @@ impl Component for Editor {
 
     fn changed(&mut self, ctx: &Context<Self>, _old_props: &Self::Properties) -> bool {
         let execution_stops = ctx.props().execution_stops;
-        self.pending_scroll = should_follow_current_line(
-            self.last_execution_stops,
-            execution_stops,
-            ctx.props().current_line,
-        );
+        self.pending_scroll = self.pending_scroll
+            || should_follow_current_line(
+                self.last_execution_stops,
+                execution_stops,
+                ctx.props().current_line,
+            );
         self.last_execution_stops = Some(execution_stops);
         true
     }
@@ -250,7 +252,10 @@ impl Editor {
         };
 
         let viewport_height = textarea.client_height();
-        let max_scroll_top = textarea.scroll_height() - viewport_height;
+        // `.max(0)`: a transient layout state (or a rounding quirk) could
+        // read `scroll_height` at or below `client_height`; `f64::clamp`
+        // panics if its upper bound comes in below its lower one.
+        let max_scroll_top = (textarea.scroll_height() - viewport_height).max(0);
         let target = scroll_top_to_reveal_line(
             current_row.offset_top() as f64,
             current_row.offset_height() as f64,
@@ -263,7 +268,9 @@ impl Editor {
         };
 
         textarea.set_scroll_top(scroll_top as i32);
-        self.sync_scrolled_content(textarea.scroll_left(), scroll_top as i32);
+        // Read `scroll_top` back rather than reusing the requested value:
+        // the browser is the source of truth for where it actually landed.
+        self.sync_scrolled_content(textarea.scroll_left(), textarea.scroll_top());
     }
 }
 
