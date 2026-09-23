@@ -45,9 +45,8 @@ const SOURCE_FILENAME: &str = "source.mms";
 /// enough that a genuine pause still reads as immediate.
 const SOURCE_DEBOUNCE_MS: u32 = 400;
 
-/// New's confirmation prompt (decision 7), exact per the owner's settled
-/// text -- shown only when `autosave::confirm_needed` says there is work to
-/// lose.
+/// New's confirmation prompt, shown only when `autosave::confirm_needed`
+/// says the editor holds a program distinct from the minimal skeleton.
 const NEW_CONFIRM_MESSAGE: &str = "Replace your program with the minimal skeleton?";
 
 /// The status readout's text for a chunked Run, Continue, or Next's
@@ -172,7 +171,7 @@ type BeforeUnloadHandler = Closure<dyn FnMut(Event)>;
 /// `Event::prevent_default` and sets `BeforeUnloadEvent`'s `returnValue` --
 /// the modern and legacy triggers, respectively, for a browser's native
 /// "leave this page? changes may not be saved" prompt, since browsers vary
-/// in which one they still honor. Returns the shared flag alongside the
+/// in which one they honor. Returns the shared flag alongside the
 /// `Closure` backing the handler; the caller must keep it alive (see
 /// [`BeforeUnloadHandler`]).
 fn install_beforeunload_handler() -> (Rc<RefCell<bool>>, BeforeUnloadHandler) {
@@ -239,6 +238,13 @@ fn reload_and_record(
     }
 }
 
+/// Loads `DEFAULT_MMS`: the machine `App::create` and New both start from.
+/// Infallible -- pinned by `examples::tests::default_mms_assembles`.
+fn default_control() -> Control {
+    Control::new(DEFAULT_MMS, SOURCE_FILENAME)
+        .expect("DEFAULT_MMS assembles; pinned by examples::tests::default_mms_assembles")
+}
+
 /// `App::create`'s restore step, the plain seam a host test can drive
 /// without a live `Context`: given what `autosave::load` returned, decide
 /// the editor's starting text. `control` must already hold `DEFAULT_MMS`
@@ -272,12 +278,12 @@ fn restore_source(
     }
 }
 
-/// New's core (decision 7): cancel any pending debounce and chunk tick,
-/// replace `control` with a fresh load of `DEFAULT_MMS` -- a fresh
-/// `Control` holds no breakpoints, unlike a reload, which keeps every
-/// breakpoint line that still resolves -- and clear `error`, `error_line`,
-/// and `view_state` to match. Returns `DEFAULT_MMS`, the editor's new
-/// source text, for the caller to assign and save.
+/// New's core: cancel any pending debounce and chunk tick, replace
+/// `control` with a fresh load of `DEFAULT_MMS` -- a fresh `Control` holds
+/// no breakpoints, unlike a reload, which keeps every breakpoint line that
+/// still resolves -- and clear `error`, `error_line`, and `view_state` to
+/// match. Returns `DEFAULT_MMS`, for the caller to assign as the editor's
+/// text and save.
 fn start_over(
     chunk_timeout: &mut Option<Timeout>,
     debounce_timeout: &mut Option<Timeout>,
@@ -288,12 +294,23 @@ fn start_over(
 ) -> String {
     *chunk_timeout = None;
     *debounce_timeout = None;
-    *control = Control::new(DEFAULT_MMS, SOURCE_FILENAME)
-        .expect("DEFAULT_MMS assembles; pinned by examples::tests::default_mms_assembles");
+    *control = default_control();
     view_state.reset(control);
     *error = None;
     *error_line = None;
     DEFAULT_MMS.to_string()
+}
+
+/// Whether New may proceed: `true` outright when `current` matches the
+/// skeleton or `replacement` (`autosave::confirm_needed`), otherwise the
+/// browser's native confirm dialog decides. A confirm error counts as
+/// Cancel: there is no way to ask again, so the safer reading of
+/// "couldn't confirm" is "didn't confirm".
+fn confirm_new(current: &str, replacement: &str) -> bool {
+    !autosave::confirm_needed(current, replacement)
+        || web_sys::window()
+            .and_then(|window| window.confirm_with_message(NEW_CONFIRM_MESSAGE).ok())
+            .unwrap_or(false)
 }
 
 /// `Msg::Run`'s restart-and-run core, factored out for the same reason
@@ -459,8 +476,8 @@ pub enum Msg {
     Interrupt,
     Reset,
     /// The header's New button: start over from `DEFAULT_MMS`, confirming
-    /// first when the editor holds unsaved-elsewhere work (decision 7,
-    /// `autosave::confirm_needed`).
+    /// first when the editor holds a program that differs from the
+    /// skeleton (`autosave::confirm_needed`).
     New,
     /// One chunk boundary: reschedule if the run isn't finished, or if an
     /// `Interrupt` landed while this tick was scheduled, do nothing.
@@ -542,9 +559,9 @@ pub struct App {
     /// Whether `window.onbeforeunload`'s handler (`_beforeunload_handler`)
     /// currently arms the native confirmation dialog -- `leave_warning_needed`,
     /// re-evaluated at each save (`Msg::SourceChanged` and `Msg::New`, the
-    /// only two save points, decision 2). Shared with that handler rather
-    /// than read from `self` directly: the handler is a `'static` JS
-    /// closure, registered once at `create` and outliving any single
+    /// only two save points). Shared with that handler rather than read
+    /// from `self` directly: the handler is a `'static` JS closure,
+    /// registered once at `create` and outliving any single
     /// `view()`/`update()` call.
     leave_warning_armed: Rc<RefCell<bool>>,
     /// Kept alive for as long as `App` is -- dropping a `Closure` frees the
@@ -653,16 +670,14 @@ impl Component for App {
     type Properties = ();
 
     fn create(_ctx: &Context<Self>) -> Self {
-        let mut control = Control::new(DEFAULT_MMS, SOURCE_FILENAME)
-            .expect("DEFAULT_MMS assembles; pinned by examples::tests::default_mms_assembles");
+        let mut control = default_control();
         let (leave_warning_armed, beforeunload_handler) = install_beforeunload_handler();
         let (shortcut_enablement, keydown_handler) =
             install_keyboard_shortcuts(_ctx.link().clone());
 
-        // Restore a saved program, if any (decision 3): the machine above
-        // already holds `DEFAULT_MMS`, so a saved program that fails to
-        // assemble leaves it there, showing its error exactly as an edit
-        // would.
+        // Restore a saved program, if any: the machine above already holds
+        // `DEFAULT_MMS`, so a saved program that fails to assemble leaves
+        // it there, showing its error exactly as an edit would.
         let mut chunk_timeout = None;
         let mut error = None;
         let mut error_line = None;
@@ -880,14 +895,7 @@ impl Component for App {
                 true
             }
             Msg::New => {
-                // A confirm error (`Result::Err` from `confirm_with_message`)
-                // counts as Cancel: there is no way to ask again, so the
-                // safer reading of "couldn't confirm" is "didn't confirm".
-                let proceeds = !autosave::confirm_needed(&self.source, DEFAULT_MMS)
-                    || web_sys::window()
-                        .and_then(|window| window.confirm_with_message(NEW_CONFIRM_MESSAGE).ok())
-                        .unwrap_or(false);
-                if !proceeds {
+                if !confirm_new(&self.source, DEFAULT_MMS) {
                     false
                 } else {
                     self.source = start_over(
@@ -1660,15 +1668,18 @@ mod tests {
         );
         assert_eq!(source, RESTART_STRAIGHT_LINE_MMS);
         assert!(error.is_none());
-        let restarted =
-            Control::new(RESTART_STRAIGHT_LINE_MMS, "restore-compare.mms").expect("assembles");
-        assert_eq!(control.get_pc(), restarted.get_pc());
+        // Both fixtures start at `#100`, so a PC comparison alone would
+        // pass even without the reload: `DEFAULT_MMS` halts on its own
+        // first instruction, so only the reloaded program's own `SETL
+        // $1,1` can advance the PC and set `$1`.
+        assert_eq!(control.step(), StepOutcome::Advanced);
+        assert_eq!(control.machine().get_register(1), 1);
     }
 
     #[test]
     fn restore_source_shows_a_saved_programs_own_error_but_keeps_default_mms_running() {
-        // A6: a saved program that fails to assemble still becomes the
-        // editor text, but the machine stays on `DEFAULT_MMS`'s own load --
+        // A saved program that fails to assemble becomes the editor text
+        // regardless, but the machine stays on `DEFAULT_MMS`'s own load --
         // `Control::reload` leaves the previous machine untouched on a
         // parse error.
         const BOGUS_MMS: &str = "\tLOC\t#100\nMain\tBOGUS\t$1,1\n";
@@ -1717,18 +1728,31 @@ mod tests {
     }
 
     #[test]
-    fn start_over_drops_breakpoints_and_returns_to_the_default_skeleton() {
-        let mut control = Control::new(DEFAULT_MMS, "new-fixture.mms").expect("assembles");
+    fn start_over_drops_breakpoints_resets_view_state_and_returns_to_the_default_skeleton() {
+        // A fixture that does not already hold `DEFAULT_MMS`, so the
+        // assertions below prove New actually replaces the machine and
+        // resets the view state rather than merely finding them already in
+        // that shape.
+        let mut control =
+            Control::new(RESTART_STRAIGHT_LINE_MMS, "new-fixture.mms").expect("assembles");
         assert!(
             control.toggle_breakpoint(5),
-            "line 5 (the TRAP) must resolve in DEFAULT_MMS"
+            "line 5 (the TRAP) must resolve in this fixture"
         );
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+        assert_eq!(control.step(), StepOutcome::Advanced); // SETL $1,1
+        view_state.observe(&control);
+        view_state.record_pause_boundary(&control);
+        assert!(
+            view_state.changed_registers().contains(&1),
+            "fixture assumption: the step must flag $1 changed"
+        );
+
         let mut chunk_timeout = None;
         let mut debounce_timeout = None;
         let mut error = Some("stale error".to_string());
         let mut error_line = Some(5);
-        let mut view_state = ViewState::new();
-        view_state.reset(&control);
 
         let source = start_over(
             &mut chunk_timeout,
@@ -1746,6 +1770,15 @@ mod tests {
         );
         assert!(error.is_none());
         assert!(error_line.is_none());
+        assert!(
+            view_state.changed_registers().is_empty(),
+            "New must reset the view state, dropping the prior program's changed marks"
+        );
+        assert_eq!(
+            control.machine().get_register(1),
+            0,
+            "the machine must be DEFAULT_MMS's own fresh load, not the prior program's $1==1"
+        );
         let fresh = Control::new(DEFAULT_MMS, "new-compare.mms").expect("assembles");
         assert_eq!(control.get_pc(), fresh.get_pc());
         assert_eq!(control.session(), fresh.session());
