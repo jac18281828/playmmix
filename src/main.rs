@@ -465,12 +465,12 @@ fn has_property(object: &impl AsRef<JsValue>, name: &str) -> bool {
 /// success. On rejection, reads the error's `name` (`js_sys::Reflect::get`)
 /// and asks `on_reject` for the status to show, or `None` to leave the
 /// status unchanged (an `AbortError` -- the user dismissed the share
-/// sheet). Each closure is one-shot and converted straight into the
-/// `JsValue` `.then` takes (`Closure::once_into_js`), so the closure that
-/// fires is freed on invocation, with no separate `Closure` handle to
-/// leak or manage; `.then` itself is fetched and called through
-/// `js_sys::Reflect` since it takes two plain values here, not the typed
-/// closures `Promise::then2` expects.
+/// sheet). Each closure is one-shot, converted straight into the `JsValue`
+/// `.then` takes (`Closure::once_into_js`): the one that fires is freed on
+/// invocation; the other leaks, captures included, since a settled promise
+/// never calls it. `.then` is fetched through `js_sys::Reflect` and called
+/// through `Function::call2`, since `Promise::then2` only takes the typed
+/// closures `ScopedClosure` wraps, not a bare `JsValue`.
 fn watch_share_settlement(
     link: Scope<App>,
     promise: Promise,
@@ -1382,11 +1382,10 @@ impl Component for App {
 
     /// Schedules the shared-link check once, after the first render's own
     /// task: `rendered` runs synchronously within that task, so a
-    /// zero-delay `Timeout` -- deferred to its own, later task -- is what
-    /// lets a replace-confirmation show over the program it asks about
-    /// instead of racing it. `hashchange` (`install_hashchange_handler`)
-    /// takes the same path for every fragment change after this first one.
-    /// Leaked (`forget`): nothing needs to cancel this one-shot timer.
+    /// zero-delay `Timeout` runs in a later task than it. `hashchange`
+    /// (`install_hashchange_handler`) takes the same path for every
+    /// fragment change after this first one. Leaked (`forget`): nothing
+    /// needs to cancel this one-shot timer.
     fn rendered(&mut self, ctx: &Context<Self>, first_render: bool) {
         if first_render {
             let link = ctx.link().clone();
@@ -2143,9 +2142,9 @@ mod tests {
 
     #[test]
     fn load_shared_loads_the_shared_programs_own_machine() {
-        // A fixture that does not already hold `DEFAULT_MMS`, so the
-        // assertions below prove Share actually replaces the machine
-        // rather than merely finding it already in that shape.
+        // The fixture starts from `DEFAULT_MMS`, which differs from the
+        // shared program below, so stepping the loaded machine tells the
+        // two apart.
         let mut control = Control::new(DEFAULT_MMS, "share-load-fixture.mms").expect("assembles");
         assert!(
             control.toggle_breakpoint(5),
