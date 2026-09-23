@@ -19,6 +19,7 @@ mod keys;
 mod layout;
 mod machine;
 mod output;
+mod share;
 
 use control::{Control, StepOutcome, yield_to_event_loop};
 use control_bar::{ControlBar, ControlEnablement, control_enablement};

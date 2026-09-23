@@ -11,9 +11,12 @@ yew = { version = "0.23.0", features = ["csr"] }
 log = { version = "0.4", features = ["release_max_level_info"] }
 wasm-logger = "0.2.0"
 checksmix = { version = "0.3.13", default-features = false }
-web-sys = { version = "0.3", features = ["BeforeUnloadEvent", "Element", "HtmlElement", "HtmlTextAreaElement", "KeyboardEvent", "Storage", "Window"] }
+web-sys = { version = "0.3", features = ["BeforeUnloadEvent", "Clipboard", "Element", "History", "HtmlElement", "HtmlTextAreaElement", "KeyboardEvent", "Location", "Navigator", "ShareData", "Storage", "Window"] }
 wasm-bindgen = "0.2"
 gloo-timers = "0.3"
+js-sys = "0.3"
+base64 = "0.23"
+miniz_oxide = "0.9"
 
 [profile.release]
 opt-level = 'z'
