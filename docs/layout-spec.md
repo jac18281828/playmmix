@@ -29,7 +29,7 @@ right is the machine. CSS grid with named areas on `<main>`:
 
 ```
 +------------------------------------------------------------------------+
-| header playmmix[New][Share][Run][Cont][Step][Next][Interr][Reset] state|
+| header playmmix[New][Share][Run][Continue][Step][Next][Interrupt][Res…]|
 +--------------------------------+---------------------------------------+
 | editor                         | machine status (PC, depth)            |
 |   gutter | source              |---------------------------------------|
