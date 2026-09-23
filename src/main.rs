@@ -778,11 +778,11 @@ pub struct App {
     drag_state: Rc<RefCell<Option<DragState>>>,
     /// Whether `window.onbeforeunload`'s handler (`_beforeunload_handler`)
     /// currently arms the native confirmation dialog -- `leave_warning_needed`,
-    /// re-evaluated at each save (`Msg::SourceChanged` and `Msg::New`, the
-    /// only two save points). Shared with that handler rather than read
-    /// from `self` directly: the handler is a `'static` JS closure,
-    /// registered once at `create` and outliving any single
-    /// `view()`/`update()` call.
+    /// re-evaluated at each save (`Msg::SourceChanged`, `Msg::New`, and a
+    /// shared program loading in `Msg::CheckSharedLink`, the only three save
+    /// points). Shared with that handler rather than read from `self`
+    /// directly: the handler is a `'static` JS closure, registered once at
+    /// `create` and outliving any single `view()`/`update()` call.
     leave_warning_armed: Rc<RefCell<bool>>,
     /// Kept alive for as long as `App` is -- dropping a `Closure` frees the
     /// JS function it backs, which would leave `window.onbeforeunload`
@@ -847,7 +847,8 @@ impl App {
 
     /// Saves `self.source` and re-arms the leave-page warning from the
     /// result (`leave_warning_needed`) -- the one path every save takes,
-    /// whether from an edit (`Msg::SourceChanged`) or from New.
+    /// whether from an edit (`Msg::SourceChanged`), from New, or from
+    /// loading a shared program.
     fn save_and_arm_warning(&mut self) {
         let saved = autosave::save(&self.source);
         *self.leave_warning_armed.borrow_mut() = leave_warning_needed(saved, &self.source);
