@@ -142,10 +142,11 @@ main {
     touch-action: manipulation;
 }
 
-/* Shared by New (`.new-button`, in `.app-header`) and the run controls:
-   same font, border, radius and colors, so New reads as one family with
-   the buttons beside it. `.controls button` alone adds the cue+label flex
-   layout the run buttons need and New, plain text, doesn't. */
+/* Shared by New and Share (`.new-button`, in `.app-header`) and the run
+   controls: same font, border, radius and colors, so New and Share read as
+   one family with the buttons beside them. `.controls button` alone adds
+   the cue+label flex layout the run buttons need and New/Share, plain
+   text, don't. */
 .controls button,
 .new-button {
     font: inherit;
@@ -310,8 +311,8 @@ main {
         overflow-wrap: anywhere;
     }
 
-    /* New stays in the header, not the fixed six-button row above, but
-       still needs a touch-sized target here. */
+    /* New and Share stay in the header, not the fixed six-button row
+       above, but still need a touch-sized target here. */
     .new-button {
         min-height: 44px;
     }

@@ -5,8 +5,8 @@ use gloo_timers::callback::Timeout;
 use log::info;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{BeforeUnloadEvent, Event};
-use yew::{Component, Context, Html, NodeRef, Renderer, html};
+use web_sys::{BeforeUnloadEvent, Event, MouseEvent};
+use yew::{Callback, Component, Context, Html, NodeRef, Renderer, html};
 
 mod autosave;
 mod control;
@@ -450,6 +450,81 @@ fn strip_fragment() {
     let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&url));
 }
 
+/// Whether `object` has a property named `name` -- checked before calling a
+/// method that might not exist (`Navigator.share`, `Navigator.clipboard`),
+/// since calling an absent method throws across the wasm boundary.
+fn has_property(object: &impl AsRef<JsValue>, name: &str) -> bool {
+    js_sys::Reflect::has(object.as_ref(), &JsValue::from_str(name)).unwrap_or(false)
+}
+
+/// Attaches `promise`'s settlement to `Msg::ShareSettled` (decision 8):
+/// `on_resolve` on success. On rejection, reads the error's `name`
+/// (`js_sys::Reflect::get`) and asks `on_reject` for the status to show, or
+/// `None` to leave the status unchanged (an `AbortError` -- the user
+/// dismissed the share sheet). One-shot and leaked (`Closure::once`,
+/// `forget`): nothing here outlives the single settlement to hold the
+/// closures for.
+fn watch_share_settlement(
+    link: yew::html::Scope<App>,
+    promise: js_sys::Promise,
+    on_resolve: &'static str,
+    on_reject: impl Fn(&str) -> Option<&'static str> + 'static,
+) {
+    let resolve_link = link.clone();
+    let resolve = Closure::once(move |_value: JsValue| {
+        resolve_link.send_message(Msg::ShareSettled(on_resolve.to_string()));
+    });
+    let reject = Closure::once(move |value: JsValue| {
+        let name = js_sys::Reflect::get(&value, &JsValue::from_str("name"))
+            .ok()
+            .and_then(|name| name.as_string())
+            .unwrap_or_default();
+        if let Some(status) = on_reject(&name) {
+            link.send_message(Msg::ShareSettled(status.to_string()));
+        }
+    });
+    let _ = promise.then2(&resolve, &reject);
+    resolve.forget();
+    reject.forget();
+}
+
+/// The Share button's onclick core (decision 8): builds the link from
+/// `source` and the current page, then shares or copies it. Runs directly
+/// in the click handler, not through a dispatched `Msg` first -- Safari
+/// grants `share`/`clipboard` only inside the user gesture, which a
+/// message round-tripped through Yew's update queue would already have
+/// left. Reports the settled status back through `link`.
+fn share_program(link: yew::html::Scope<App>, source: &str) {
+    const COULDNT_SHARE: &str = "Couldn't share the link";
+    const COULDNT_COPY: &str = "Couldn't copy the link";
+
+    let (Some(page), Some(navigator)) = (page_url(), web_sys::window().map(|w| w.navigator()))
+    else {
+        link.send_message(Msg::ShareSettled(COULDNT_SHARE.to_string()));
+        return;
+    };
+    let url = share::share_url(&page, source);
+
+    if has_property(&navigator, "share") {
+        let data = web_sys::ShareData::new();
+        data.set_url(&url);
+        data.set_title("playmmix program");
+        let promise = navigator.share_with_data(&data);
+        watch_share_settlement(link, promise, "Shared", |name| {
+            (name != "AbortError").then_some(COULDNT_SHARE)
+        });
+        return;
+    }
+
+    if has_property(&navigator, "clipboard") {
+        let promise = navigator.clipboard().write_text(&url);
+        watch_share_settlement(link, promise, "Link copied", |_| Some(COULDNT_COPY));
+        return;
+    }
+
+    link.send_message(Msg::ShareSettled(COULDNT_COPY.to_string()));
+}
+
 /// `Msg::Run`'s restart-and-run core, factored out for the same reason
 /// `reload_and_record` is: testable without a live `Context`. Always
 /// restarts through `reload_and_record` -- Reset's own path -- so Run and
@@ -621,6 +696,9 @@ pub enum Msg {
     /// pasting a link into an open tab changes only the fragment and
     /// reloads nothing.
     CheckSharedLink,
+    /// The Share button's `navigator.share`/clipboard call has settled
+    /// (decision 8); carries the status text to show.
+    ShareSettled(String),
     /// One chunk boundary: reschedule if the run isn't finished, or if an
     /// `Interrupt` landed while this tick was scheduled, do nothing.
     ChunkTick,
@@ -1103,6 +1181,10 @@ impl Component for App {
                     }
                 }
             }
+            Msg::ShareSettled(status) => {
+                self.status_message = status;
+                true
+            }
             Msg::FlushSource => {
                 let flushed = flush_pending_source(
                     &mut self.debounce_timeout,
@@ -1184,6 +1266,15 @@ impl Component for App {
         let on_interrupt = ctx.link().callback(|()| Msg::Interrupt);
         let on_reset = ctx.link().callback(|()| Msg::Reset);
         let on_new = ctx.link().callback(|_| Msg::New);
+        // Runs `share_program` directly, not through a dispatched `Msg`:
+        // Safari grants `share`/`clipboard` only inside the click's own
+        // gesture, which a round trip through Yew's update queue would
+        // already have left (decision 8).
+        let on_share = {
+            let link = ctx.link().clone();
+            let source = self.source.clone();
+            Callback::from(move |_: MouseEvent| share_program(link.clone(), &source))
+        };
 
         // The PC indicator only means something while nothing is actively
         // moving it; showing it mid-run would flicker with every chunk.
@@ -1230,6 +1321,13 @@ impl Component for App {
                         title="New: start over from the minimal skeleton"
                     >
                         { "New" }
+                    </button>
+                    <button
+                        class="new-button"
+                        onclick={on_share}
+                        title="Share a link that opens this program"
+                    >
+                        { "Share" }
                     </button>
                     <ControlBar
                         running={self.control.is_running()}
