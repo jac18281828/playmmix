@@ -29,7 +29,7 @@ right is the machine. CSS grid with named areas on `<main>`:
 
 ```
 +------------------------------------------------------------------------+
-| header playmmix[New][Run][Continue][Step][Next][Interrupt][Reset] state|
+| header playmmix[New][Share][Run][Cont][Step][Next][Interr][Reset] state|
 +--------------------------------+---------------------------------------+
 | editor                         | machine status (PC, depth)            |
 |   gutter | source              |---------------------------------------|
@@ -51,6 +51,9 @@ right is the machine. CSS grid with named areas on `<main>`:
   that starts over from the minimal skeleton. Unlike the run controls it
   never migrates to the touch-only fixed bar below, since starting over
   never depends on reaching a paused machine.
+- Share sits after New: a plain, always-enabled button that puts the
+  editor's program into a link and shares or copies it. Same rule as New,
+  for the same reason -- sharing never depends on a paused machine either.
 - `grid-template-columns: minmax(0, 1fr) minmax(38rem, 42rem)` — the machine
   column is sized by its content (fixed-width rows, below); the editor takes
   the rest.
