@@ -45,6 +45,11 @@ const SOURCE_FILENAME: &str = "source.mms";
 /// enough that a genuine pause still reads as immediate.
 const SOURCE_DEBOUNCE_MS: u32 = 400;
 
+/// New's confirmation prompt (decision 7), exact per the owner's settled
+/// text -- shown only when `autosave::confirm_needed` says there is work to
+/// lose.
+const NEW_CONFIRM_MESSAGE: &str = "Replace your program with the minimal skeleton?";
+
 /// The status readout's text for a chunked Run, Continue, or Next's
 /// outcome -- shared because all three drive the same chunk-yield loop
 /// (`Control::resume_chunk`) and report through the same four `StepOutcome`
@@ -267,6 +272,30 @@ fn restore_source(
     }
 }
 
+/// New's core (decision 7): cancel any pending debounce and chunk tick,
+/// replace `control` with a fresh load of `DEFAULT_MMS` -- a fresh
+/// `Control` holds no breakpoints, unlike a reload, which keeps every
+/// breakpoint line that still resolves -- and clear `error`, `error_line`,
+/// and `view_state` to match. Returns `DEFAULT_MMS`, the editor's new
+/// source text, for the caller to assign and save.
+fn start_over(
+    chunk_timeout: &mut Option<Timeout>,
+    debounce_timeout: &mut Option<Timeout>,
+    control: &mut Control,
+    error: &mut Option<String>,
+    error_line: &mut Option<usize>,
+    view_state: &mut ViewState,
+) -> String {
+    *chunk_timeout = None;
+    *debounce_timeout = None;
+    *control = Control::new(DEFAULT_MMS, SOURCE_FILENAME)
+        .expect("DEFAULT_MMS assembles; pinned by examples::tests::default_mms_assembles");
+    view_state.reset(control);
+    *error = None;
+    *error_line = None;
+    DEFAULT_MMS.to_string()
+}
+
 /// `Msg::Run`'s restart-and-run core, factored out for the same reason
 /// `reload_and_record` is: testable without a live `Context`. Always
 /// restarts through `reload_and_record` -- Reset's own path -- so Run and
@@ -429,6 +458,10 @@ pub enum Msg {
     Next,
     Interrupt,
     Reset,
+    /// The header's New button: start over from `DEFAULT_MMS`, confirming
+    /// first when the editor holds unsaved-elsewhere work (decision 7,
+    /// `autosave::confirm_needed`).
+    New,
     /// One chunk boundary: reschedule if the run isn't finished, or if an
     /// `Interrupt` landed while this tick was scheduled, do nothing.
     ChunkTick,
@@ -508,10 +541,11 @@ pub struct App {
     drag_state: Rc<RefCell<Option<DragState>>>,
     /// Whether `window.onbeforeunload`'s handler (`_beforeunload_handler`)
     /// currently arms the native confirmation dialog -- `leave_warning_needed`,
-    /// re-evaluated at each save (`Msg::SourceChanged`, decision 2). Shared
-    /// with that handler rather than read from `self` directly: the handler
-    /// is a `'static` JS closure, registered once at `create` and outliving
-    /// any single `view()`/`update()` call.
+    /// re-evaluated at each save (`Msg::SourceChanged` and `Msg::New`, the
+    /// only two save points, decision 2). Shared with that handler rather
+    /// than read from `self` directly: the handler is a `'static` JS
+    /// closure, registered once at `create` and outliving any single
+    /// `view()`/`update()` call.
     leave_warning_armed: Rc<RefCell<bool>>,
     /// Kept alive for as long as `App` is -- dropping a `Closure` frees the
     /// JS function it backs, which would leave `window.onbeforeunload`
@@ -570,7 +604,8 @@ impl App {
     }
 
     /// Saves `self.source` and re-arms the leave-page warning from the
-    /// result (`leave_warning_needed`) -- the one path every save takes.
+    /// result (`leave_warning_needed`) -- the one path every save takes,
+    /// whether from an edit (`Msg::SourceChanged`) or from New.
     fn save_and_arm_warning(&mut self) {
         let saved = autosave::save(&self.source);
         *self.leave_warning_armed.borrow_mut() = leave_warning_needed(saved, &self.source);
@@ -844,6 +879,31 @@ impl Component for App {
                 }
                 true
             }
+            Msg::New => {
+                // A confirm error (`Result::Err` from `confirm_with_message`)
+                // counts as Cancel: there is no way to ask again, so the
+                // safer reading of "couldn't confirm" is "didn't confirm".
+                let proceeds = !autosave::confirm_needed(&self.source, DEFAULT_MMS)
+                    || web_sys::window()
+                        .and_then(|window| window.confirm_with_message(NEW_CONFIRM_MESSAGE).ok())
+                        .unwrap_or(false);
+                if !proceeds {
+                    false
+                } else {
+                    self.source = start_over(
+                        &mut self.chunk_timeout,
+                        &mut self.debounce_timeout,
+                        &mut self.control,
+                        &mut self.error,
+                        &mut self.error_line,
+                        &mut self.view_state,
+                    );
+                    self.restart_signal = false;
+                    self.status_message = "Loaded".to_string();
+                    self.save_and_arm_warning();
+                    true
+                }
+            }
             Msg::FlushSource => {
                 let flushed = flush_pending_source(
                     &mut self.debounce_timeout,
@@ -924,6 +984,7 @@ impl Component for App {
         let on_next = ctx.link().callback(|()| Msg::Next);
         let on_interrupt = ctx.link().callback(|()| Msg::Interrupt);
         let on_reset = ctx.link().callback(|()| Msg::Reset);
+        let on_new = ctx.link().callback(|_| Msg::New);
 
         // The PC indicator only means something while nothing is actively
         // moving it; showing it mid-run would flicker with every chunk.
@@ -964,6 +1025,13 @@ impl Component for App {
             <main ref={self.main_ref.clone()} style={main_style_attr}>
                 <div class="app-header">
                     <h1>{ "playmmix" }</h1>
+                    <button
+                        class="new-button"
+                        onclick={on_new}
+                        title="New: start over from the minimal skeleton"
+                    >
+                        { "New" }
+                    </button>
                     <ControlBar
                         running={self.control.is_running()}
                         halted={self.control.is_halted()}
@@ -1648,4 +1716,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn start_over_drops_breakpoints_and_returns_to_the_default_skeleton() {
+        let mut control = Control::new(DEFAULT_MMS, "new-fixture.mms").expect("assembles");
+        assert!(
+            control.toggle_breakpoint(5),
+            "line 5 (the TRAP) must resolve in DEFAULT_MMS"
+        );
+        let mut chunk_timeout = None;
+        let mut debounce_timeout = None;
+        let mut error = Some("stale error".to_string());
+        let mut error_line = Some(5);
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        let source = start_over(
+            &mut chunk_timeout,
+            &mut debounce_timeout,
+            &mut control,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+
+        assert_eq!(source, DEFAULT_MMS);
+        assert!(
+            control.breakpoint_lines().is_empty(),
+            "New must start with no breakpoints"
+        );
+        assert!(error.is_none());
+        assert!(error_line.is_none());
+        let fresh = Control::new(DEFAULT_MMS, "new-compare.mms").expect("assembles");
+        assert_eq!(control.get_pc(), fresh.get_pc());
+        assert_eq!(control.session(), fresh.session());
+    }
 }
