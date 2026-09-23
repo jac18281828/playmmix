@@ -33,7 +33,7 @@ Paste in something that does more. This prints a string and halts:
 ```asm
         LOC     Data_Segment
         GREG    @
-Text    BYTE    "Hello world!",'\n',0
+Text    BYTE    "Hello world!",10,0
 
         LOC     #100
 Main    LDA     $255,Text
