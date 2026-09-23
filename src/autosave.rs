@@ -1,9 +1,8 @@
 //! Keeps the editor's program in the browser's `localStorage`, so a reload
-//! restores it (§1 of `docs/layout-spec.md`'s companion prompt). The
-//! share-link task builds on this module, so `STORAGE_KEY`, `load`, `save`,
-//! and `confirm_needed` are a contract: renaming or reshaping any of them
-//! strands that follow-up. Two tabs share one key; the last write wins,
-//! with no cross-tab coordination.
+//! restores it. `STORAGE_KEY`, `load`, `save`, and `confirm_needed` form a
+//! stable contract: renaming or reshaping any of them breaks every caller
+//! outside this module. Two tabs share one key; the last write wins, with
+//! no cross-tab coordination.
 
 use crate::examples::DEFAULT_MMS;
 
@@ -44,9 +43,13 @@ pub fn confirm_needed(current: &str, replacement: &str) -> bool {
 
 /// `Window::local_storage`'s `getItem`, `None` on any failure: no storage
 /// object at all (`local_storage()` itself failing or returning `None`) or
-/// a `getItem` error.
+/// a `getItem` error. Logs once, whichever failure it is.
 fn read_entry() -> Option<String> {
-    let storage = web_sys::window()?.local_storage().ok().flatten()?;
+    let Some(storage) = web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    else {
+        log::warn!("autosave: local storage is unavailable");
+        return None;
+    };
     match storage.get_item(STORAGE_KEY) {
         Ok(value) => value,
         Err(_) => {
