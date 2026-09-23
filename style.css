@@ -126,29 +126,6 @@ main {
     flex-wrap: wrap;
 }
 
-/* New: sits in the header, beside the title, on every viewport -- unlike
-   the run controls (`.controls` below) it never migrates to a touch-only
-   fixed bar, so its own rule matches `.controls button`'s font, border,
-   radius and colors directly rather than relying on that block's touch
-   overrides. min-height sizes it for a touch tap on a phone or an iPad. */
-.new-button {
-    font: inherit;
-    font-size: 0.9rem;
-    padding: 0.4rem 0.9rem;
-    border: 1px solid #444;
-    border-radius: 4px;
-    background: #2d2d2d;
-    color: #ddd;
-    cursor: pointer;
-    min-height: 44px;
-}
-
-@media (hover: hover) {
-    .new-button:hover {
-        background: #383838;
-    }
-}
-
 /* Control pane: Run / Continue / Step / Next / Interrupt / Reset and the
    run-state indicator. Real <button> elements, so every control is
    keyboard-reachable without extra wiring; styled on its own classes per
@@ -165,10 +142,12 @@ main {
     touch-action: manipulation;
 }
 
-.controls button {
-    display: flex;
-    align-items: baseline;
-    gap: 0.35rem;
+/* Shared by New (`.new-button`, in `.app-header`) and the run controls:
+   same font, border, radius and colors, so New reads as one family with
+   the buttons beside it. `.controls button` alone adds the cue+label flex
+   layout the run buttons need and New, plain text, doesn't. */
+.controls button,
+.new-button {
     font: inherit;
     font-size: 0.9rem;
     padding: 0.4rem 0.9rem;
@@ -177,6 +156,12 @@ main {
     background: #2d2d2d;
     color: #ddd;
     cursor: pointer;
+}
+
+.controls button {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
 }
 
 .controls button:disabled {
@@ -188,7 +173,8 @@ main {
 /* iOS applies :hover on tap and leaves it stuck, so this only applies where
    a real pointing device drives :hover. */
 @media (hover: hover) {
-    .controls button:not(:disabled):hover {
+    .controls button:not(:disabled):hover,
+    .new-button:hover {
         background: #383838;
     }
 }
@@ -322,6 +308,12 @@ main {
         justify-content: center;
         align-items: center;
         overflow-wrap: anywhere;
+    }
+
+    /* New stays in the header, not the fixed six-button row above, but
+       still needs a touch-sized target here. */
+    .new-button {
+        min-height: 44px;
     }
 
     /* No keyboard to teach on a phone -- the cue reads as plain label text
