@@ -1317,14 +1317,14 @@ impl Component for App {
                 <div class="app-header">
                     <h1>{ "playmmix" }</h1>
                     <button
-                        class="new-button"
+                        class="header-button"
                         onclick={on_new}
                         title="New: start over from the minimal skeleton"
                     >
                         { "New" }
                     </button>
                     <button
-                        class="new-button"
+                        class="header-button"
                         onclick={on_share}
                         title="Share a link that opens this program"
                     >

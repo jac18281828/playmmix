@@ -142,13 +142,13 @@ main {
     touch-action: manipulation;
 }
 
-/* Shared by New and Share (`.new-button`, in `.app-header`) and the run
+/* Shared by New and Share (`.header-button`, in `.app-header`) and the run
    controls: same font, border, radius and colors, so New and Share read as
    one family with the buttons beside them. `.controls button` alone adds
    the cue+label flex layout the run buttons need and New/Share, plain
    text, don't. */
 .controls button,
-.new-button {
+.header-button {
     font: inherit;
     font-size: 0.9rem;
     padding: 0.4rem 0.9rem;
@@ -175,7 +175,7 @@ main {
    a real pointing device drives :hover. */
 @media (hover: hover) {
     .controls button:not(:disabled):hover,
-    .new-button:hover {
+    .header-button:hover {
         background: #383838;
     }
 }
@@ -313,7 +313,7 @@ main {
 
     /* New and Share stay in the header, not the fixed six-button row
        above, but still need a touch-sized target here. */
-    .new-button {
+    .header-button {
         min-height: 44px;
     }
 
