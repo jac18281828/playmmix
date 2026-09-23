@@ -315,7 +315,7 @@ fn restore_source(
     }
 }
 
-/// New's core: delegates to `load_shared` with `DEFAULT_MMS` -- a fresh
+/// New's core: delegates to `start_fresh` with `DEFAULT_MMS` -- a fresh
 /// `Control` holds no breakpoints, unlike a reload, which keeps every
 /// breakpoint line that still resolves. Returns `DEFAULT_MMS`, for the
 /// caller to assign as the editor's text and save.
@@ -327,7 +327,7 @@ fn start_over(
     error_line: &mut Option<usize>,
     view_state: &mut ViewState,
 ) -> String {
-    load_shared(
+    start_fresh(
         chunk_timeout,
         debounce_timeout,
         control,
@@ -389,15 +389,16 @@ fn decide_shared_link(hash: &str, current: &str) -> SharedLinkDecision {
     }
 }
 
-/// A shared program's load, testable without a live `Context`: `start_over`
-/// (New) delegates here with `DEFAULT_MMS`. Builds a fresh `Control` from
-/// `shared` -- like New, so no breakpoint from the replaced program
-/// carries over -- and, on a parse error, falls back to `DEFAULT_MMS`'s own
-/// machine, showing `shared`'s error exactly as a restored program shows
-/// one (`restore_source`). The caller assigns `shared` as the editor's new
+/// Starts fresh from `shared`, for both New (`start_over`, with
+/// `DEFAULT_MMS`) and a shared link's load (`Msg::CheckSharedLink`):
+/// testable without a live `Context`. Builds a fresh `Control` from
+/// `shared` -- so no breakpoint from the replaced program carries over --
+/// and, on a parse error, falls back to `DEFAULT_MMS`'s own machine,
+/// showing `shared`'s error exactly as a restored program shows one
+/// (`restore_source`). The caller assigns `shared` as the editor's new
 /// text and saves it; `shared` isn't returned here since it's already the
 /// caller's own, owned string.
-fn load_shared(
+fn start_fresh(
     chunk_timeout: &mut Option<Timeout>,
     debounce_timeout: &mut Option<Timeout>,
     control: &mut Control,
@@ -1165,7 +1166,7 @@ impl Component for App {
                         if !proceeds {
                             false
                         } else {
-                            load_shared(
+                            start_fresh(
                                 &mut self.chunk_timeout,
                                 &mut self.debounce_timeout,
                                 &mut self.control,
@@ -2141,7 +2142,7 @@ mod tests {
     }
 
     #[test]
-    fn load_shared_loads_the_shared_programs_own_machine() {
+    fn start_fresh_loads_the_shared_programs_own_machine() {
         // The fixture starts from `DEFAULT_MMS`, which differs from the
         // shared program below, so stepping the loaded machine tells the
         // two apart.
@@ -2157,7 +2158,7 @@ mod tests {
         let mut view_state = ViewState::new();
         view_state.reset(&control);
 
-        load_shared(
+        start_fresh(
             &mut chunk_timeout,
             &mut debounce_timeout,
             &mut control,
@@ -2185,7 +2186,7 @@ mod tests {
     }
 
     #[test]
-    fn load_shared_that_fails_to_assemble_falls_back_to_default_mms_with_its_error_set() {
+    fn start_fresh_that_fails_to_assemble_falls_back_to_default_mms_with_its_error_set() {
         // A fixture that does not already hold `DEFAULT_MMS`, with a
         // breakpoint set and one step taken, so a register holds a nonzero
         // value and shows as changed -- proving the fallback below actually
@@ -2213,7 +2214,7 @@ mod tests {
         let mut error = None;
         let mut error_line = None;
 
-        load_shared(
+        start_fresh(
             &mut chunk_timeout,
             &mut debounce_timeout,
             &mut control,
