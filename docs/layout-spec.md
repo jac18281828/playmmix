@@ -29,7 +29,7 @@ right is the machine. CSS grid with named areas on `<main>`:
 
 ```
 +------------------------------------------------------------------------+
-| header playmmix[New][Share][Run][Continue][Step][Next][Interrupt][Res…]|
+| header playmmix[+][Run][Continue][Step][Next][Interrupt][Reset][Share] |
 +--------------------------------+---------------------------------------+
 | editor                         | machine status (PC, depth)            |
 |   gutter | source              |---------------------------------------|
@@ -48,14 +48,23 @@ right is the machine. CSS grid with named areas on `<main>`:
 ```
 
 - New sits in the header, after the title: a plain, always-enabled button
-  that starts over from the minimal skeleton. Unlike the run controls it
-  never migrates to the touch-only fixed bar below, since starting over
-  never depends on reaching a paused machine.
-- Share sits after New: a plain, always-enabled button that puts the
-  editor's program into a link and shares or copies it. Same rule as New,
-  for the same reason -- sharing never depends on a paused machine either.
+  that starts over from the minimal skeleton. On desktop it shows a
+  new-document icon, reading as a file action apart from the run controls
+  that follow it; on touch it shows its text instead, as it always has.
+  Unlike the run controls it never migrates to the touch-only fixed bar
+  below, since starting over never depends on reaching a paused machine.
+- Share, a plain, always-enabled button that puts the editor's program into
+  a link and shares or copies it, follows the run controls in DOM order. On
+  desktop it renders at the header's right edge, after the status message --
+  the common place for a share action, out of the way and still there. On
+  touch, where the run controls leave the header for the fixed bar below,
+  Share still renders right after New, same as before -- sharing never
+  depends on a paused machine either.
 - The header also carries the run-state label and the status message, the
-  last action's result; the diagram above drops both for width.
+  last action's result; the diagram above drops both for width. On desktop
+  the status message shrinks to an ellipsis as the header narrows, so Share
+  holds its place at the right edge rather than moving with the message's
+  length.
 - `grid-template-columns: minmax(0, 1fr) minmax(38rem, 42rem)` — the machine
   column is sized by its content (fixed-width rows, below); the editor takes
   the rest.
