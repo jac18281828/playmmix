@@ -54,7 +54,7 @@ pub struct Editor {
     /// mount), then updated on every subsequent props update through
     /// `changed`. The mount itself still follows nothing: `rendered`'s own
     /// `pending_scroll` starts `false`, before `changed` ever runs.
-    last_execution_stops: Option<u64>,
+    last_execution_stops: u64,
     /// Set by `changed` when this props update should scroll the current
     /// line into view, and left set -- sticky -- until the next `rendered`
     /// consumes and clears it, so an intervening props update that itself
@@ -82,7 +82,7 @@ impl Component for Editor {
             textarea_ref: NodeRef::default(),
             overlay_content_ref: NodeRef::default(),
             gutter_content_ref: NodeRef::default(),
-            last_execution_stops: initial_last_execution_stops(ctx.props().execution_stops),
+            last_execution_stops: ctx.props().execution_stops,
             pending_scroll: false,
         }
     }
@@ -113,7 +113,7 @@ impl Component for Editor {
                 execution_stops,
                 ctx.props().current_line,
             );
-        self.last_execution_stops = Some(execution_stops);
+        self.last_execution_stops = execution_stops;
         true
     }
 
@@ -297,31 +297,16 @@ fn scroll_top_to_reveal_line(
     }
 }
 
-/// `Editor::create`'s seed for `last_execution_stops`: the count already on
-/// the page at mount, so the first later stop compares against a real
-/// baseline instead of an "unset" one that refuses to follow no matter
-/// what the next count is. Factored out of `create` -- an `Editor` can't
-/// mount host-side -- so this seed is a plain seam a test drives directly.
-fn initial_last_execution_stops(execution_stops: u64) -> Option<u64> {
-    Some(execution_stops)
-}
-
 /// Whether `Editor` should scroll to the current line: the execution-stop
 /// count differs from the last one it saw, and a current line exists. An
 /// edit that re-assembles without moving the marker (the count unchanged)
-/// never follows. `None` means no prior count to compare against -- a
-/// defensive "don't follow" default this function keeps for its own sake;
-/// `Editor` itself never actually produces it, since `create` seeds a real
-/// count (`initial_last_execution_stops`), not an absent one.
+/// never follows.
 fn should_follow_current_line(
-    last_execution_stops: Option<u64>,
+    last_execution_stops: u64,
     execution_stops: u64,
     current_line: Option<usize>,
 ) -> bool {
-    let Some(last) = last_execution_stops else {
-        return false;
-    };
-    current_line.is_some() && execution_stops != last
+    current_line.is_some() && execution_stops != last_execution_stops
 }
 
 /// Render one gutter row: the line number, styled for a breakpoint and/or
@@ -743,13 +728,12 @@ mod tests {
     #[test]
     fn should_follow_current_line_matches_the_trigger_table() {
         // (last_execution_stops, execution_stops, current_line, expected)
-        let cases: [(Option<u64>, u64, Option<usize>, bool); 6] = [
-            (None, 0, Some(4), false),    // T1: no prior count to compare
-            (Some(0), 1, Some(9), true),  // T2
-            (Some(1), 1, Some(9), false), // T3: a re-render
-            (Some(1), 1, Some(4), false), // T4: an edit re-assembled
-            (Some(1), 2, Some(9), true),  // T5: a stop onto the line it left
-            (Some(1), 2, None, false),    // T6
+        let cases: [(u64, u64, Option<usize>, bool); 5] = [
+            (0, 1, Some(9), true),  // T1
+            (1, 1, Some(9), false), // T2: a re-render
+            (1, 1, Some(4), false), // T3: an edit re-assembled
+            (1, 2, Some(9), true),  // T4: a stop onto the line it left
+            (1, 2, None, false),    // T5
         ];
 
         for (i, (last, execution_stops, current_line, expected)) in cases.into_iter().enumerate() {
@@ -767,10 +751,10 @@ mod tests {
         // `Editor::create` seeds `last_execution_stops` from the initial
         // props (`App::execution_stops` starts at 0); the first later stop
         // must compare against that real count, not treat page load as
-        // unset. Feeds the trigger the value `create`'s own seed produces,
-        // then the first stop -- `Editor` can't mount host-side, so this is
-        // the plain seam the mutation is caught through.
-        let seeded_at_create = initial_last_execution_stops(0);
+        // unset. `create` itself is outside host reach -- `Editor` can't
+        // mount host-side -- so this pins the trigger with the mount-time
+        // count `create` seeds, then the first stop.
+        let seeded_at_create = 0;
         assert!(should_follow_current_line(seeded_at_create, 1, Some(4)));
     }
 }
