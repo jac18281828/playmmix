@@ -140,13 +140,20 @@ main {
     /* Removes the double-tap-zoom wait on a fast tap across a button gap or
        the status line; pinch zoom, unaffected, stays for accessibility. */
     touch-action: manipulation;
+    /* Desktop only in effect: touch pins `.controls` with `position: fixed`
+       below, which removes it from `.app-header`'s flex layout entirely, so
+       these two properties never apply there. On desktop they let
+       `.controls` fill the header's leftover width so Share, right after it
+       in DOM order, lands at the header's right edge. */
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 /* Shared by New and Share (`.header-button`, in `.app-header`) and the run
    controls: same font, border, radius and colors, so New and Share read as
    one family with the buttons beside them. `.controls button` alone adds
-   the cue+label flex layout the run buttons need and New/Share, plain
-   text, don't. */
+   the cue+label flex layout the run buttons need; Share, plain text on
+   every device, and New, an icon on desktop, don't. */
 .controls button,
 .header-button {
     font: inherit;
@@ -163,6 +170,11 @@ main {
     display: flex;
     align-items: baseline;
     gap: 0.35rem;
+    /* Holds each run button at its natural width on desktop, so the status
+       message (below) is what shrinks first as the header narrows, not the
+       buttons themselves. Touch's own rule below fully restates `flex`,
+       overriding this. */
+    flex-shrink: 0;
 }
 
 .controls button:disabled {
@@ -195,6 +207,54 @@ main {
    color instead keeps a disabled cue visibly disabled. */
 .controls button:disabled .control-cue {
     color: #666;
+}
+
+/* New, desktop: a new-document icon in place of its text, matching the run
+   buttons' height via the shared `.header-button` padding. `.new-label`
+   stays in the DOM for its accessible name and for the touch block below,
+   which swaps the icon back for the text. */
+.new-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.new-icon {
+    width: 1.1em;
+    height: 1.1em;
+}
+
+.new-label {
+    display: none;
+}
+
+/* Desktop: the status message shrinks before Share ever moves. `flex-basis:
+   0%` keeps this message's own text width out of `.controls`'s min-content,
+   the width `.app-header` uses to size `.controls` -- otherwise the header
+   would treat the full status text as space `.controls` needs, and Share
+   would wrap before the message ever got a chance to ellipsize. `min-width:
+   0` lets the message actually shrink past its text's own width instead of
+   refusing to. Touch's own rule below (`flex: 1 1 0%` there too, plus its
+   fixed-bar layout) already relies on the same `min-width: 0` and ellipsis
+   treatment; declared here, before the touch block, so touch's rule -- which
+   still restates every property this shares with it -- keeps winning there. */
+.run-state {
+    margin-left: 0.25rem;
+    font-size: 0.85rem;
+    color: #999;
+    flex-shrink: 0;
+}
+
+.status-message {
+    margin-left: 0.5rem;
+    font-size: 0.85rem;
+    color: #777;
+    font-style: italic;
+    flex: 1 1 0%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* Touch devices: pin the control bar to a viewport edge instead of letting
@@ -317,6 +377,16 @@ main {
         min-height: 44px;
     }
 
+    /* Touch keeps today's rendering: New shows its text, not the desktop
+       icon. */
+    .new-icon {
+        display: none;
+    }
+
+    .new-label {
+        display: inline;
+    }
+
     /* No keyboard to teach on a phone -- the cue reads as plain label text
        here. */
     .control-cue {
@@ -360,21 +430,6 @@ main {
         /* No bar to clear at the bottom -- just the home indicator. */
         padding-bottom: max(1rem, env(safe-area-inset-bottom));
     }
-}
-
-.run-state {
-    margin-left: 0.25rem;
-    font-size: 0.85rem;
-    color: #999;
-}
-
-/* Brief status readout, to the right of the run-state label -- echoes the
-   last action taken (§1.4). */
-.status-message {
-    margin-left: 0.5rem;
-    font-size: 0.85rem;
-    color: #777;
-    font-style: italic;
 }
 
 /* Editor pane: a transparent textarea layered over a highlight-colored

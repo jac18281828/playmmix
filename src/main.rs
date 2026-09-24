@@ -1388,18 +1388,21 @@ impl Component for App {
                 <div class="app-header">
                     <h1>{ "playmmix" }</h1>
                     <button
-                        class="header-button"
+                        class="header-button new-button"
                         onclick={on_new}
                         title="New: start over from the minimal skeleton"
+                        aria-label="New"
                     >
-                        { "New" }
-                    </button>
-                    <button
-                        class="header-button"
-                        onclick={on_share}
-                        title="Share a link that opens this program"
-                    >
-                        { "Share" }
+                        <svg class="new-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+                            <path
+                                d="M6 2.5h8.5L19 7v13.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"
+                                stroke="currentColor"
+                                stroke-width="1.6"
+                                stroke-linejoin="round"
+                            />
+                            <path d="M14.5 2.5V7H19" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+                        </svg>
+                        <span class="new-label">{ "New" }</span>
                     </button>
                     <ControlBar
                         running={self.control.is_running()}
@@ -1414,6 +1417,13 @@ impl Component for App {
                         {on_reset}
                         status={self.status_message.clone()}
                     />
+                    <button
+                        class="header-button"
+                        onclick={on_share}
+                        title="Share a link that opens this program"
+                    >
+                        { "Share" }
+                    </button>
                 </div>
                 <Editor
                     source={self.source.clone()}
