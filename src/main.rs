@@ -869,10 +869,9 @@ pub struct App {
     /// Continue leaves the machine stopped, an Interrupt actually
     /// interrupts, or a Reset's reload succeeds. An edit, a re-assemble,
     /// New, and a loaded program never increment it -- nor does loading a
-    /// shared link (`Msg::CheckSharedLink`), the same "a loaded program
-    /// never increments" rule `restore_source` already follows. Passed to
-    /// `Editor`, which compares it against the count it last saw to decide
-    /// whether to scroll the current line into view (`docs/layout-spec.md`'s
+    /// shared link (`Msg::CheckSharedLink`). Passed to `Editor`, which
+    /// compares it against the count it last saw to decide whether to
+    /// scroll the current line into view (`docs/layout-spec.md`'s
     /// Highlights).
     execution_stops: u64,
 }
