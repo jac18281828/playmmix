@@ -183,11 +183,12 @@ fn continue_pressed(
 
 /// `Msg::Step`'s core, factored out for the same reason `continue_pressed`
 /// is: testable without a live `Context`. `None` -- `execution_stops`
-/// untouched -- while the machine is already halted; the caller's own
-/// `flush_pending_reassemble` already guards the other refusal, an assembly
-/// error, before this runs. Otherwise steps once, increments
-/// `execution_stops`, and returns the outcome for the caller's own status
-/// text.
+/// untouched -- while the machine is already halted, or while a chunked
+/// Run, Continue, or Next is still in flight (`Control::is_running`); the
+/// caller's own `flush_pending_reassemble` already guards the other
+/// refusal, an assembly error, before this runs. Otherwise steps once,
+/// increments `execution_stops`, and returns the outcome for the caller's
+/// own status text.
 fn step_pressed(
     control: &mut Control,
     view_state: &mut ViewState,
