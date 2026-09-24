@@ -219,9 +219,14 @@ main {
     justify-content: center;
 }
 
+/* 1.2em, not 1em: the run buttons' height comes from their text's own line
+   box, at the font's normal line-height -- noticeably taller than the font's
+   em-square. Matching that (rather than 1em) is what makes this button's
+   height equal theirs; touch never shows this icon (below), so its own
+   44px floor, set on the shared `.header-button` rule, is unaffected. */
 .new-icon {
-    width: 1.1em;
-    height: 1.1em;
+    width: 1.2em;
+    height: 1.2em;
 }
 
 .new-label {
