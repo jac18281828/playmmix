@@ -209,21 +209,20 @@ main {
     color: #666;
 }
 
-/* New, desktop: a new-document icon in place of its text, matching the run
-   buttons' height via the shared `.header-button` padding. `.new-label`
-   stays in the DOM for its accessible name and for the touch block below,
-   which swaps the icon back for the text. */
+/* New, desktop: a new-document icon in place of its text, centered in the
+   shared `.header-button` box; the icon's size (below) sets its height.
+   `.new-label` stays in the DOM for the touch block below, which swaps the
+   icon back for the text. */
 .new-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
 }
 
-/* 1.2em, not 1em: the run buttons' height comes from their text's own line
-   box, at the font's normal line-height -- noticeably taller than the font's
-   em-square. Matching that (rather than 1em) is what makes this button's
-   height equal theirs; touch never shows this icon (below), so its own
-   44px floor, set on the shared `.header-button` rule, is unaffected. */
+/* 1.2em: the run buttons' height comes from their text's line box, at the
+   font's normal line-height, which is taller than the em-square; at 1.1em
+   this button stood a pixel short of them. Touch never shows this icon, so
+   its 44px floor on the shared `.header-button` rule is unaffected. */
 .new-icon {
     width: 1.2em;
     height: 1.2em;
@@ -233,21 +232,14 @@ main {
     display: none;
 }
 
-/* Desktop: the status message shrinks before Share ever moves. `flex-basis:
-   0%` keeps this message's own text width out of `.controls`'s min-content,
-   the width `.app-header` uses to size `.controls` -- otherwise the header
-   would treat the full status text as space `.controls` needs, and Share
-   would wrap before the message ever got a chance to ellipsize. `min-width:
-   0` lets the message actually shrink past its text's own width instead of
-   refusing to. `width: 0` is still needed alongside both: flex-basis sets
-   only the item's hypothetical size before growth, so with a long message
-   `.controls` still measures its content at that text's own width; pinning
-   `width` to zero removes that content contribution outright, and the
-   subsequent `flex-grow` still expands the message to fill the row exactly
-   as before. Touch's own rule below (`flex: 1 1 0%` there too, plus its
-   fixed-bar layout) already relies on the same `min-width: 0` and ellipsis
-   treatment; declared here, before the touch block, so touch's rule -- which
-   still restates every property this shares with it -- keeps winning there. */
+/* Desktop: the status message ellipsizes before Share ever moves. `.controls`
+   sizes to its content, so without `width: 0` the message's full text would
+   count as space `.controls` needs, and Share would wrap as the status grew;
+   `flex-grow` still fills the row, and `min-width: 0` lets it shrink below
+   its text. Declared before the touch block, which restates the flex,
+   min-width and ellipsis properties for its fixed bar; `width: 0` carries
+   into touch, where the bar's fixed width and `flex-basis` already decide
+   the message's size. */
 .run-state {
     margin-left: 0.25rem;
     font-size: 0.85rem;
