@@ -339,11 +339,15 @@ main {
     /* Ordered above the button-row break; both keep order -1 so the label
        stays left of the message, same as their DOM order. A fixed
        line-height -- rather than the font's own metrics -- keeps this
-       row's height, and so --control-bar-h, exact. */
+       row's height, and so --control-bar-h, exact. `flex-shrink: 1`
+       restores the initial value over the desktop rule's `0`: run-state
+       never needs to shrink in this fixed-width bar, but the desktop-only
+       reason for holding it at its natural size doesn't apply here either. */
     .run-state,
     .status-message {
         order: -1;
         line-height: 1.2rem;
+        flex-shrink: 1;
     }
 
     /* flex-basis 0, not auto: a long message's own content width would
