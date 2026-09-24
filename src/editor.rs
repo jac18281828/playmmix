@@ -12,7 +12,7 @@
 //! would drag its own clip box along with it) is what keeps the two layers
 //! from visibly desyncing under fast or inertial scrolling.
 //!
-//! `Editor` also scrolls itself once, right after an execution stop moves
+//! `Editor` also scrolls itself once, right after an execution stop leaves
 //! `current_line` somewhere outside the textarea's visible rows -- see
 //! `should_follow_current_line` and `scroll_top_to_reveal_line`.
 
