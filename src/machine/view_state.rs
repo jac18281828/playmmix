@@ -263,8 +263,9 @@ mod tests {
         // Under checksmix 0.3.9's register-stack rule, CALL_MMS's `POP 1,0`
         // returns one value into the hole PUSHJ $0 left and marginalizes
         // the rest: the program ends with $0 = 42, $255 = 42, rL = 1 --
-        // and $1, $2 (40 and 2 mid-call) zeroed back out, since both sit
-        // above the new rL. rL still grows past its load-time value too.
+        // and the caller's own $1, $2 (40 and 2 mid-call) zeroed back out,
+        // since both sit above the new rL. rL still grows past its
+        // load-time value too.
         assert!(
             view.changed_registers().contains(&0) && view.changed_registers().contains(&255),
             "registers the run wrote must be flagged: {:?}",
@@ -677,9 +678,11 @@ mod tests {
         // CALL_MMS steps as: SETL $1,40; SETL $2,2; PUSHJ $0,AddFunc, whose
         // window slide moves the caller's $2 into the callee's $1 (value
         // 2); ADDU $0,$0,$1; POP 1,0, which marginalizes the caller's frame
-        // back to rL = 1 and zeroes the caller's $1 from 2 to 0 -- the only
-        // register that step changes; SET $255,$0; TRAP. $1's 2 -> 0
-        // transition below lands on that POP step.
+        // back to rL = 1 -- the only register that step changes is $1,
+        // read at the callee's $1 (2, the caller's $2 slid in) just before
+        // the pop and at the caller's own $1, marginal and zero, just
+        // after it; SET $255,$0; TRAP. $1's 2 -> 0 transition below lands
+        // on that POP step.
         let mut control = crate::control::Control::new(CALL_MMS, "call.mms").expect("assembles");
         let mut view = ViewState::new();
         view.reset(&control);
