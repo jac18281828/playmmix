@@ -309,11 +309,23 @@ mod tests {
         let running = control_enablement(true, false, true, false);
 
         for (control, label, key, _title) in BUTTON_TABLE {
-            if control == Control::Reset {
+            // A state where this control is enabled, so its key can be
+            // proven to actually fire its shortcut; `None` for Reset, whose
+            // table row carries no key and whose face is checked below.
+            let keyed = match control {
+                Control::Run => Some((ready, KeyboardShortcut::Run)),
+                Control::Continue => Some((paused, KeyboardShortcut::Continue)),
+                Control::Step => Some((ready, KeyboardShortcut::Step)),
+                Control::Next => Some((ready, KeyboardShortcut::Next)),
+                Control::Interrupt => Some((running, KeyboardShortcut::Interrupt)),
+                Control::Reset => None,
+            };
+            let Some((enablement, shortcut)) = keyed else {
                 assert_eq!(key, None, "Reset must carry no key");
                 assert_eq!(control_face(label, key), None, "Reset must carry no cue");
                 continue;
-            }
+            };
+
             let key = key.unwrap_or_else(|| panic!("{label} must carry a key"));
             assert_eq!(
                 key,
@@ -329,16 +341,6 @@ mod tests {
                 "{label}'s cue plus the rest must reconstruct the label"
             );
 
-            // A state where this control is enabled, so its key can be
-            // proven to actually fire its shortcut.
-            let (enablement, shortcut) = match control {
-                Control::Run => (ready, KeyboardShortcut::Run),
-                Control::Continue => (paused, KeyboardShortcut::Continue),
-                Control::Step => (ready, KeyboardShortcut::Step),
-                Control::Next => (ready, KeyboardShortcut::Next),
-                Control::Interrupt => (running, KeyboardShortcut::Interrupt),
-                Control::Reset => unreachable!("handled above"),
-            };
             assert_eq!(
                 keyboard_shortcut_for(key, false, false, false, enablement),
                 Some(shortcut),
@@ -365,5 +367,81 @@ mod tests {
             INTERRUPT_TITLE.starts_with("Interrupt (i)"),
             "Interrupt's title must start with its key"
         );
+    }
+
+    #[test]
+    fn keyed_titles_start_with_their_label_and_key() {
+        // Reset carries no key; its title is pinned by its own exact-text
+        // test above.
+        for (_, label, key, title) in BUTTON_TABLE {
+            let Some(key) = key else { continue };
+            assert!(
+                title.starts_with(&format!("{label} ({key}")),
+                "{label}'s title must start with \"{label} ({key}\": {title}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_and_callback_ties_each_control_to_its_own_flag_and_callback() {
+        let props = ControlBarProps {
+            running: false,
+            halted: false,
+            session: false,
+            has_error: false,
+            on_run: Callback::from(|_| {}),
+            on_continue: Callback::from(|_| {}),
+            on_step: Callback::from(|_| {}),
+            on_next: Callback::from(|_| {}),
+            on_interrupt: Callback::from(|_| {}),
+            on_reset: Callback::from(|_| {}),
+            status: String::new(),
+        };
+        let callback_for = |control: Control| match control {
+            Control::Run => props.on_run.clone(),
+            Control::Continue => props.on_continue.clone(),
+            Control::Step => props.on_step.clone(),
+            Control::Next => props.on_next.clone(),
+            Control::Interrupt => props.on_interrupt.clone(),
+            Control::Reset => props.on_reset.clone(),
+        };
+        let every_control = [
+            Control::Run,
+            Control::Continue,
+            Control::Step,
+            Control::Next,
+            Control::Interrupt,
+            Control::Reset,
+        ];
+
+        for lone in every_control {
+            // One-hot: only `lone`'s flag disabled. Every real lifecycle
+            // state has Step == Next and Run == Reset (see
+            // `control_enablement_matches_the_run_lifecycle_table`), so
+            // only a synthetic, one-hot enablement like this -- never a
+            // reachable `control_enablement` result -- can catch a swap
+            // between them.
+            let enablement = ControlEnablement {
+                run_disabled: lone == Control::Run,
+                continue_disabled: lone == Control::Continue,
+                step_disabled: lone == Control::Step,
+                next_disabled: lone == Control::Next,
+                interrupt_disabled: lone == Control::Interrupt,
+                reset_disabled: lone == Control::Reset,
+            };
+            for control in every_control {
+                let (disabled, callback) = disabled_and_callback(control, enablement, &props);
+                assert_eq!(
+                    disabled,
+                    control == lone,
+                    "{control:?} disabled under a one-hot {lone:?} enablement"
+                );
+                assert_eq!(
+                    callback,
+                    callback_for(control),
+                    "{control:?} must return its own callback regardless of enablement"
+                );
+            }
+        }
     }
 }
