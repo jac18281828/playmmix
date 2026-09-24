@@ -263,8 +263,8 @@ mod tests {
         // Under checksmix 0.3.9's register-stack rule, CALL_MMS's `POP 1,0`
         // returns one value into the hole PUSHJ $0 left and marginalizes
         // the rest: the program ends with $0 = 42, $255 = 42, rL = 1 --
-        // and the caller's own $1, $2 (40 and 2 mid-call) zeroed back out,
-        // since both sit above the new rL. rL still grows past its
+        // and the caller's own $1, $2 (40 and 2 before the call) zeroed
+        // back out, since both sit above the new rL. rL still grows past its
         // load-time value too.
         assert!(
             view.changed_registers().contains(&0) && view.changed_registers().contains(&255),
