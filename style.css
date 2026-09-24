@@ -234,7 +234,12 @@ main {
    would treat the full status text as space `.controls` needs, and Share
    would wrap before the message ever got a chance to ellipsize. `min-width:
    0` lets the message actually shrink past its text's own width instead of
-   refusing to. Touch's own rule below (`flex: 1 1 0%` there too, plus its
+   refusing to. `width: 0` is still needed alongside both: flex-basis sets
+   only the item's hypothetical size before growth, so with a long message
+   `.controls` still measures its content at that text's own width; pinning
+   `width` to zero removes that content contribution outright, and the
+   subsequent `flex-grow` still expands the message to fill the row exactly
+   as before. Touch's own rule below (`flex: 1 1 0%` there too, plus its
    fixed-bar layout) already relies on the same `min-width: 0` and ellipsis
    treatment; declared here, before the touch block, so touch's rule -- which
    still restates every property this shares with it -- keeps winning there. */
@@ -251,6 +256,7 @@ main {
     color: #777;
     font-style: italic;
     flex: 1 1 0%;
+    width: 0;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
