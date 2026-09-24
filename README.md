@@ -1,6 +1,6 @@
 # playmmix
 
-<a href="https://playmmix.2ad.com"><img src="docs/img/playmmix.gif" alt="playmmix stepping through &quot;Is 13 prime?&quot;: registers change with each step, then the answer prints" width="600"></a>
+<a href="https://playmmix.2ad.com"><img src="docs/img/playmmix.gif" alt="playmmix stepping through &quot;Is 13 prime?&quot;: registers change with each step, then Run halts with $0 = 1, prime" width="600"></a>
 
 Write, run and single-step MMIX in the browser, on a desktop or a phone,
 with nothing to install.
@@ -11,7 +11,7 @@ with nothing to install.
 
 playmmix, a full assembler and debugger, works on your phone.
 
-<img src="docs/img/playmmix-phone.png" alt="playmmix on an iPhone, paused mid-run: the control bar pinned at the top, the editor above the machine pane" width="300">
+<a href="https://playmmix.2ad.com"><img src="docs/img/playmmix-phone.png" alt="playmmix on an iPhone: the control bar pinned at the top, above the editor" width="300"></a>
 
 ## Examples to try
 
