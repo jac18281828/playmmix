@@ -814,11 +814,13 @@ main {
     color: #ddd;
 }
 
-/* Natural width: an inline-block sized to its own content hugs the hex
-   with no gap of its own, reading left-aligned directly after it -- fits
-   the common row (about 208px total) at the pane's own font on a 375px
-   phone. A decimal cell wider than 17 characters, integer or float,
-   scrolls inside the pane rather than growing it. */
+/* Natural width: an inline-block sized to its own content, reading
+   left-aligned directly after the hex -- the row's own flex gap
+   separates them, not a gap of this cell's own. Fits the common row
+   (about 208px total) at the pane's own font on a 375px phone. The
+   17-character budget, parentheses included, spans an integer reading
+   from 999999999999999 down to -99999999999999; a wider cell, integer or
+   float, scrolls inside the pane rather than growing it. */
 .reg-dec {
     display: inline-block;
     flex-shrink: 0;
