@@ -154,10 +154,7 @@ immediately instead of waiting for the debounce.
 
 ## Good to know
 
-- **Save your work with Share.** playmmix keeps your program in this browser
-  as you type, but browsers clear site storage (iOS Safari after a few days
-  unused). Click **Share** to send your program to a friend, or to yourself;
-  opening the link brings it back.
+- Click **Share** to send your program to a friend.
 - **New** and opening a shared link both ask first when there is different
   work to lose.
 - A program can print, but playmmix has no keyboard input.
