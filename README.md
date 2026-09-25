@@ -153,7 +153,7 @@ the bottom.
 - **Interrupt** (`i`): pause a Run, Continue or Next in progress.
 - **Reset**: reload the current source from the top, clearing output and
   highlights and keeping breakpoints.
-- **Share**: put the program into a link and share or copy it.
+- **Share**: send your program to a friend as a link.
 
 Press **Ctrl-S** (**Cmd-S** on macOS) anywhere on the page to reassemble
 immediately instead of waiting for the debounce.
@@ -162,8 +162,8 @@ immediately instead of waiting for the debounce.
 
 - **Save your work with Share.** playmmix keeps your program in this browser
   as you type, but browsers clear site storage (iOS Safari after a few days
-  unused). Click **Share** and keep the link: it holds the whole program, and
-  opening it brings the program back.
+  unused). Click **Share** to send your program to a friend, or to yourself;
+  opening the link brings it back.
 - **New** and opening a shared link both ask first when there is different
   work to lose.
 - A program can print, but playmmix has no keyboard input.
