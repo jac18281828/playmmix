@@ -2,8 +2,8 @@
 
 <a href="https://playmmix.2ad.com"><img src="docs/img/playmmix.gif" alt="playmmix stepping through &quot;Is 13 prime?&quot;: registers change with each step, then Run halts with $0 = 1, prime" width="600"></a>
 
-Write, run and single-step MMIX in the browser, on a desktop or a phone,
-with nothing to install.
+Write, run and single-step Knuth's MMIX assembly in your browser, on a
+desktop or a phone, with nothing to install.
 
 **[Try it: playmmix.2ad.com](https://playmmix.2ad.com)**
 
@@ -15,9 +15,8 @@ playmmix, a full assembler and debugger, works on your phone.
 
 ## Examples to try
 
-Each program below is complete: paste it in as is, or click its link to open
-it already loaded. Each halts with its answer, printed or left in a
-register.
+Paste a program into playmmix, or click its link to open it loaded. Each
+halts with its answer, printed or left in a register.
 
 ### Say hello
 
@@ -50,8 +49,9 @@ Hello, world!
 
 ### Is 13 prime?
 
-Trial division, blog-style: try D=2,3,4,... against N. Run, then read `$0`
-in the registers pane: 1 if `N` is prime, 0 if not. Change `N` and run again.
+Trial division: divide `N` by 2, 3, 4 and so on until a divisor turns up or
+its square passes `N`. The answer lands in `$0`: 1 for prime, 0 for
+composite. Change `N` and run again.
 
 ```asm
 % Is N prime? Trial division: try D=2,3,4,... against N; D dividing
@@ -83,13 +83,14 @@ Composite SET   $0,0
 
 **[Open in playmmix](https://playmmix.2ad.com/#p=bVHLbsIwELznK1ZquVQuckLTA4hWgKsCghDx6KG3iBhwC3Fkp1T8fdd5OEHUiuTYnp2ZnW3BREMAqRIn_gprJaIjxOIstJBJFzJ1Adb3SIc8kXa7DdE-EonOIOgBy2GxSPZOCwn4mSfHC5yib65BZLCVp1RqkXEC7IFBGmmNUATuhEICi8uF204AxZqsit3tQHO1gD4--37H78HqbQ2Kf_FtpiFKLtnB0P6KmCvHqeCzxSjf71xKnTlaNgdTaNa9SwKLDDer8dRcUjLRofFSCd5T6IMLYldYJEDNv23LMlhaz_cJtdfr5SA0OyXj6Jjhg1Pxj-bhpvSBqp6tGJYZ4P2oUil7x0Zj9BIpDoksM7s14BLvOjNGIDtwHKIdqlTOTMrUPM83s8KGR4wT1_JZf_iAX93SMCwNeqSRVC6EE36BoIvuKh3YyZ8ktrVs8mFJaVPt3cZH1PLKfQAnGQOr5T-t_OhmCgPGbKguqemn88K06dqpXNvEaAMZLgqki7Oq8y-gCKT_Av8A)**
 
-Run it or click **Step** through `IsPrime`: `$0` reads `1`.
+Run it and the registers pane shows `$0` = 1. Click **Step** instead to
+watch `IsPrime` try each divisor.
 
 ### On what day will my birthday fall?
 
-Prints the weekday for `DAY`/`MONTH` in every year from `FROM` for `YEARS`
-years. The default explores every leap-day birthday from 2000 to 2019.
-Change any of the four constants.
+Prints the weekday of `MONTH`/`DAY` for `YEARS` years starting at `FROM`,
+skipping any year without that date. The default, 29 February from 2000,
+prints only the leap years. Put in your own birthday.
 
 ```asm
 % On what day will my birthday fall? Change MONTH, DAY, FROM and YEARS.
@@ -284,7 +285,7 @@ link.
 
 ## A short MMIX primer
 
-MMIX is a register machine: 256 registers (`$0` to `$255`) and a small set
+MMIX is a register machine: 256 registers (`$0`–`$255`) and a small set
 of instructions, one per line. A line has an optional label, an operation
 and its operands: `Main LDA $255,Hello` labels the line `Main`, its
 operation is `LDA` (load address), and its operands are `$255` and `Hello`.
@@ -292,20 +293,20 @@ Comments start with `%` and run to the end of the line.
 
 The hello example, line by line:
 
-- `LOC Data_Segment` and `LOC #100` set where what follows is placed: the
-  data segment, for a program's fixed values, and address `#100`
-  (hexadecimal), where every playmmix program's code starts.
+- `LOC Data_Segment` and `LOC #100` place what follows: fixed data in the
+  data segment, code at `#100` (hexadecimal), where every playmmix program
+  starts.
 - `GREG @` gives `LDA` a base register for reaching data-segment labels.
-- `BYTE "Hello, ",0` lays down a string's bytes plus a trailing zero, how
-  MMIX marks where a string ends.
+- `BYTE "Hello, ",0` lays down a string's bytes plus a trailing zero, which
+  marks the string's end.
 - `LDA $255,Hello` loads the address of `Hello`'s bytes into `$255`. `TRAP
   0,Fputs,StdOut` prints the string at that address to standard output.
 - `SET $255,0` then `TRAP 0,Halt,0` sets `$255` to zero and stops the
   machine. `$255` doubles as the TRAP argument register and, once halted,
   the exit code the machine pane shows.
 
-`IS` names a constant without storing it anywhere, the way every example's
-tunable value is written: `N IS 13`.
+`IS` names a constant without storing it. The prime and birthday examples
+set their inputs this way: `N IS 13`.
 
 For the rest of MMIX, the [instruction
 reference](https://mmix.cs.hm.edu/doc/instructions-en.html) is the full
@@ -320,15 +321,15 @@ list.
 | output            | the program's stdout, stderr and diagnostics, in the order they arrived; `exit N` once halted | at each pause, and at every chunk boundary during a run |
 | machine status    | the program counter, the call depth and `exit N` once halted | after every step or run segment |
 | registers         | the general-purpose registers in play: the current locals, the current globals and any register that has ever gone nonzero this load | after every step or run segment, changes highlighted |
-| special registers | the CPU state registers (`rA`, `rG`, `rL`, `rJ` and the rest), the same way | after every step or run segment, changes highlighted |
+| special registers | the CPU state registers: `rA`, `rG`, `rL`, `rJ` and the rest | after every step or run segment, changes highlighted |
 | memory            | the loaded text and data segments in hex and ASCII, aligned to 16-byte rows | after every step or run segment, the current row and instruction highlighted |
 
 ## The controls
 
-Run, Continue, Step, Next, Interrupt and Reset sit top left on desktop, each
-key cued by its button's own bold amber first letter. On a phone the bar
-sits fixed to the top of the screen instead, and to the bottom on a
-full-screen iPad.
+Run, Continue, Step, Next, Interrupt and Reset sit top left on desktop; each
+button's bold amber first letter is its keyboard shortcut. On a phone they
+move to a bar pinned to the top of the screen, and on a full-screen iPad to
+the bottom.
 
 - **New**: start over from the minimal skeleton, asking first when there is
   work to lose.
@@ -342,7 +343,7 @@ full-screen iPad.
   way to completion rather than stepping into it.
 - **Interrupt** (`i`): pause a Run, Continue or Next in progress.
 - **Reset**: reload the current source from the top, clearing output and
-  highlights; breakpoints are kept.
+  highlights and keeping breakpoints.
 - **Share**: put the program into a link and share or copy it.
 
 Run always restarts from the top, even mid-program. Continue instead picks
@@ -358,7 +359,7 @@ immediately instead of waiting for the debounce.
   site's storage after days unused, so treat it as a convenience.
 - **New** and opening a shared link both ask first when there is different
   work to lose.
-- **Share**: the link carries the whole program.
+- A shared link carries the whole program; no server holds it.
 - A program can print, but playmmix has no keyboard input.
 
 ## Learn MMIX
@@ -390,8 +391,8 @@ Open `http://127.0.0.1:8080`.
 ### Debug it
 
 `cargo test` runs the Rust-side unit tests (editor, control and machine-pane
-logic) on the host target, with no browser. `docs/layout-spec.md` is the normative spec for
-machine-pane layout decisions.
+logic) on the host target, with no browser. `docs/layout-spec.md` is the
+normative spec for machine-pane layout decisions.
 
 ### Deploy it
 
