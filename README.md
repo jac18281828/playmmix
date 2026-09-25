@@ -77,43 +77,60 @@ link.
 3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679
 ```
 
-## A short MMIX primer
+## Write your own
 
-MMIX is a register machine: 256 registers (`$0`–`$255`) and a small set
-of instructions, one per line. A line has an optional label, an operation
-and its operands: `Main LDA $255,Hello` labels the line `Main`, its
-operation is `LDA` (load address), and its operands are `$255` and `Hello`.
-Comments start with `%` and run to the end of the line.
+An MMIX program has two parts, data then code, and hello has both:
 
-The hello example, line by line:
+- `LOC Data_Segment` starts the data, and `GREG @` follows it so the code
+  can reach the labels there. A string is a `BYTE` list ending in 0:
+  `Text BYTE "Hi",10,0` holds "Hi", a newline and the terminating zero.
+- `LOC #100` starts the code. Execution begins at the label `Main`.
 
-- `LOC Data_Segment` and `LOC #100` place what follows: fixed data in the
-  data segment, code at `#100` (hexadecimal), where every playmmix program
-  starts.
-- `GREG @` gives `LDA` a base register for reaching data-segment labels.
-- `BYTE "Hello, ",0` lays down a string's bytes plus a trailing zero, which
-  marks the string's end.
-- `LDA $255,Hello` loads the address of `Hello`'s bytes into `$255`. `TRAP
-  0,Fputs,StdOut` prints the string at that address to standard output.
-- `SET $255,0` then `TRAP 0,Halt,0` sets `$255` to zero and stops the
-  machine. `$255` doubles as the TRAP argument register and, once halted,
-  the exit code the machine pane shows.
+Work happens in 256 registers, `$0`–`$255`, each 64 bits wide. Most
+instructions take the form `OP X,Y,Z`: compute from `Y` and `Z`, and put the
+result in `X`. `ADD $1,$2,$3` sets `$1` to `$2 + $3`. A `Z` of 0–255 can be a
+plain number, so `SUB $1,$1,1` subtracts one, and `SET $1,3` loads a number
+outright.
 
-For the rest of MMIX, the [instruction
-reference](https://mmix.cs.hm.edu/doc/instructions-en.html) is the full
-list.
+The machine reaches the outside world through `TRAP`. Load a string's
+address into `$255` with `LDA`, and `TRAP 0,Fputs,StdOut` prints it.
+`TRAP 0,Halt,0` stops the machine, and whatever `$255` then holds becomes the
+exit code.
 
-## A tour of the screen
+Branches make decisions. `BP`, `BZ` and `BN` jump to a label when a register
+is positive, zero or negative, and a loop is a branch backward. This program
+prints its line three times:
 
-| region            | shows                                                | updates                                         |
-|-------------------|-------------------------------------------------------|------------------------------------------------|
-| header            | the title, New, the run controls, the run-state label, the status message and Share | the run-state label and status message, after every action |
-| editor            | the MMIX source with a line-number gutter; click a line number to set a breakpoint | live as you type (debounced), and its current-line marker while paused |
-| output            | the program's stdout, stderr and diagnostics, in the order they arrived; `exit N` once halted | at each pause, and at every chunk boundary during a run |
-| machine status    | the program counter, the call depth and `exit N` once halted | after every step or run segment |
-| registers         | the general-purpose registers in play: the current locals, the current globals and any register that has ever gone nonzero this load | after every step or run segment, changes highlighted |
-| special registers | the CPU state registers: `rA`, `rG`, `rL`, `rJ` and the rest | after every step or run segment, changes highlighted |
-| memory            | the loaded text and data segments in hex and ASCII, aligned to 16-byte rows | after every step or run segment, the current row and instruction highlighted |
+```asm
+        LOC     Data_Segment
+        GREG    @
+Text    BYTE    "Hello, world!",10,0
+
+        LOC     #100
+Main    SET     $1,3            % $1 counts down from 3
+Again   LDA     $255,Text       % $255 = the string's address
+        TRAP    0,Fputs,StdOut  % print the string at $255
+        SUB     $1,$1,1         % $1 = $1 - 1
+        BP      $1,Again        % $1 still positive? print again
+        SET     $255,0          % exit code 0
+        TRAP    0,Halt,0        % stop
+```
+
+**[Open in playmmix](https://playmmix.2ad.com/#p=bVDBbsIwDL3nKzw2xCWT0iGOiLWjgwMTiHaHnaZoybpIoakad_D5S1rSFmlWlJc479kvBuhit39pcc2Rf2ayOMkSyfUNNsd04_GZ5PKC_pR85KnHyVZqbSicTa3F3YRGjDLS60LR-4gx8sZV6S9ZmrfJh4jOYRRTl4Ev05RoQZhzCd-1OcGcxEUn3K3jTve0WNDgo9O5DCwBfyRYrFVZzCxwIWppbW8lP8YHj4y-Vg1amqHYN-jVlVPgSAwc24q9NHtPgmG3olvDS789QtSzkwMEdnA-sC0qraEyVqH6latrb-55Q7swH_9PNp6PvCh0ExIS2D__2nKNA3_qepmK_AE)**
+
+```
+Hello, world!
+Hello, world!
+Hello, world!
+```
+
+Click **Step** and watch `$1` count down in the registers pane. The
+[instruction reference](https://mmix.cs.hm.edu/doc/instructions-en.html)
+lists every instruction.
+
+## Find your way around
+
+<img src="docs/img/playmmix-layout.png" alt="The playmmix window, labelled: run controls along the top, the editor on the left with the output below it, registers and memory on the right" width="800">
 
 ## The controls
 
@@ -124,33 +141,31 @@ the bottom.
 
 - **New**: start over from the minimal skeleton, asking first when there is
   work to lose.
-- **Run** (`r`): restart from the start state and run to a breakpoint or
-  halt.
+- **Run** (`r`): start over from the top, wherever the program is paused,
+  and run to a breakpoint or halt.
 - **Continue** (`c`): resume a paused run in place, executing the
   instruction at the PC, then running to a breakpoint or halt.
-- **Step** (`s`, `F11`): execute one source-level step, following into
-  calls.
-- **Next** (`n`, `F10`): execute one source line, running any call along the
-  way to completion rather than stepping into it.
+- **Step** (`s`, `F11`): execute one line. On a `PUSHJ` it follows the call
+  into the subroutine and stops at the subroutine's first line.
+- **Next** (`n`, `F10`): execute one line. On a `PUSHJ` it runs the whole
+  subroutine and stops at the line after the call, once `POP` returns,
+  unless a breakpoint inside stops it first.
 - **Interrupt** (`i`): pause a Run, Continue or Next in progress.
 - **Reset**: reload the current source from the top, clearing output and
   highlights and keeping breakpoints.
 - **Share**: put the program into a link and share or copy it.
-
-Run always restarts from the top, even mid-program. Continue instead picks
-up exactly where a paused run left off. Reset also returns to the top, but
-waits there instead of running.
 
 Press **Ctrl-S** (**Cmd-S** on macOS) anywhere on the page to reassemble
 immediately instead of waiting for the debounce.
 
 ## Good to know
 
-- The program is kept in this browser as you type. iOS Safari can clear a
-  site's storage after days unused, so treat it as a convenience.
+- **Save your work with Share.** playmmix keeps your program in this browser
+  as you type, but browsers clear site storage (iOS Safari after a few days
+  unused). Click **Share** and keep the link: it holds the whole program, and
+  opening it brings the program back.
 - **New** and opening a shared link both ask first when there is different
   work to lose.
-- A shared link carries the whole program; no server holds it.
 - A program can print, but playmmix has no keyboard input.
 
 ## Learn MMIX
