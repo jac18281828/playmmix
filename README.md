@@ -197,8 +197,8 @@ see [`cdk/README.md`](cdk/README.md).
 
 ### Contribute
 
-See [`AGENTS.md`](AGENTS.md) for this project's coding and review
-conventions.
+Bug reports and pull requests are welcome; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## This is checksmix
 
