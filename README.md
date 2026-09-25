@@ -147,14 +147,13 @@ the bottom.
 - **Interrupt** (`i`): pause a Run, Continue or Next in progress.
 - **Reset**: reload the current source from the top, clearing output and
   highlights and keeping breakpoints.
-- **Share**: send your program to a friend as a link.
+- **Share**: send your program to a friend.
 
 Press **Ctrl-S** (**Cmd-S** on macOS) anywhere on the page to reassemble
 immediately instead of waiting for the debounce.
 
 ## Good to know
 
-- Click **Share** to send your program to a friend.
 - **New** and opening a shared link both ask first when there is different
   work to lose.
 - A program can print, but `playmmix` has no keyboard input.
