@@ -2,6 +2,7 @@
 //! parsing.
 
 use crate::SOURCE_FILENAME;
+use crate::highlight::{self, TokenKind};
 
 /// MIX-only opcodes: mnemonics classic MIX has but MMIXAL doesn't, so their
 /// presence as a whole token is a strong signal the pasted source is MIX,
@@ -44,14 +45,35 @@ fn token_has_mix_field_spec(token: &str) -> bool {
     false
 }
 
+/// Blanks every byte of `line` that falls inside a `highlight::classify` span
+/// of kind `Comment`, `String` or `Char`, leaving its length and every other
+/// byte untouched. `classify`'s spans fall on `char` boundaries, and every
+/// replacement byte is an ASCII space, so the result is always valid UTF-8.
+/// Blanking rather than removing keeps the tokens on either side of an
+/// excluded span from joining into one.
+fn line_with_excluded_spans_blanked(line: &str) -> String {
+    let mut bytes = line.as_bytes().to_vec();
+    for span in highlight::classify(line) {
+        if matches!(
+            span.kind,
+            TokenKind::Comment | TokenKind::String | TokenKind::Char
+        ) {
+            bytes[span.start..span.end].fill(b' ');
+        }
+    }
+    String::from_utf8(bytes).expect("blanking with ASCII spaces preserves valid UTF-8")
+}
+
 /// A heuristic classifier for classic MIX source (Knuth's original
 /// architecture, distinct from MMIX): checked only after MMIXAL parsing has
 /// already failed, so it never changes what parses -- it only improves the
 /// message when parsing was always going to fail. Matches whitespace-
-/// delimited tokens, never a raw substring search, so an MMIXAL comment or
-/// string literal containing e.g. "ORIG" or "CMPA" can't false-positive.
+/// delimited tokens outside any comment, string or character-constant span
+/// (`line_with_excluded_spans_blanked`), so a MIX-only word inside one of
+/// those can't false-positive.
 fn looks_like_mix(source: &str) -> bool {
     source.lines().any(|line| {
+        let line = line_with_excluded_spans_blanked(line);
         line.split_whitespace().any(|token| {
             token == "ORIG" || MIX_ONLY_OPCODES.contains(&token) || token_has_mix_field_spec(token)
         })
@@ -207,6 +229,28 @@ mod tests {
         let error = "source.mms:3:13: syntax error: ...";
         let message = describe_source_error("\tADDD\t$1,$2,$3\n", error);
         assert!(!message.contains(SOURCE_FILENAME), "{message}");
+    }
+
+    #[test]
+    fn looks_like_mix_ignores_a_whole_word_orig_inside_a_percent_comment() {
+        let source = "% Converted from ORIG 3000\n";
+        assert!(!looks_like_mix(source));
+    }
+
+    #[test]
+    fn looks_like_mix_ignores_a_mix_only_opcode_in_a_trailing_remark() {
+        let source = "\tSWYM\t% comment CMPA\n";
+        assert!(!looks_like_mix(source));
+    }
+
+    #[test]
+    fn looks_like_mix_ignores_orig_inside_a_byte_string() {
+        // Internal spaces around ORIG so it stands as its own
+        // whitespace-delimited token inside the string -- unlike a bare
+        // `"ORIG"`, whose attached quotes would already fail the token's
+        // exact-match check even scanning the raw, unexcluded line.
+        let source = "\tBYTE\t\"note ORIG note\"\n";
+        assert!(!looks_like_mix(source));
     }
 
     #[test]
