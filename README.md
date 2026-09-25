@@ -15,8 +15,8 @@ playmmix, a full assembler and debugger, works on your phone.
 
 ## Examples to try
 
-Paste a program into playmmix, or click its link to open it loaded. Each
-halts with its answer, printed or left in a register.
+Click a program's link to open it in playmmix, loaded and ready to run.
+Hello is short enough to paste in by hand.
 
 ### Say hello
 
@@ -47,217 +47,11 @@ Main    LDA     $255,Hello
 Hello, world!
 ```
 
-### Is 13 prime?
-
-Trial division: divide `N` by 2, 3, 4 and so on until a divisor turns up or
-its square passes `N`. The answer lands in `$0`: 1 for prime, 0 for
-composite. Change `N` and run again.
-
-```asm
-% Is N prime? Trial division: try D=2,3,4,... against N; D dividing
-% N evenly makes it composite, D*D passing N first makes it prime.
-N       IS      13             % 0-65535; SET rejects anything wider
-
-        LOC     #100
-Main    SET     $1,N
-        PUSHJ   $0,IsPrime      % $0 = 1 if prime, 0 if composite
-        SET     $255,0
-        TRAP    0,Halt,0
-
-IsPrime CMPU    $1,$0,2
-        BN      $1,Composite    % 0 and 1 are not prime
-        SET     $1,2            % D, the trial divisor
-Loop    MULU    $2,$1,$1
-        CMPU    $2,$2,$0
-        BP      $2,Prime        % D*D > N: no divisor found
-        DIVU    $2,$0,$1
-        GET     $2,rR           % N mod D
-        BZ      $2,Composite
-        ADDU    $1,$1,1
-        JMP     Loop
-Prime   SET     $0,1
-        POP     1,0
-Composite SET   $0,0
-        POP     1,0
-```
-
-**[Open in playmmix](https://playmmix.2ad.com/#p=bVHLbsIwELznK1ZquVQuckLTA4hWgKsCghDx6KG3iBhwC3Fkp1T8fdd5OEHUiuTYnp2ZnW3BREMAqRIn_gprJaIjxOIstJBJFzJ1Adb3SIc8kXa7DdE-EonOIOgBy2GxSPZOCwn4mSfHC5yib65BZLCVp1RqkXEC7IFBGmmNUATuhEICi8uF204AxZqsit3tQHO1gD4--37H78HqbQ2Kf_FtpiFKLtnB0P6KmCvHqeCzxSjf71xKnTlaNgdTaNa9SwKLDDer8dRcUjLRofFSCd5T6IMLYldYJEDNv23LMlhaz_cJtdfr5SA0OyXj6Jjhg1Pxj-bhpvSBqp6tGJYZ4P2oUil7x0Zj9BIpDoksM7s14BLvOjNGIDtwHKIdqlTOTMrUPM83s8KGR4wT1_JZf_iAX93SMCwNeqSRVC6EE36BoIvuKh3YyZ8ktrVs8mFJaVPt3cZH1PLKfQAnGQOr5T-t_OhmCgPGbKguqemn88K06dqpXNvEaAMZLgqki7Oq8y-gCKT_Av8A)**
-
-Run it and the registers pane shows `$0` = 1. Click **Step** instead to
-watch `IsPrime` try each divisor.
-
 ### On what day will my birthday fall?
 
-Prints the weekday of `MONTH`/`DAY` for `YEARS` years starting at `FROM`,
-skipping any year without that date. The default, 29 February from 2000,
-prints only the leap years. Put in your own birthday.
-
-```asm
-% On what day will my birthday fall? Change MONTH, DAY, FROM and YEARS.
-MONTH   IS      2               % 1–12
-DAY     IS      29              % 1–31
-FROM    IS      2000            % 1583–9999, the first year
-YEARS   IS      20              % 1–100, how many years to print
-
-        LOC     Data_Segment
-        GREG    @
-MonthDays       BYTE 31,28,31,30,31,30,31,31,30,31,30,31
-SakamotoT       BYTE 0,3,2,5,0,3,5,1,4,6,2,4
-Sep     BYTE    " ",0
-NL      BYTE    10,0
-YearDigits      BYTE 0,0,0,0,0,0
-Sunday  BYTE    "Sunday",0
-Monday  BYTE    "Monday",0
-Tuesday BYTE    "Tuesday",0
-Wednesday       BYTE "Wednesday",0
-Thursday        BYTE "Thursday",0
-Friday  BYTE    "Friday",0
-Saturday        BYTE "Saturday",0
-
-        LOC     #100
-% Load the plain (non-leap) day count for MONTH from a 12-entry table.
-Main    LDA     $20,MonthDays
-        LDBU    $1,$20,(MONTH-1)
-
-% IsFeb ($2) is 1 when MONTH is February, else 0.
-        SET     $7,MONTH
-        CMP     $8,$7,2
-        SET     $2,0
-        BNZ     $8,1F
-        SET     $2,1
-1H
-
-% YearAdjust ($3) is 1 when MONTH is January or February: Sakamoto's
-% method treats those two months as the tail of the PREVIOUS year.
-        CMP     $8,$7,3
-        SET     $3,0
-        BNN     $8,2F
-        SET     $3,1
-2H
-
-% Sakamoto's per-month offset for MONTH, from a second 12-entry table.
-        LDA     $21,SakamotoT
-        LDBU    $4,$21,(MONTH-1)
-
-        SET     $5,FROM
-        SET     $6,FROM+YEARS
-        SET     $23,400         % an immediate operand holds only 0-255
-
-YearLoop
-        CMP     $8,$5,$6
-        BNN     $8,LoopDone
-
-% Is $5 (the current year) a leap year? Gregorian rule: divisible by
-% 4, except a century year (divisible by 100) unless also divisible
-% by 400.
-        DIVU    $9,$5,4
-        GET     $10,rR
-        BNZ     $10,NotLeap
-        DIVU    $9,$5,100
-        GET     $10,rR
-        BNZ     $10,IsLeap
-        DIVU    $9,$5,$23
-        GET     $10,rR
-        BNZ     $10,NotLeap
-IsLeap  SET     $11,1
-        JMP     LeapDone
-NotLeap SET     $11,0
-LeapDone
-
-% Does DAY exist in MONTH this year? Only February's count moves,
-% and only on a leap year.
-        SET     $12,$1
-        BZ      $2,SkipLeapAdjust
-        BZ      $11,SkipLeapAdjust
-        ADDU    $12,$12,1
-SkipLeapAdjust
-        SET     $13,DAY
-        CMP     $14,$13,$12
-        BP      $14,SkipYear
-
-% Sakamoto's algorithm: weekday = (y + y/4 - y/100 + y/400 + t + day)
-% mod 7, y adjusted for Jan/Feb, weekday 0 = Sunday.
-        SET     $15,$5
-        BZ      $3,NoYearAdjust
-        SUBU    $15,$15,1
-NoYearAdjust
-        DIVU    $16,$15,4
-        DIVU    $17,$15,100
-        DIVU    $18,$15,$23
-        ADDU    $19,$15,$16
-        SUBU    $19,$19,$17
-        ADDU    $19,$19,$18
-        ADDU    $19,$19,$4
-        SET     $13,DAY
-        ADDU    $19,$19,$13
-        DIVU    $9,$19,7
-        GET     $22,rR
-
-% Print the year as decimal text: divide by 10 repeatedly, filling
-% the buffer from its end backward.
-        SET     $30,$5
-        LDA     $31,YearDigits
-        ADDU    $31,$31,4
-3H      DIVU    $32,$30,10
-        GET     $33,rR
-        ADDU    $33,$33,'0'
-        STBU    $33,$31,0
-        SUBU    $31,$31,1
-        SET     $30,$32
-        BNZ     $30,3B
-        ADDU    $31,$31,1
-        SET     $255,$31
-        TRAP    0,Fputs,StdOut
-        LDA     $255,Sep
-        TRAP    0,Fputs,StdOut
-
-% $22 is the weekday index, 0 for Sunday up to 6 for Saturday. Walk
-% it down by one each time it misses, until it names its weekday.
-        BZ      $22,PrintSunday
-        SUBU    $22,$22,1
-        BZ      $22,PrintMonday
-        SUBU    $22,$22,1
-        BZ      $22,PrintTuesday
-        SUBU    $22,$22,1
-        BZ      $22,PrintWednesday
-        SUBU    $22,$22,1
-        BZ      $22,PrintThursday
-        SUBU    $22,$22,1
-        BZ      $22,PrintFriday
-        JMP     PrintSaturday
-PrintSunday
-        LDA     $255,Sunday
-        JMP     PrintWeekdayDone
-PrintMonday
-        LDA     $255,Monday
-        JMP     PrintWeekdayDone
-PrintTuesday
-        LDA     $255,Tuesday
-        JMP     PrintWeekdayDone
-PrintWednesday
-        LDA     $255,Wednesday
-        JMP     PrintWeekdayDone
-PrintThursday
-        LDA     $255,Thursday
-        JMP     PrintWeekdayDone
-PrintFriday
-        LDA     $255,Friday
-        JMP     PrintWeekdayDone
-PrintSaturday
-        LDA     $255,Saturday
-PrintWeekdayDone
-        TRAP    0,Fputs,StdOut
-        LDA     $255,NL
-        TRAP    0,Fputs,StdOut
-
-SkipYear
-        ADDU    $5,$5,1
-        JMP     YearLoop
-
-LoopDone
-        SET     $255,0          % a clean exit code, not a stray one
-        TRAP    0,Halt,0
-```
+Prints the weekday your birthday lands on, year after year. Open it, set
+`MONTH`, `DAY`, `FROM` and `YEARS` at the top, and run. The default, 29
+February from 2000, prints only the leap years.
 
 **[Open in playmmix](https://playmmix.2ad.com/#p=nVjbUttIEH3XV3RloWIqA9HF5pKqrSzE3FKAKQyh2JetwRpjLZLGJY1i_JZ_2D_cL9nuGV0tGWpxSjaa093q6cuZVjZhFMNixhX4fAmLIAwhWsJjkKgZLUx5GH6FbzMePwm4HF3dnjEYHj4wOLkZXQKPfXg4PrwZ71gaA4DzMeiPC83PJjj__vrHcS3U1gul4EGXoOdY-gl1Qdu2VwQH-x7KHuCHgZoJmAZJqmApeGJptxranf7YNoOZXEDE46VWTEFJmCdBrCyrkL0YfdO_Q674X2PxFAlEC_D05viUfv-wLmWsZkO-THPk6OH2GDyHufsMvz279t24tcb8mUdSydu6IiLMZQNGvwPmsD7bxfu-NRbzSgg_H-ADs62rC2isOjYuPuB-hsFToNKG3fKfNc5iSnJlyyyQQdxMEzILBN1mIiWshPIFwu6FHxu09sgP5apWn2VJTSIXKVZJ4iQJms82CwSNucqSlnKxShKtrP2GSbY24UJyXxfJPORBDL1Yxtuh4PMtXfgTmcUKpjIxRQ7TREbAwXG3MdfJEhR_DAVWOamS7eGhtr3h2qxMe_Xk4dGdRh1GAj1tctvZstCN8_REPEJvw92CIAUHW0_E-TPxHrEk48mSgQhTAfZOaXN8bKpjY49p6RL4dnltgH2GmNtWcDEoZbiu_iyEnZMuUcdyzshNKp1D_-8M26m34XX6-p3H5CpgzAq3v0BRyh9TNBIJNZMY9ERwLEH8G7ekFhIiilgKPNX5UDwIQU7139c3xz_OR3dj3Yo7a_botR33Gnu8KoTdky5Rx3L1HitfYS6Sbe0VOjJNRa0SWFEKqZhgB7Qqosp5UREOK_u5XRF9RgK1imj5N2BEfO31Xb3-SfNaR-Y81q_R4yZSMwRRJPyAKwES90dcPZOhn4KMwyXY2-5gYGmKuJBy3hnqAdvY7QorKQxlLEw9o8vQo-RNsiTB2OjcbWHEqLv0zVc4TcSTTAJ0KslC8QX84GeQBhhAeFyikT7W-8tEzBVqTdBElhgyhl5dEEnN3oIsDkWKxROmsjKDNhDHCFQJGZ7_MCE_oI30K74uQoYUmdy0OwOXr6S6QN_XmCI6-R_GztNXbGHe3uOYsVlLv-NgVRca3_MUkoxOU67WELetEsbgDaVI6VzHNATY8kHR5mqGjW5SOKKqKRodW8YwZiR_ipRZm3oU0IUl43rqOwjMcdlG5eyR2R1xz_g5mJNThnfaEuj1GpHD4fCusk0stkawcsJjuN121TvYoIihker511BiZJZaZoU-eEjVrWbRF1gI8UwHyu_QW8InWH7uwzZ-Y9GYO_2r8EKhLeJIJMg9Bkvg2lPha-pBbv2MsWalORsNmsO5K6JYSIN2vDysl4rHK7W74nRCNbwcq1OsLFRnV4v1O5A9Y6DWEBW2r7F6gVdZOjCYs9vhFGF07a3Ro2t_PdZ_M9dtc15ndyK0125O16XmxMRd04yoDy3NVHiY-WISRDwEJV6UoTg_py1IxBzPQOGHeLJPccYO4ic0QcqP2XQqEnPI0KAmsI8e-eR5wRO_I9U4MNZSXR46OEpWw157pwjT1be8s5V9etgwaNPpoDTPq9NQZQu7A6-P9sfKu9ujGubUzuIyrbkHTveOPLdNdzQaH63dSochPM8IKoHbm0PduTY7mWcqZWPljzLVcWCjHg7Vb-lhvjD5NPhQ2oq-DGJfvDBsT-rafJzO5vQOsWuW8sl0B-55-Iw2AnzRkouY6gK5FwSfzEAFkSAgCtIU2RSPOIUjES7EPEJeprLIn7fTwZsu06VoHt6OPOJ0Oes1zWT_Hs188H-PavlK8K7n5i8L79E17xKtw9LEMM-W1RXRZsE0sYaVe5MrfbZ2BbhhaAV73dBqvBuWVsHXTbXj3zDWht_wbDUjTddW0deNraSoYeq19LUMlfnszmEj23Xl91DI1cWbDFJODy1WG-jBsrWrcjq3ypG7k_bs-v9r4AiN41dMo5zCKc0XDGJJk3WqEq5Zp8PRMx4q5O3_AA)**
 
@@ -304,9 +98,6 @@ The hello example, line by line:
 - `SET $255,0` then `TRAP 0,Halt,0` sets `$255` to zero and stops the
   machine. `$255` doubles as the TRAP argument register and, once halted,
   the exit code the machine pane shows.
-
-`IS` names a constant without storing it. The prime and birthday examples
-set their inputs this way: `N IS 13`.
 
 For the rest of MMIX, the [instruction
 reference](https://mmix.cs.hm.edu/doc/instructions-en.html) is the full
