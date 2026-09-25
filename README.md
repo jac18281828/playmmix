@@ -86,10 +86,10 @@ the result to register `X`. `ADD $1,$2,$3` sets `$1` to `$2 + $3`. A `Z` of 0–
 plain number, so `SUB $1,$1,1` subtracts one, and `SET $1,3` loads a number
 outright.
 
-The machine reaches the outside world through `TRAP`. Load a string's
-address into `$255` with `LDA`, and `TRAP 0,Fputs,StdOut` prints it.
-`TRAP 0,Halt,0` stops the machine, and whatever `$255` then holds becomes the
-exit code.
+A program asks the operating system for services with `TRAP`. Load a
+string's address into `$255` with `LDA`, and `TRAP 0,Fputs,StdOut` asks it
+to print the string. `TRAP 0,Halt,0` asks it to stop the program, and
+whatever `$255` then holds becomes the exit code.
 
 Branches make decisions. `BP`, `BZ` and `BN` jump to a label when a register
 is positive, zero or negative, and a loop is a branch backward. This program
