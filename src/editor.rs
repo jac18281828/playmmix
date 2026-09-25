@@ -167,7 +167,13 @@ impl Component for Editor {
         let onkeydown = {
             let textarea_ref = self.textarea_ref.clone();
             ctx.link().batch_callback(move |event: KeyboardEvent| {
-                if event.key() != "Tab" {
+                if !tab_should_intercept(
+                    &event.key(),
+                    event.shift_key(),
+                    event.ctrl_key(),
+                    event.alt_key(),
+                    event.meta_key(),
+                ) {
                     return None;
                 }
                 event.prevent_default();
@@ -345,6 +351,14 @@ fn render_gutter_row(
 /// column for pedantic hand-alignment in between.
 const TAB_STOP_COLUMNS: usize = 4;
 
+/// Whether a keydown should be intercepted to splice a soft tab: a bare
+/// `Tab` with no Shift, Ctrl, Alt or Meta held. Shift+Tab is the standard way
+/// back out of a text box; Ctrl/Alt/Meta+Tab belong to the browser and the
+/// OS -- any of them passes through untouched.
+fn tab_should_intercept(key: &str, shift: bool, ctrl: bool, alt: bool, meta: bool) -> bool {
+    key == "Tab" && !shift && !ctrl && !alt && !meta
+}
+
 /// Splice spaces -- never a literal tab -- into `textarea` at the caret,
 /// replacing any current selection, enough to reach the next tab stop, and
 /// place the caret immediately after them. Spaces, not a `\t`, so a program
@@ -521,6 +535,26 @@ fn render_line(line: &str, is_current: bool, is_error: bool) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_should_intercept_only_a_bare_tab() {
+        assert!(tab_should_intercept("Tab", false, false, false, false));
+    }
+
+    #[test]
+    fn tab_should_intercept_lets_every_modified_tab_pass_through() {
+        // Shift is the standard way back out of a text box; Ctrl/Alt/Meta
+        // belong to the browser and the OS -- none may be intercepted.
+        assert!(!tab_should_intercept("Tab", true, false, false, false));
+        assert!(!tab_should_intercept("Tab", false, true, false, false));
+        assert!(!tab_should_intercept("Tab", false, false, true, false));
+        assert!(!tab_should_intercept("Tab", false, false, false, true));
+    }
+
+    #[test]
+    fn tab_should_intercept_ignores_a_non_tab_key() {
+        assert!(!tab_should_intercept("a", false, false, false, false));
+    }
 
     #[test]
     fn column_of_utf16_offset_is_zero_at_the_start_of_an_empty_line() {
