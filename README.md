@@ -7,12 +7,6 @@ desktop or a phone, with nothing to install.
 
 **[Try it: playmmix.2ad.com](https://playmmix.2ad.com)**
 
-## On your phone
-
-playmmix, a full assembler and debugger, works on your phone.
-
-<a href="https://playmmix.2ad.com"><img src="docs/img/playmmix-phone.png" alt="playmmix on an iPhone: the control bar pinned at the top, above the editor" width="300"></a>
-
 ## Examples to try
 
 Click a program's link to open it in playmmix, loaded and ready to run.
@@ -86,9 +80,9 @@ An MMIX program has two parts, data then code, and hello has both:
   `Text BYTE "Hi",10,0` holds "Hi", a newline and the terminating zero.
 - `LOC #100` starts the code. Execution begins at the label `Main`.
 
-Work happens in 256 registers, `$0`–`$255`, each 64 bits wide. Most
-instructions take the form `OP X,Y,Z`: compute from `Y` and `Z`, and put the
-result in `X`. `ADD $1,$2,$3` sets `$1` to `$2 + $3`. A `Z` of 0–255 can be a
+MMIX has 256 general registers, `$0`–`$255`, each holding 64 bits. Most
+instructions take the form `OP X,Y,Z`: read `Y` and `Z`, compute, and write
+the result to register `X`. `ADD $1,$2,$3` sets `$1` to `$2 + $3`. A `Z` of 0–255 can be a
 plain number, so `SUB $1,$1,1` subtracts one, and `SET $1,3` loads a number
 outright.
 
