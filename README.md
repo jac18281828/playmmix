@@ -92,11 +92,11 @@ years. The default explores every leap-day birthday from 2000 to 2019.
 Change any of the four constants.
 
 ```asm
-% What day is my birthday? Change MONTH, DAY, FROM and YEARS below.
-MONTH   IS      2         % 1–12
-DAY     IS      29         % 1–31
-FROM    IS      2000         % 1583–9999, the first year
-YEARS   IS      20         % 1–100, how many years to print
+% On what day will my birthday fall? Change MONTH, DAY, FROM and YEARS.
+MONTH   IS      2               % 1–12
+DAY     IS      29              % 1–31
+FROM    IS      2000            % 1583–9999, the first year
+YEARS   IS      20              % 1–100, how many years to print
 
         LOC     Data_Segment
         GREG    @
@@ -192,9 +192,8 @@ NoYearAdjust
         DIVU    $9,$19,7
         GET     $22,rR
 
-% Print the year as decimal text, the same digit-by-digit way as the
-% prime example: divide by 10 repeatedly, filling the buffer from
-% its end backward.
+% Print the year as decimal text: divide by 10 repeatedly, filling
+% the buffer from its end backward.
         SET     $30,$5
         LDA     $31,YearDigits
         ADDU    $31,$31,4
@@ -259,7 +258,7 @@ LoopDone
         TRAP    0,Halt,0
 ```
 
-**[Open in playmmix](https://playmmix.2ad.com/#p=nVfbTuNIEH33V5RmQRO0HcaXhMtIq1mYwMCImwgMYl9WnbhDvNjuyG5PyNv-w_7hfslWdfsaO6AlyCTuU3VcXbcub8PDnCvw-QqCFKIVTIJEzfH2C3yd8_hJwOX11d0Zg9HRI4PT2-tL4LEPjydHt2OYiFAudy0tAQDnY9AfF4rPNjj__v2P41qorRdKkcM1Gc-xNHldxrbtutTwwEPBQ_wwUHMBsyBJFawETyxjTl113QTbZjCXS4h4vNI6KSgJiySIlWUVshfXX_X3iCv-51g8RQLRAvx2e_KNvn-3LmWs5iO-SnPk-PHuBDyHuQcM_3t27X_j1hrzZx5JJe_qiogwlw0ZfQ-ZwwZsD-8H1lgsKiH8fIAPzLauLqCx6ti4-Ij7GQVPgUobvOWfNc5iinDFZRaIEDfThMwCQXeZSAkroXyBsAfhxwatPfJDuarV51lSk8hFilWSOE2C5rPNAkFjrrKkpVyskkQrar9gkK1tuJDc1_mxCHkQQy-WcT8UfLGjk3wqs1jBTCYmr2GWyAg4OG4fY52sQPFJKDClSZW4R0eae8u1WRn26smj43uNOowEepqy7-xYaMZ5eiom0Ntyd6iwHFjORZw_E-8RSzKerBiIMBVg75ac4xOTHVv7TEuXwNfLGwMcMMTctoKLTinddfVHIeycdok6lnNGZlLqHPl_ZVhJvS2v09bvPCZTAX1WmP0ZilT-mCJJJNRcotMTwTEF8TduSS0lROSxFHiq46F4EIKc6d83tyc_zq_vx7oUdzfs0Wsb7jX2eFUIu6ddoo7l6j1WtsJCJH1tFRoyS0UtE1iRCqmYYgW0MqKKeZERDivruZ0RA0YCtYxo2Tdk1PDa63t6_Vfd0joi57FBoy3yGIIoEn7AlQCJ-6P2PJehn4KMwxXYfXc4tHSLuJBy0enqIdva63IrKYxkLEw-o8nQo-BNsyRB3-jY7aDHqLr0zRf4lognmQRoVJKF4jP4wc8gDdCBMFkhyQDz_WUqFgq1pkiRJaYZQ68uiE3N3oEsDkWKyROmsqJBDsTRA1VARuc_jMsPaSODql8XLsMWmdy2KwOXr6S6QNs3UFE7-R9k5-krXBi39xhmOGvhdxzM6kLjex5CktFhytUa4rZVwui8kRQpHeUYhgBLPijKXM2x0E0IrylrikLHkjEdM5I_RcqsbX3668SScT30HQ3McdlWZeyx2R31nvFzsCCjTN9pS6DVG0SORqP7ipu62AbBygiP4XbbWe9ggSKGJNXzb6DEiJZKZq198JCyW82jz7AU4pkOlN-gt4JfYfVpAH38j0lj7vS3wguFdqhHYoPcZ7ACri0Vvm492Fs_oa9ZSWcjoTmcuzyKiTRs-8vDfKn6eKV2X5xOqIaXY3WKlYnq7GmxQQeybwhqBVFhBxqrJ3gVpUODOXsdRhFG1_4GPboONmODN2PdpvM6qxOh_XZxui4VJwbuhmZEfWjpToWHmS-mQcRDUOJFmVE05ZHAJoUTWH-y6usfsMRompMPSXDQRAnxwqNF0Rb9vNVBIhZ4bgo_xGlgFoRhED9p0kk2m4lEH0vIQMOdwNqb8Onzkid-R3rgkFlLj_KgwvGzGhDb3kGYroHlna35xsMiQ06now16Xr11VVxYUXh9tD9W1t0d1zCndn6XqZBb4HTvyHPbLZLG6eONW-kgwjOQoBK4uz3S1W6z00WmUjZW_nWmOg551MNB_C09jA8mDA1LFLiiloPYFy8MS5oqPR_BswW9d-yZpXya3YUHHj7rGIMvlzHlBfZrEHw6B0WJg0AUpCl2YDwWFY5RuBBjzqU6LfLn7Xb0Wpfp9DUPb3secbqczZrmbeA9mvnLwntUy9eIdz03f8F4j655_2gdsMaHebSsLo82E6aJNVgeTKz0edzl4AbRGvY60bq_G0zr4OtUbf83yNrwG5atR6Rp2jr6OtlaiBpUr4WvRVTGszuGjWjXld_TQq4u3uwg5cTR6mpDPYy2dlVO9FY5pne2veplgd4WYIojW0zjn8LJzhcMYknTeKoSrrtOh6FnPFTYt_8D)**
+**[Open in playmmix](https://playmmix.2ad.com/#p=nVjbUttIEH3XV3RloWIqA9HF5pKqrSzE3FKAKQyh2JetwRpjLZLGJY1i_JZ_2D_cL9nuGV0tGWpxSjaa093q6cuZVjZhFMNixhX4fAmLIAwhWsJjkKgZLUx5GH6FbzMePwm4HF3dnjEYHj4wOLkZXQKPfXg4PrwZ71gaA4DzMeiPC83PJjj__vrHcS3U1gul4EGXoOdY-gl1Qdu2VwQH-x7KHuCHgZoJmAZJqmApeGJptxranf7YNoOZXEDE46VWTEFJmCdBrCyrkL0YfdO_Q674X2PxFAlEC_D05viUfv-wLmWsZkO-THPk6OH2GDyHufsMvz279t24tcb8mUdSydu6IiLMZQNGvwPmsD7bxfu-NRbzSgg_H-ADs62rC2isOjYuPuB-hsFToNKG3fKfNc5iSnJlyyyQQdxMEzILBN1mIiWshPIFwu6FHxu09sgP5apWn2VJTSIXKVZJ4iQJms82CwSNucqSlnKxShKtrP2GSbY24UJyXxfJPORBDL1Yxtuh4PMtXfgTmcUKpjIxRQ7TREbAwXG3MdfJEhR_DAVWOamS7eGhtr3h2qxMe_Xk4dGdRh1GAj1tctvZstCN8_REPEJvw92CIAUHW0_E-TPxHrEk48mSgQhTAfZOaXN8bKpjY49p6RL4dnltgH2GmNtWcDEoZbiu_iyEnZMuUcdyzshNKp1D_-8M26m34XX6-p3H5CpgzAq3v0BRyh9TNBIJNZMY9ERwLEH8G7ekFhIiilgKPNX5UDwIQU7139c3xz_OR3dj3Yo7a_botR33Gnu8KoTdky5Rx3L1HitfYS6Sbe0VOjJNRa0SWFEKqZhgB7Qqosp5UREOK_u5XRF9RgK1imj5N2BEfO31Xb3-SfNaR-Y81q_R4yZSMwRRJPyAKwES90dcPZOhn4KMwyXY2-5gYGmKuJBy3hnqAdvY7QorKQxlLEw9o8vQo-RNsiTB2OjcbWHEqLv0zVc4TcSTTAJ0KslC8QX84GeQBhhAeFyikT7W-8tEzBVqTdBElhgyhl5dEEnN3oIsDkWKxROmsjKDNhDHCFQJGZ7_MCE_oI30K74uQoYUmdy0OwOXr6S6QN_XmCI6-R_GztNXbGHe3uOYsVlLv-NgVRca3_MUkoxOU67WELetEsbgDaVI6VzHNATY8kHR5mqGjW5SOKKqKRodW8YwZiR_ipRZm3oU0IUl43rqOwjMcdlG5eyR2R1xz_g5mJNThnfaEuj1GpHD4fCusk0stkawcsJjuN121TvYoIihker511BiZJZaZoU-eEjVrWbRF1gI8UwHyu_QW8InWH7uwzZ-Y9GYO_2r8EKhLeJIJMg9Bkvg2lPha-pBbv2MsWalORsNmsO5K6JYSIN2vDysl4rHK7W74nRCNbwcq1OsLFRnV4v1O5A9Y6DWEBW2r7F6gVdZOjCYs9vhFGF07a3Ro2t_PdZ_M9dtc15ndyK0125O16XmxMRd04yoDy3NVHiY-WISRDwEJV6UoTg_py1IxBzPQOGHeLJPccYO4ic0QcqP2XQqEnPI0KAmsI8e-eR5wRO_I9U4MNZSXR46OEpWw157pwjT1be8s5V9etgwaNPpoDTPq9NQZQu7A6-P9sfKu9ujGubUzuIyrbkHTveOPLdNdzQaH63dSochPM8IKoHbm0PduTY7mWcqZWPljzLVcWCjHg7Vb-lhvjD5NPhQ2oq-DGJfvDBsT-rafJzO5vQOsWuW8sl0B-55-Iw2AnzRkouY6gK5FwSfzEAFkSAgCtIU2RSPOIUjES7EPEJeprLIn7fTwZsu06VoHt6OPOJ0Oes1zWT_Hs188H-PavlK8K7n5i8L79E17xKtw9LEMM-W1RXRZsE0sYaVe5MrfbZ2BbhhaAV73dBqvBuWVsHXTbXj3zDWht_wbDUjTddW0deNraSoYeq19LUMlfnszmEj23Xl91DI1cWbDFJODy1WG-jBsrWrcjq3ypG7k_bs-v9r4AiN41dMo5zCKc0XDGJJk3WqEq5Zp8PRMx4q5O3_AA)**
 
 ```
 2000 Tuesday
@@ -271,12 +270,11 @@ LoopDone
 
 ### Digits of pi
 
-A showpiece, not a lesson: an MMIX program that computes `DIGITS` decimal
-places of pi with Machin's formula, doing arbitrary-precision arithmetic on
-arrays held in memory, each array standing in for one number too wide for
-any register. `DIGITS` ranges 1 to 1000; the source stays out of this
-README, since it teaches nothing the four examples above haven't already
-shown.
+A showpiece: an MMIX program that computes `DIGITS` decimal places of pi
+with Machin's formula, doing arbitrary-precision arithmetic on arrays held
+in memory, each array standing in for one number too wide for any
+register. `DIGITS` runs 1–1000. At 334 lines the source lives behind the
+link.
 
 **[Open in playmmix](https://playmmix.2ad.com/#p=7VpZc-JIEn7Xr8iYxeFLpiUM-JjwxmDT3eMJHx0Gr2P6oTdkVIDCoGJ1-Nhfv19WSULowHasd2cehqBboo6sysyv8ipvUN-beFFIckwLr0lnU8efCOqffz0fDuhezOSTSTZFkmzLsprGhrFBl85o6vmbIY1lMI9njomZdEJ2d8cJRpHjb9mfOtu0R-3l79b-0bZJURz4IQaDhueDZPQkKRSBJ0JyaCTnizgSAY0cn8J4TuLZGUWzlyZ9xnrkx_N7dKodkReCRCQlPXmu4G2Q9AUFYuKFoGBSKMmLaOY9grLn01zMZfCCN_Q67jFhAScInBcQAdt39CQDNzTp3gmFYlN_aMv3QNUVI2_uzMjVclpgEzwe7MxlGIFE6E18b-xh25HqobEXhFETgn0cYOLMpMt4lrz1XPecOXd8lwbxPb-DgmbKCQTNpD_BSo9e6EkfK8SzyFvMQDtSvx3X9fhNzQ_j-yiAiPCbGfEpmjqRZsxU8lCb4SaKvLmgvT2MEBQ6eHcCL5rOReSNKHLiyTQiRWThLFh8IxDxhEsyTji6f9HPRIIsNSUO7lAvTSNBDJ3jH38gR-Prbe-mT7m2jjG8HvYu-ssmPW3X3lVjjTvdmnVv6fG7h9ufjoyL3mB4_eVL1nm4s3W3Z28bRjKJLq7PNFEncv45EJO58KOs8-vN56_8_MU4hZ7PJFhJeq7Phr2c3o1v8sm20nbNiv6YduEleepHtlJ-Hnfhn2kzVRH0gqC02192D3fujKEI5vW9g3j-TYZr-6_EpL7_RoSAUqd-QF-MTuNxRWeioJZxwYrH5_T34Wd-_rTf_Mm0ysL_G2v-0sGxw-e3y2-qkX8PIieIDKBsDx_6LgLZY6xuAdTBScPaPoYtiNLTyLhtWGx3_o2BTSMbnq03-DxUz0bLtMqN--ad8f1CN55-p7SRyfRxNsoT2nkqw-u0sWGZjVbW0ev3b5M18T1cTrg9vU1WwNfO2lP2v18YpZW_Xes-i4WYCOVMLl60UFwRRhAKTFkwOmnYEA630PEJN5iplJpGNqNKBFY1m2eJXM6S3TW6ppJXOvj06iptZ_Iru77oJ6LpmA3bbLTLMusombXLMoMw2zmZZe01Mju7MEqrV8nsPGTR5lAUCO1nbPLGBKu7hBQMLKPJJDGDpYc303Nfl9mdcZ6AKcNS29STfxdhpXAgg_2cRL-nHXrWlayRQwWmlNzK8sGOjPIWsk1bVVPU8BsRGaVd5OZZxnJcUfB2TvCpf0tFb2rHJQONV26lTydpY4ZZE_PZc-5V-00T-pvDWrgqEtB-SAcL8F2-eNZj4W-S1XPC72kODszMwJc1c2Dia73ZiFQ0doGG_qCAhq6J_dQelBUsXN5e0NKGNA5qjEujk3X0z_9xm5JCx1KvX5e7D27qTuL-25EGO9CtgA24NRL2Kk9gGt4sgZDGLSKPhZ2TXPsKHGbCWYMHRsELLQK5cCZOBDhE8slBNwNiHEgfwUe6g_8tGO6qTEMSlBiXRUjsm9jVOki0y5CAAjp5BWcaU5rJOaIMEi3VcVCGRGcNJNo1RubtDg3cGgl7lZBI4tw6N7a76sbMBAH1wbSRBs6ZYo_WKfbIxPeDFNs7LykWm3mbYrOObsFbZoo9UBrvVnYc5DWeOetD1XG0nrnTK0pHY7NX8ozPUFm7B_W0bKNq4nB5cj4ERxCukUizEkdJjlSHoz2FI1Ld9Hf9wwmRPArkZ6BRwFcduJJV_gBwDcrgwmY-ClxFq5HH0ArqajB0lY7Gnq7kqQwC-VRepaOI1YCoamYGik5xGx9tpiBeI5FnDbzmlNUonrdpBznbj62jHU4rTXpGiSP8V8xhI7IZyFgHIstcDIGM58chZdkXMvQZChA-0nXk8Qw3IDaSiwX_lP5I6Ax8Gnj-AzctOCcEmZjDnTGKAOEy41mmTCWndmSW88Fvt4Nff9PaKudKqzMLmeJbZ5YS2HdMtK1Xz1E2AdlyaakMGZhkW1WzKvaXAREzOlW7zmLIyvCZcp8NTkZPqPWwCxSwDqHlOeAhXReWyJfAgRPJqqVNq0DHBh2LIyLKsMQVtmUD1GMMVFWscyHlAvBQnNHUCRk6sf_AA30ZoQg3OSbxKBAezRwunfGuYNnimavoMZCQSHOtbOqhdBWglKULS6GOp5PiG_pcHJHme7Wu84RylgODofevDNkGDXl1tTc8NTOcFbhCVZa2WKrbP-smPhVcC1y80IMQi2Q4FwyjUMzGfAJR8lIlvywh8EBaFcgqGSgVVtbhLMdcObNeQzQPtYa1Fmu5-mla-0xsBl7ZZBxrLGQyg7Kfpt5oyoomqB9VyYkqf0aoSrLqYi2HZlkRdqoIxtSbzEheOkUmc9wk4VjZ4OrlemPsHGOMV5cvVq3et3xxuQ0aKNuagAzg6vxoqWLpXD4KymeRhZOrK6pssEEkQKnrZRVjrInmu61Oa73ZKblSBo_ZqvakJZ9nF7LBgg4S26FVvOKoGDS5Sv3P6qRxwdwJuZwOX5crF3J1GpLg6noc8umESMKsiozjEWaCUmX-FNSqpt008obg3QBc66vS8nkF1apq5yrZeue5PPZ_-d0P8LtAxHrPu0HFS6L0jiK1jvje8-l9wpUFPZ9g1DHhvx-tk86B3bKb62tfeU-coBGT1eH4YG8HsnUw_7P5oFpHAR7-v64CCxacxdotfIS7yC_57jCSEfeH2fQUuK_i7QPMKt8GvuVWF7c2I2cmSPAlre5RZ5ivE3Gle89XqCpgxl2vSp-Wxrn5RtudV4Ddrdp0ff2vShZ5eu33kvtvfEtOtir9_PysLnDT2_bCTbMzViE9ZLeQkBzXOuernnmLO1HaUFHz5v4mO3bVpCLimfbB2yq0WQRMAp3z5iqNqZy5fCePcDRZV9168x21qpGoXEFf9iJ1CXkAAgRVPWnYn450erGQob6XxpC5dOlIGWuMwyzwqS9UF97oIdSX1JyPa5q4Ym5W2Wq76sBoOZXlvm8m15fqbxlWbHtWWMFsxd7KkcnKqG0uoRxRLk1rA_vJnbcrnnErcYOGjE_F2mtF14ybrnlIK0mguiHG5bR2cAiuDhGrcvzvLPIJf74uzDvsVtW3KwF5nbomrtR1c2wdggulAuZtM1G2Vnx5WVsXaKrWrY0u2PlwsNDJlrQ5c-a6yiGsRyrB7bIObBi_Qw4zKiQIY2lVzEDZh2fZrbIq7DZ0kZe5UqAKLnBaZin-nlALFG7Zatss77a5aW3mYqHTZV_-aqjuJnNJzFxFdGrt1UVPxX1LhuIKyA5yDOZFVdxcWWWtTsfkS_ysZ3jTUwta5pdFHIXmIHKv46h6YuHvA16ZujyzmGpVzPoVOS86_gM)**
 
@@ -306,10 +304,8 @@ The hello example, line by line:
   machine. `$255` doubles as the TRAP argument register and, once halted,
   the exit code the machine pane shows.
 
-A wider constant, anything over 65535, cannot fit in one `SET`. It sits in
-the data segment as an `OCTA` (eight bytes) instead, and `LDO` loads it back
-in one instruction. `IS` names a constant without storing it anywhere, the
-way every example's tunable value is written: `N IS 13`.
+`IS` names a constant without storing it anywhere, the way every example's
+tunable value is written: `N IS 13`.
 
 For the rest of MMIX, the [instruction
 reference](https://mmix.cs.hm.edu/doc/instructions-en.html) is the full
@@ -393,8 +389,8 @@ Open `http://127.0.0.1:8080`.
 
 ### Debug it
 
-`cargo test` runs the Rust-side unit tests, editor, control, machine-pane
-logic, on the host target. `docs/layout-spec.md` is the normative spec for
+`cargo test` runs the Rust-side unit tests (editor, control and machine-pane
+logic) on the host target, with no browser. `docs/layout-spec.md` is the normative spec for
 machine-pane layout decisions.
 
 ### Deploy it
