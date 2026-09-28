@@ -73,7 +73,7 @@ registers, memory and output as loaded, PC at Main. Breakpoints are kept.";
 /// `BUTTON_TABLE`'s row rather than to its position -- reordering the table
 /// changes bar order, never which title or click handler a button gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Control {
+enum Button {
     Run,
     Continue,
     Step,
@@ -86,30 +86,30 @@ enum Control {
 /// (absent for Reset, mouse-only), and title. `ControlBar` renders every
 /// button's face from this table, and the §8 face test iterates it too, so
 /// the face and the keymap cannot drift apart.
-const BUTTON_TABLE: [(Control, &str, Option<&str>, &str); 6] = [
-    (Control::Run, "Run", Some("r"), RUN_TITLE),
-    (Control::Continue, "Continue", Some("c"), CONTINUE_TITLE),
-    (Control::Step, "Step", Some("s"), STEP_TITLE),
-    (Control::Next, "Next", Some("n"), NEXT_TITLE),
-    (Control::Interrupt, "Interrupt", Some("i"), INTERRUPT_TITLE),
-    (Control::Reset, "Reset", None, RESET_TITLE),
+const BUTTON_TABLE: [(Button, &str, Option<&str>, &str); 6] = [
+    (Button::Run, "Run", Some("r"), RUN_TITLE),
+    (Button::Continue, "Continue", Some("c"), CONTINUE_TITLE),
+    (Button::Step, "Step", Some("s"), STEP_TITLE),
+    (Button::Next, "Next", Some("n"), NEXT_TITLE),
+    (Button::Interrupt, "Interrupt", Some("i"), INTERRUPT_TITLE),
+    (Button::Reset, "Reset", None, RESET_TITLE),
 ];
 
 /// Each control's disabled flag and click callback, keyed off its identity
-/// -- see `Control`'s own doc comment for why this is a match, not a
+/// -- see `Button`'s own doc comment for why this is a match, not a
 /// position.
 fn disabled_and_callback(
-    control: Control,
+    control: Button,
     enablement: ControlEnablement,
     props: &ControlBarProps,
 ) -> (bool, Callback<()>) {
     match control {
-        Control::Run => (enablement.run_disabled, props.on_run.clone()),
-        Control::Continue => (enablement.continue_disabled, props.on_continue.clone()),
-        Control::Step => (enablement.step_disabled, props.on_step.clone()),
-        Control::Next => (enablement.next_disabled, props.on_next.clone()),
-        Control::Interrupt => (enablement.interrupt_disabled, props.on_interrupt.clone()),
-        Control::Reset => (enablement.reset_disabled, props.on_reset.clone()),
+        Button::Run => (enablement.run_disabled, props.on_run.clone()),
+        Button::Continue => (enablement.continue_disabled, props.on_continue.clone()),
+        Button::Step => (enablement.step_disabled, props.on_step.clone()),
+        Button::Next => (enablement.next_disabled, props.on_next.clone()),
+        Button::Interrupt => (enablement.interrupt_disabled, props.on_interrupt.clone()),
+        Button::Reset => (enablement.reset_disabled, props.on_reset.clone()),
     }
 }
 
@@ -313,12 +313,12 @@ mod tests {
             // proven to actually fire its shortcut; `None` for Reset, whose
             // table row carries no key and whose face is checked below.
             let keyed = match control {
-                Control::Run => Some((ready, KeyboardShortcut::Run)),
-                Control::Continue => Some((paused, KeyboardShortcut::Continue)),
-                Control::Step => Some((ready, KeyboardShortcut::Step)),
-                Control::Next => Some((ready, KeyboardShortcut::Next)),
-                Control::Interrupt => Some((running, KeyboardShortcut::Interrupt)),
-                Control::Reset => None,
+                Button::Run => Some((ready, KeyboardShortcut::Run)),
+                Button::Continue => Some((paused, KeyboardShortcut::Continue)),
+                Button::Step => Some((ready, KeyboardShortcut::Step)),
+                Button::Next => Some((ready, KeyboardShortcut::Next)),
+                Button::Interrupt => Some((running, KeyboardShortcut::Interrupt)),
+                Button::Reset => None,
             };
             let Some((enablement, shortcut)) = keyed else {
                 assert_eq!(key, None, "Reset must carry no key");
@@ -397,21 +397,21 @@ mod tests {
             on_reset: Callback::from(|_| {}),
             status: String::new(),
         };
-        let callback_for = |control: Control| match control {
-            Control::Run => props.on_run.clone(),
-            Control::Continue => props.on_continue.clone(),
-            Control::Step => props.on_step.clone(),
-            Control::Next => props.on_next.clone(),
-            Control::Interrupt => props.on_interrupt.clone(),
-            Control::Reset => props.on_reset.clone(),
+        let callback_for = |control: Button| match control {
+            Button::Run => props.on_run.clone(),
+            Button::Continue => props.on_continue.clone(),
+            Button::Step => props.on_step.clone(),
+            Button::Next => props.on_next.clone(),
+            Button::Interrupt => props.on_interrupt.clone(),
+            Button::Reset => props.on_reset.clone(),
         };
         let every_control = [
-            Control::Run,
-            Control::Continue,
-            Control::Step,
-            Control::Next,
-            Control::Interrupt,
-            Control::Reset,
+            Button::Run,
+            Button::Continue,
+            Button::Step,
+            Button::Next,
+            Button::Interrupt,
+            Button::Reset,
         ];
 
         for lone in every_control {
@@ -422,12 +422,12 @@ mod tests {
             // reachable `control_enablement` result -- can catch a swap
             // between them.
             let enablement = ControlEnablement {
-                run_disabled: lone == Control::Run,
-                continue_disabled: lone == Control::Continue,
-                step_disabled: lone == Control::Step,
-                next_disabled: lone == Control::Next,
-                interrupt_disabled: lone == Control::Interrupt,
-                reset_disabled: lone == Control::Reset,
+                run_disabled: lone == Button::Run,
+                continue_disabled: lone == Button::Continue,
+                step_disabled: lone == Button::Step,
+                next_disabled: lone == Button::Next,
+                interrupt_disabled: lone == Button::Interrupt,
+                reset_disabled: lone == Button::Reset,
             };
             for control in every_control {
                 let (disabled, callback) = disabled_and_callback(control, enablement, &props);
