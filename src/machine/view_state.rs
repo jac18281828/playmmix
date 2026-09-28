@@ -76,9 +76,12 @@ fn memory_value_map(rows: &[MemoryRow]) -> BTreeMap<u64, u8> {
     map
 }
 
-/// The memory addresses whose byte differs between `prev` and `curr`, same
-/// rule as [`diff_registers`] -- a padding cell (`None`) is never a known
-/// value, so it never contributes a diff entry.
+/// The memory addresses whose byte differs between `prev` and `curr`. An
+/// address absent from `prev` is never flagged: `loaded_extent()` fixes the
+/// loaded address set at load time (pinned by
+/// `memory_runs_stay_fixed_across_a_real_run_via_loaded_extent`), so every
+/// address `curr` can report was already present in `prev`. A padding cell
+/// (`None`) is never a known value either.
 pub fn diff_memory(prev: &[MemoryRow], curr: &[MemoryRow]) -> BTreeSet<u64> {
     let prev_map = memory_value_map(prev);
     let curr_map = memory_value_map(curr);
