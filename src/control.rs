@@ -216,6 +216,7 @@ impl Control {
         let mut assembler = MMixAssembler::new(source, filename);
         assembler.parse()?;
         let output: OutputBuffer = Rc::new(RefCell::new(CapturedOutput::default()));
+        Self::record_warnings(&assembler, filename, &output);
         let host = CaptureHost {
             buffer: output.clone(),
         };
@@ -223,6 +224,22 @@ impl Control {
         write_image(&mut mmix, &assembler);
         start_program(&mut mmix, entry_point(&assembler));
         Ok((mmix, assembler, output))
+    }
+
+    /// Appends each of `assembler.warnings()` to the fresh `output` buffer
+    /// as one `OutputStream::Diagnostic` span, in source order, before the
+    /// host that will receive anything the program itself writes even
+    /// exists -- so a load's own warnings always precede its own output.
+    /// The leading `"{filename}:"` is stripped, as `describe_source_error`
+    /// strips it from an error, so a warning reads `"3:9: warning: …"`
+    /// rather than repeating the phantom filename.
+    fn record_warnings(assembler: &MMixAssembler, filename: &str, output: &OutputBuffer) {
+        let prefix = format!("{filename}:");
+        let mut captured = output.borrow_mut();
+        for warning in assembler.warnings() {
+            let text = warning.strip_prefix(&prefix).unwrap_or(warning);
+            captured.push_diagnostic(format!("{text}\n"));
+        }
     }
 
     /// Every address `mmix`'s loaded text segment actually holds -- every
@@ -1378,6 +1395,50 @@ mod tests {
                 .iter()
                 .any(|span| span.stream == OutputStream::Diagnostic),
             "a halt must append a diagnostic line"
+        );
+    }
+
+    /// `BYTE 300` warns (a data value wider than its unit) and `debug "hi"`
+    /// writes to stdout -- the warning must precede that write.
+    const WARNING_MMS: &str =
+        "\tLOC\t#100\nWarn\tBYTE\t300\nMain\tdebug \"hi\"\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn a_warning_becomes_a_diagnostic_span_before_the_programs_own_output() {
+        let mut control = Control::new(WARNING_MMS, "warn.mms").expect("assembles");
+        // `debug "hi"` writes only once the program actually runs.
+        assert_eq!(control.run_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+        let output = control.output();
+
+        let warning_index = output
+            .iter()
+            .position(|span| span.stream == OutputStream::Diagnostic)
+            .expect("BYTE 300 must warn");
+        assert_eq!(
+            output[warning_index].text,
+            "2:11: warning: value 300 does not fit in a byte; its low byte assembles\n",
+            "the phantom filename must be stripped, same as an error"
+        );
+
+        let stdout_index = output
+            .iter()
+            .position(|span| span.stream == OutputStream::Stdout)
+            .expect("debug \"hi\" writes to stdout");
+        assert!(
+            warning_index < stdout_index,
+            "the warning must precede the program's own output"
+        );
+    }
+
+    #[test]
+    fn a_source_with_no_warning_appends_no_diagnostic_before_running() {
+        let control = Control::new(ORDINARY_HALT_MMS, "no-warn.mms").expect("assembles");
+        assert!(
+            control
+                .output()
+                .iter()
+                .all(|span| span.stream != OutputStream::Diagnostic),
+            "a fresh load with nothing to warn about must add no diagnostic span"
         );
     }
 

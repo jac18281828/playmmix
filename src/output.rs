@@ -67,6 +67,18 @@ impl CapturedOutput {
         }
         spans
     }
+
+    /// Appends `text` as one `OutputStream::Diagnostic` span -- checksmix's
+    /// own operator-facing notices (`CaptureHost::diagnostic`) and
+    /// playmmix's own assembler-warning lines (`Control::record_warnings`)
+    /// both go through this, bypassing the pending-byte path since both
+    /// hand over an already-complete, valid `String`.
+    pub(crate) fn push_diagnostic(&mut self, text: String) {
+        self.spans.push(OutputSpan {
+            stream: OutputStream::Diagnostic,
+            text,
+        });
+    }
 }
 
 /// Shared handle to a program's captured output. `MMix::with_host` consumes
@@ -150,10 +162,7 @@ impl Host for CaptureHost {
     }
 
     fn diagnostic(&mut self, msg: &str) {
-        self.buffer.borrow_mut().spans.push(OutputSpan {
-            stream: OutputStream::Diagnostic,
-            text: format!("{msg}\n"),
-        });
+        self.buffer.borrow_mut().push_diagnostic(format!("{msg}\n"));
     }
 }
 

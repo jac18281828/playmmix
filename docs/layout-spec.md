@@ -177,6 +177,8 @@ their own class), passed to `MMix::with_host` in `assemble_and_load`.
   cadence the machine pane already repaints at. No per-write render.
 - Header row: `OUTPUT` plus, once halted, `exit N` mirrored from the status
   line so the result of the run reads in one place.
+- Assembler warnings open the pane's output after each successful load, as
+  diagnostics.
 
 ## Registers
 
