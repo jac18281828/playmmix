@@ -51,7 +51,7 @@ These rules apply to all AI-assisted changes in this repository.
 - Add or update tests for every behavior change.
 - Keep logic that does not need browser APIs (Yew, `wasm-bindgen`, `web-sys`)
   in plain functions so it can be unit-tested on the host target — see
-  `run_source` in `src/main.rs`.
+  `decide_shared_link` in `src/main.rs`.
 
 ## Completion Gates
 
