@@ -270,8 +270,7 @@ struct SplitterAxis {
 
 /// Build one splitter's `pointerdown`/`pointermove`/`pointerup`/
 /// `pointercancel` callbacks -- the one private helper `column_splitter_
-/// handlers` and `row_splitter_handlers` both thin-wrap, since the two were
-/// otherwise identical line for line but for `axis`'s pieces (finding 1).
+/// handlers` and `row_splitter_handlers` both thin-wrap.
 /// `committed` is `App`'s own current values for both dimensions -- see
 /// `CommittedSizes`'s doc comment.
 fn splitter_handlers(
