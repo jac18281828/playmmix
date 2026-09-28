@@ -71,12 +71,23 @@ describe('deploy-static-site.yml', () => {
       stepIndex(named('Configure AWS Credentials'), '"Configure AWS Credentials"'),
       stepIndex((step) => step.includes('uses: oven-sh/setup-bun'), 'oven-sh/setup-bun'),
       stepIndex((step) => step.includes('bun install --frozen-lockfile'), 'bun install'),
+      stepIndex(named('TypeScript Build and Check'), '"TypeScript Build and Check"'),
+      stepIndex(named('Install Rust'), '"Install Rust"'),
       stepIndex(named('Build Artifact'), '"Build Artifact"'),
       stepIndex(named('Deploy infrastructure'), '"Deploy infrastructure"'),
       stepIndex(named('Sync S3 Bucket'), '"Sync S3 Bucket"'),
       stepIndex(named('Invalidate CloudFront cache'), '"Invalidate CloudFront cache"'),
     ];
     expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it('pins the TypeScript gate step to its three commands, in order', () => {
+    const gates = stepNamed('TypeScript Build and Check');
+    const commandOrder = ['bun run build', 'bun run test', 'bun run cdk:synth'].map((command) =>
+      gates.indexOf(command),
+    );
+    expect(commandOrder.every((index) => index >= 0)).toBe(true);
+    expect(commandOrder).toEqual([...commandOrder].sort((a, b) => a - b));
   });
 
   it('installs trunk with --locked', () => {
