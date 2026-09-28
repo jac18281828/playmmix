@@ -1050,17 +1050,16 @@ impl Component for App {
             Msg::ReassembleSource => {
                 self.debounce_timeout = None;
                 self.restart_signal = false;
-                match self.control.reload(&self.source) {
-                    Ok(()) => {
-                        self.error = None;
-                        self.error_line = None;
-                        self.view_state.reset(&self.control);
-                        self.status_message = "Loaded".to_string();
-                    }
-                    Err(error) => {
-                        self.error_line = parse_error_location(&error).map(|(line, _)| line);
-                        self.error = Some(describe_source_error(&self.source, &error));
-                    }
+                reload_and_record(
+                    &mut self.chunk_timeout,
+                    &mut self.control,
+                    &self.source,
+                    &mut self.error,
+                    &mut self.error_line,
+                    &mut self.view_state,
+                );
+                if self.error.is_none() {
+                    self.status_message = "Loaded".to_string();
                 }
                 true
             }
@@ -2032,6 +2031,44 @@ mod tests {
             view_state.changed_specials(),
             &changed_specials_before,
             "a no-op flush must not touch the changed-specials set"
+        );
+    }
+
+    #[test]
+    fn reload_and_record_reseeds_view_state_on_the_reassemble_path() {
+        // `Msg::ReassembleSource`'s own path -- a debounced keystroke's
+        // reassemble -- calls `reload_and_record` directly, the same helper
+        // `Msg::FlushSource` and `Msg::Reset` already share.
+        const WRITES_REGISTER_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tTRAP\t0,Halt,0\n";
+        let mut control = Control::new(WRITES_REGISTER_MMS, "reassemble.mms").expect("assembles");
+        let mut view_state = ViewState::new();
+        view_state.reset(&control);
+
+        assert_eq!(control.step(), StepOutcome::Advanced);
+        view_state.observe(&control);
+        view_state.record_pause_boundary(&control);
+        assert!(
+            !view_state.changed_registers().is_empty(),
+            "the step must leave a stale changed mark for the reload below to clear"
+        );
+
+        let mut chunk_timeout: Option<Timeout> = None;
+        let mut error: Option<String> = None;
+        let mut error_line: Option<usize> = None;
+        reload_and_record(
+            &mut chunk_timeout,
+            &mut control,
+            WRITES_REGISTER_MMS,
+            &mut error,
+            &mut error_line,
+            &mut view_state,
+        );
+
+        assert!(error.is_none(), "the fixture must still assemble");
+        assert!(
+            view_state.changed_registers().is_empty(),
+            "reload_and_record's Ok arm must reseed view_state, clearing the stale mark: {:?}",
+            view_state.changed_registers()
         );
     }
 
