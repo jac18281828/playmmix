@@ -1110,9 +1110,7 @@ impl Component for App {
                 }
             }
             Msg::Continue => {
-                if !self.flush_pending_reassemble() {
-                    true
-                } else {
+                if self.flush_pending_reassemble() {
                     // `continue_pressed` is `None` when nothing is running
                     // but no session has started either -- the flush above
                     // may itself have reloaded, ending the session Continue
@@ -1132,50 +1130,44 @@ impl Component for App {
                             self.schedule_chunk_tick(ctx);
                         }
                     }
-                    true
                 }
+                true
             }
             Msg::Step => {
-                if !self.flush_pending_reassemble() {
-                    true
-                } else {
-                    if let Some(outcome) = step_pressed(
+                if self.flush_pending_reassemble()
+                    && let Some(outcome) = step_pressed(
                         &mut self.control,
                         &mut self.view_state,
                         &mut self.restart_signal,
                         &mut self.execution_stops,
-                    ) {
-                        self.status_message = if outcome == StepOutcome::Halted {
-                            "Halted"
-                        } else {
-                            "Stepped"
-                        }
-                        .to_string();
+                    )
+                {
+                    self.status_message = if outcome == StepOutcome::Halted {
+                        "Halted"
+                    } else {
+                        "Stepped"
                     }
-                    true
+                    .to_string();
                 }
+                true
             }
             Msg::Next => {
-                if !self.flush_pending_reassemble() {
-                    true
-                } else {
-                    if !self.control.is_running() {
-                        self.restart_signal = false;
-                        self.view_state.clear_changed();
-                        let outcome = self.control.next_chunk(control::CHUNK_BUDGET);
-                        let (status, needs_tick) = first_chunk_outcome(
-                            &mut self.control,
-                            &mut self.view_state,
-                            outcome,
-                            &mut self.execution_stops,
-                        );
-                        self.status_message = status;
-                        if needs_tick {
-                            self.schedule_chunk_tick(ctx);
-                        }
+                if self.flush_pending_reassemble() && !self.control.is_running() {
+                    self.restart_signal = false;
+                    self.view_state.clear_changed();
+                    let outcome = self.control.next_chunk(control::CHUNK_BUDGET);
+                    let (status, needs_tick) = first_chunk_outcome(
+                        &mut self.control,
+                        &mut self.view_state,
+                        outcome,
+                        &mut self.execution_stops,
+                    );
+                    self.status_message = status;
+                    if needs_tick {
+                        self.schedule_chunk_tick(ctx);
                     }
-                    true
                 }
+                true
             }
             Msg::Interrupt => {
                 self.restart_signal = false;
