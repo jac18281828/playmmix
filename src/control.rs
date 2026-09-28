@@ -20,7 +20,7 @@ use std::rc::Rc;
 use checksmix::{MMix, MMixAssembler, SourceLoc, entry_point, start_program, write_image};
 use gloo_timers::callback::Timeout;
 
-use crate::output::{CaptureHost, OutputBuffer, OutputSpan};
+use crate::output::{CaptureHost, CapturedOutput, OutputBuffer, OutputSpan};
 
 /// The MMIX text/data segment boundary: the top three address bits select
 /// the segment (0 text, 1 data, 2 pool, 3 stack), so any address at or past
@@ -215,7 +215,7 @@ impl Control {
     ) -> Result<(MMix, MMixAssembler, OutputBuffer), String> {
         let mut assembler = MMixAssembler::new(source, filename);
         assembler.parse()?;
-        let output: OutputBuffer = Rc::new(RefCell::new(Vec::new()));
+        let output: OutputBuffer = Rc::new(RefCell::new(CapturedOutput::default()));
         let host = CaptureHost {
             buffer: output.clone(),
         };
@@ -367,7 +367,7 @@ impl Control {
     /// The current load's captured stdout/stderr/diagnostic output, in
     /// arrival order.
     pub fn output(&self) -> Vec<OutputSpan> {
-        self.output.borrow().clone()
+        self.output.borrow().visible_spans()
     }
 
     /// The 1-based source line `marker_pc` maps to, or `None` for an address
@@ -1379,6 +1379,25 @@ mod tests {
                 .any(|span| span.stream == OutputStream::Diagnostic),
             "a halt must append a diagnostic line"
         );
+    }
+
+    /// Prints `é` (`#C3`, `#A9`) to stdout one byte at a time through
+    /// `Fputc`, the way a program built around single bytes rather than
+    /// `Fputs`/`debug` would.
+    const FPUTC_MULTIBYTE_MMS: &str = "\tLOC\t#100\nMain\tSET\t$255,#C3\n\tTRAP\t0,Fputc,StdOut\n\tSET\t$255,#A9\n\tTRAP\t0,Fputc,StdOut\n\tTRAP\t0,Halt,0\n";
+
+    #[test]
+    fn fputc_writing_a_multibyte_character_one_byte_at_a_time_reads_whole() {
+        let mut control = Control::new(FPUTC_MULTIBYTE_MMS, "fputc.mms").expect("assembles");
+        assert_eq!(control.run_chunk(CHUNK_BUDGET), StepOutcome::Halted);
+
+        let stdout_text: String = control
+            .output()
+            .iter()
+            .filter(|span| span.stream == OutputStream::Stdout)
+            .map(|span| span.text.as_str())
+            .collect();
+        assert_eq!(stdout_text, "é");
     }
 
     #[test]
