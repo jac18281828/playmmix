@@ -137,7 +137,7 @@ impl Component for Editor {
         let breakpoints = ctx.props().breakpoints.clone();
         let current_line = ctx.props().current_line;
         let error_location = ctx.props().error_location;
-        let error_line = error_location.map(|loc| loc.line);
+        let error_row = error_location.map(|loc| loc.line);
         let on_toggle_breakpoint = ctx.props().on_toggle_breakpoint.clone();
 
         let gutter_rows: Html = lines
@@ -148,7 +148,7 @@ impl Component for Editor {
                     i + 1,
                     &breakpoints,
                     current_line,
-                    error_line,
+                    error_row,
                     &on_toggle_breakpoint,
                 )
             })
@@ -161,7 +161,7 @@ impl Component for Editor {
                 render_line(
                     line,
                     overlay_row_is_current(i, current_line),
-                    overlay_row_is_error(i, error_line),
+                    overlay_row_is_error(i, error_row),
                     error_column_for_row(i, error_location),
                 )
             })
@@ -326,7 +326,7 @@ fn render_gutter_row(
     line: usize,
     breakpoints: &BTreeSet<usize>,
     current_line: Option<usize>,
-    error_line: Option<usize>,
+    error_row: Option<usize>,
     on_toggle_breakpoint: &Callback<usize>,
 ) -> Html {
     let mut class = classes!("gutter-line");
@@ -336,7 +336,7 @@ fn render_gutter_row(
     if current_line == Some(line) {
         class.push("gutter-current");
     }
-    if error_line == Some(line) {
+    if error_row == Some(line) {
         class.push("gutter-error");
     }
     let on_toggle_breakpoint = on_toggle_breakpoint.clone();
@@ -496,9 +496,9 @@ fn overlay_row_is_current(i: usize, current_line: Option<usize>) -> bool {
 
 /// Whether the overlay's zero-based row `i` (source line `i + 1`) carries a
 /// parsed assembly-error location -- `overlay_row_is_current`'s twin for
-/// `error_line`.
-fn overlay_row_is_error(i: usize, error_line: Option<usize>) -> bool {
-    error_line == Some(i + 1)
+/// `error_row`.
+fn overlay_row_is_error(i: usize, error_row: Option<usize>) -> bool {
+    error_row == Some(i + 1)
 }
 
 /// The 1-based column to mark on the overlay's zero-based row `i` (source
@@ -790,10 +790,10 @@ mod tests {
 
     #[test]
     fn overlay_error_line_gets_the_class_only_on_that_line() {
-        let error_line = Some(3);
+        let error_row = Some(3);
         let line_numbers = [1, 2, 3];
         for line in line_numbers {
-            let class = overlay_line_class(false, error_line == Some(line));
+            let class = overlay_line_class(false, error_row == Some(line));
             assert_eq!(class.contains("overlay-error"), line == 3, "line {line}");
         }
     }
@@ -816,9 +816,9 @@ mod tests {
 
     #[test]
     fn overlay_row_is_error_maps_zero_based_row_to_one_based_line() {
-        let error_line = Some(2);
+        let error_row = Some(2);
         for i in 0..4 {
-            assert_eq!(overlay_row_is_error(i, error_line), i == 1, "row {i}");
+            assert_eq!(overlay_row_is_error(i, error_row), i == 1, "row {i}");
         }
     }
 
