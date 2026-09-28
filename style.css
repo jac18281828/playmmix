@@ -236,10 +236,12 @@ main {
    sizes to its content, so without `width: 0` the message's full text would
    count as space `.controls` needs, and Share would wrap as the status grew;
    `flex-grow` still fills the row, and `min-width: 0` lets it shrink below
-   its text. Declared before the touch block, which restates the flex,
-   min-width and ellipsis properties for its fixed bar; `width: 0` carries
-   into touch, where the bar's fixed width and `flex-basis` already decide
-   the message's size. */
+   its text. `flex: 1 1 0%`'s zero basis, not auto, keeps that same full text
+   from counting toward any row's own fit decision, desktop's or the touch
+   bar's fixed one below; either way this item grows to fill the row and
+   shrinks (`min-width: 0`) to its ellipsis rather than its own text
+   deciding the row's size. `width: 0` carries into touch too, where the
+   bar's fixed width already decides the message's size. */
 .run-state {
     margin-left: 0.25rem;
     font-size: 0.85rem;
@@ -345,19 +347,6 @@ main {
         order: -1;
         line-height: 1.2rem;
         flex-shrink: 1;
-    }
-
-    /* flex-basis 0, not auto: a long message's own content width would
-       otherwise count toward whether it (and the break after it) still fit
-       the info row, wrapping it early regardless of the forced break above.
-       Zero keeps that decision solely the break's -- this item still grows
-       to fill the row and shrinks (min-width: 0) down to its ellipsis. */
-    .status-message {
-        flex: 1 1 0%;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
     }
 
     /* One row of six equal-width buttons, each at or above Apple's 44px
