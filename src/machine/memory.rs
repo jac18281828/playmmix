@@ -66,29 +66,27 @@ pub fn memory_runs(mmix: &MMix, labels: &HashMap<String, u64>) -> Vec<MemoryRun>
 
     for (addr, byte) in mmix.loaded_extent() {
         let segment = Segment::from_addr(addr);
-        let extends = runs.last().is_some_and(|run| {
-            run.segment == segment && run.start + run.bytes.len() as u64 == addr
-        });
-        if extends {
-            runs.last_mut()
-                .expect("just checked non-empty")
-                .bytes
-                .push(byte);
-        } else {
-            runs.push(MemoryRun {
+        match runs.last_mut() {
+            Some(run)
+                if run.segment == segment
+                    && (run.start + (run.bytes.len() as u64 - 1)).checked_add(1) == Some(addr) =>
+            {
+                run.bytes.push(byte);
+            }
+            _ => runs.push(MemoryRun {
                 segment,
                 start: addr,
                 bytes: vec![byte],
                 labels: Vec::new(),
-            });
+            }),
         }
     }
 
     for (name, &addr) in labels {
-        if let Some(run) = runs
-            .iter_mut()
-            .find(|run| addr >= run.start && addr < run.start + run.bytes.len() as u64)
-        {
+        if let Some(run) = runs.iter_mut().find(|run| {
+            let last = run.start + (run.bytes.len() as u64 - 1);
+            addr >= run.start && addr <= last
+        }) {
             run.labels.push((addr, name.clone()));
         }
     }
@@ -119,6 +117,8 @@ pub enum MemoryRow {
 struct MemoryIsland {
     segment: Segment,
     start: u64,
+    /// The island's last byte address, inclusive -- one past it can be
+    /// `u64::MAX + 1`, which `u64` cannot hold.
     end: u64,
     bytes: BTreeMap<u64, u8>,
     labels: Vec<(u64, String)>,
@@ -134,34 +134,39 @@ fn merge_islands(runs: &[MemoryRun]) -> Vec<MemoryIsland> {
     let mut islands: Vec<MemoryIsland> = Vec::new();
 
     for run in runs {
-        let run_end = run.start + run.bytes.len() as u64;
-        let merges = islands.last().is_some_and(|last| {
-            last.segment == run.segment
-                && run.start >= last.end
-                && run.start - last.end < MEMORY_ROW_WIDTH as u64
-        });
+        let run_end = run.start + (run.bytes.len() as u64 - 1);
+        let width = MEMORY_ROW_WIDTH as u64;
 
-        if merges {
-            let last = islands.last_mut().expect("just checked non-empty");
-            last.end = run_end;
-            for (i, &byte) in run.bytes.iter().enumerate() {
-                last.bytes.insert(run.start + i as u64, byte);
+        match islands.last_mut() {
+            Some(last)
+                if last.segment == run.segment
+                    && run.start > last.end
+                    && last
+                        .end
+                        .checked_add(width)
+                        .is_none_or(|limit| run.start <= limit) =>
+            {
+                last.end = run_end;
+                for (i, &byte) in run.bytes.iter().enumerate() {
+                    last.bytes.insert(run.start + i as u64, byte);
+                }
+                last.labels.extend(run.labels.iter().cloned());
             }
-            last.labels.extend(run.labels.iter().cloned());
-        } else {
-            let bytes = run
-                .bytes
-                .iter()
-                .enumerate()
-                .map(|(i, &byte)| (run.start + i as u64, byte))
-                .collect();
-            islands.push(MemoryIsland {
-                segment: run.segment,
-                start: run.start,
-                end: run_end,
-                bytes,
-                labels: run.labels.clone(),
-            });
+            _ => {
+                let bytes = run
+                    .bytes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &byte)| (run.start + i as u64, byte))
+                    .collect();
+                islands.push(MemoryIsland {
+                    segment: run.segment,
+                    start: run.start,
+                    end: run_end,
+                    bytes,
+                    labels: run.labels.clone(),
+                });
+            }
         }
     }
 
@@ -183,19 +188,20 @@ pub fn memory_rows(runs: &[MemoryRun]) -> Vec<MemoryRow> {
 
         let width = MEMORY_ROW_WIDTH as u64;
         let aligned_start = island.start - island.start % width;
-        let aligned_end = island.end.div_ceil(width) * width;
 
         let mut row_start = aligned_start;
-        while row_start < aligned_end {
+        loop {
             let mut cells = [None; MEMORY_ROW_WIDTH];
             for (offset, cell) in cells.iter_mut().enumerate() {
                 *cell = island.bytes.get(&(row_start + offset as u64)).copied();
             }
-            let row_end = row_start + width;
+            // The row's own last address, inclusive -- `row_start + width`
+            // would be one past it, which overflows for the top row.
+            let row_last = row_start + (width - 1);
             let labels = island
                 .labels
                 .iter()
-                .filter(|(addr, _)| *addr >= row_start && *addr < row_end)
+                .filter(|(addr, _)| *addr >= row_start && *addr <= row_last)
                 .map(|(_, name)| name.clone())
                 .collect();
             rows.push(MemoryRow::Data {
@@ -204,6 +210,10 @@ pub fn memory_rows(runs: &[MemoryRun]) -> Vec<MemoryRow> {
                 cells,
                 labels,
             });
+
+            if row_last >= island.end {
+                break;
+            }
             row_start += width;
         }
     }
@@ -218,7 +228,9 @@ pub fn memory_row_is_current(row: &MemoryRow, marker_pc: u64) -> bool {
     match row {
         MemoryRow::Data { addr, cells, .. } => {
             marker_pc >= *addr
-                && marker_pc < addr + MEMORY_ROW_WIDTH as u64
+                && addr
+                    .checked_add(MEMORY_ROW_WIDTH as u64)
+                    .is_none_or(|end| marker_pc < end)
                 && cells[(marker_pc - addr) as usize].is_some()
         }
         MemoryRow::SegmentBreak => false,
@@ -236,7 +248,10 @@ pub fn memory_row_instruction_span(row: &MemoryRow, marker_pc: u64) -> Vec<usize
     (0..4u64)
         .filter_map(|i| {
             let byte_addr = marker_pc.checked_add(i)?;
-            if byte_addr < *addr || byte_addr >= addr + MEMORY_ROW_WIDTH as u64 {
+            let past_row_end = addr
+                .checked_add(MEMORY_ROW_WIDTH as u64)
+                .is_some_and(|end| byte_addr >= end);
+            if byte_addr < *addr || past_row_end {
                 return None;
             }
             let offset = (byte_addr - addr) as usize;
@@ -257,6 +272,90 @@ mod tests {
         assert_eq!(Segment::from_addr(0x7FFF_FFFF_FFFF_FFFF), Segment::Stack);
         assert_eq!(Segment::from_addr(0x8000_0000_0000_0000), Segment::Os);
         assert_eq!(Segment::from_addr(u64::MAX), Segment::Os);
+    }
+
+    /// `LOC #FFFFFFFFFFFFFFFC` followed by an instruction under a label
+    /// places that instruction's last byte at `u64::MAX` and its start
+    /// (`#...FC`) off the 16-byte boundary -- the case that reaches
+    /// `memory_runs`' label-membership sum, `merge_islands`' run end, and
+    /// `memory_rows`' alignment and row loop at the very top of the address
+    /// space, with no panic and no wrapped row. `SETL $1,#0203` encodes as
+    /// `e3 01 02 03` -- four distinct bytes, so a cell landing in the wrong
+    /// offset shows up as a wrong value, not just a wrong presence.
+    const TOP_OF_ADDRESS_SPACE_MMS: &str = "\tLOC\t#FFFFFFFFFFFFFFFC\nMain\tSETL\t$1,#0203\n";
+
+    #[test]
+    fn memory_models_the_last_byte_of_the_address_space_exactly() {
+        let mut assembler = MMixAssembler::new(TOP_OF_ADDRESS_SPACE_MMS, "top.mms");
+        assembler
+            .parse()
+            .expect("an instruction at #FFFFFFFFFFFFFFFC must assemble");
+        let mut mmix = MMix::new();
+        write_image(&mut mmix, &assembler);
+
+        let main_addr = *assembler
+            .labels
+            .get("Main")
+            .expect("top.mms defines a Main label");
+        assert_eq!(main_addr, u64::MAX - 3);
+
+        let runs = memory_runs(&mmix, &assembler.labels);
+        let run = runs
+            .iter()
+            .find(|run| run.start == main_addr)
+            .expect("a run starting at Main");
+        assert_eq!(run.segment, Segment::Os);
+        assert_eq!(run.bytes.len(), 4, "one tetra instruction, 4 bytes");
+        assert_eq!(
+            run.labels,
+            vec![(main_addr, "Main".to_string())],
+            "the label pass' membership test must place Main inside a run \
+             whose last byte is u64::MAX"
+        );
+
+        let rows = memory_rows(&runs);
+        let top_row = rows.last().expect("at least one row");
+        let MemoryRow::Data {
+            addr,
+            cells,
+            labels,
+            ..
+        } = top_row
+        else {
+            panic!("expected the top row to be a data row");
+        };
+        assert_eq!(
+            *addr,
+            main_addr - main_addr % MEMORY_ROW_WIDTH as u64,
+            "the top row aligns down from the run's misaligned start"
+        );
+        const EXPECTED_BYTES: [u8; 4] = [0xe3, 0x01, 0x02, 0x03];
+        for (offset, cell) in cells.iter().enumerate() {
+            let byte_addr = *addr + offset as u64;
+            if byte_addr >= main_addr {
+                assert_eq!(
+                    *cell,
+                    Some(EXPECTED_BYTES[(byte_addr - main_addr) as usize]),
+                    "byte {byte_addr:#x} at the top of the address space must land \
+                     in its own cell"
+                );
+            } else {
+                assert_eq!(
+                    *cell, None,
+                    "padding before the run's start must stay blank"
+                );
+            }
+        }
+        assert_eq!(labels, &vec!["Main".to_string()]);
+
+        assert!(memory_row_is_current(top_row, main_addr));
+        assert!(memory_row_is_current(top_row, u64::MAX));
+        assert_eq!(
+            memory_row_instruction_span(top_row, main_addr),
+            vec![12, 13, 14, 15],
+            "the instruction's four cells at the top row must all name a PC \
+             inside it, with no overflow computing the row's end"
+        );
     }
 
     #[test]
