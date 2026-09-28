@@ -65,11 +65,17 @@ right is the machine. CSS grid with named areas on `<main>`:
   the status message shrinks to an ellipsis as the header narrows, so Share
   holds its place at the right edge rather than moving with the message's
   length.
-- `grid-template-columns: minmax(0, 1fr) minmax(38rem, 42rem)` — the machine
-  column is sized by its content (fixed-width rows, below); the editor takes
-  the rest.
-- Left column: editor above, output below, `grid-template-rows: minmax(8rem,
-  1fr) auto` with the output pane at `max-height: 14rem`.
+- `grid-template-columns: var(--left-col, minmax(0, 1fr)) 6px minmax(38rem,
+  42rem)` — three columns: the left column, the column splitter's own 6px
+  track, and the machine column, sized by its content (fixed-width rows,
+  below). `--left-col` holds the column splitter's committed width;
+  undragged, the left column takes whatever the machine column's fixed
+  width leaves.
+- Left column: editor above, output below, within `grid-template-rows: auto
+  minmax(8rem, 1fr) 6px var(--output-h, auto)` — four rows: header, editor,
+  the row splitter's own 6px track, and output, with the output pane at
+  `max-height: 14rem`. `--output-h` holds the row splitter's committed
+  height, the vertical twin of `--left-col`.
 - Under ~1100px the grid collapses to one column: header, editor, output,
   machine. The machine column's own order is already vertical, so nothing
   else changes.
