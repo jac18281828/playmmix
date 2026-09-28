@@ -1178,32 +1178,31 @@ mod tests {
         assert_eq!(control.marker_pc(), control.get_pc());
     }
 
-    /// `GET` with `Z = 40` (`>= 32`) has no such special register: checksmix
-    /// 0.3.13 halts rather than reading garbage. Neither `SETL` nor the
-    /// faulting `GET` advances the PC past itself.
-    const INVALID_GET_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tGET\t$2,40\n\tTRAP\t0,Halt,0\n";
+    /// `SYNC 5` falls in `4..=7`, a reserved operand checksmix 0.3.13 halts
+    /// on rather than a real synchronization mode. Also stands in for the
+    /// pre-0.4.0 `GET $2,40` fixture this replaced: 0.4.0 makes a special
+    /// register above 31 an assembly error, not a runtime fault, so `GET`
+    /// can no longer reach a halt here at all -- `SYNC 5` reaches the same
+    /// address (`#104`) and exit code (1) instead.
+    const INVALID_SYNC_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tSYNC\t5\n\tTRAP\t0,Halt,0\n";
 
     #[test]
-    fn run_marks_the_get_that_faulted_not_a_trap_after_it() {
-        let mut control = Control::new(INVALID_GET_MMS, "get.mms").expect("assembles");
+    fn run_marks_the_sync_that_faulted_not_a_trap_after_it() {
+        let mut control = Control::new(INVALID_SYNC_MMS, "sync.mms").expect("assembles");
         assert_eq!(control.run_chunk(CHUNK_BUDGET), StepOutcome::Halted);
         assert_eq!(control.machine().get_exit_code(), 1);
-        assert_eq!(control.marker_pc(), 0x104, "the faulting GET, not #108");
-        assert_eq!(control.current_line(), Some(3), "the GET line");
+        assert_eq!(control.marker_pc(), 0x104, "the faulting SYNC, not #108");
+        assert_eq!(control.current_line(), Some(3), "the SYNC line");
     }
 
     #[test]
-    fn stepping_to_the_same_halt_marks_the_same_get() {
-        let mut control = Control::new(INVALID_GET_MMS, "get.mms").expect("assembles");
+    fn stepping_to_the_same_halt_marks_the_same_sync() {
+        let mut control = Control::new(INVALID_SYNC_MMS, "sync.mms").expect("assembles");
         while control.step() != StepOutcome::Halted {}
         assert_eq!(control.machine().get_exit_code(), 1);
         assert_eq!(control.marker_pc(), 0x104);
         assert_eq!(control.current_line(), Some(3));
     }
-
-    /// `SYNC 5` falls in `4..=7`, a reserved operand checksmix 0.3.13 halts
-    /// on rather than a real synchronization mode.
-    const INVALID_SYNC_MMS: &str = "\tLOC\t#100\nMain\tSETL\t$1,7\n\tSYNC\t5\n\tTRAP\t0,Halt,0\n";
 
     #[test]
     fn continuing_past_a_step_marks_the_sync_that_faulted() {
@@ -1227,19 +1226,21 @@ mod tests {
 
     /// A call into a callee whose own first instruction is the fault: `Next`
     /// from the entry executes `PUSHJ` (landing inside `Sub`), then keeps
-    /// going through its own continuation loop and hits the invalid `GET`
-    /// there.
-    const CALL_INTO_INVALID_GET_MMS: &str =
-        "\tLOC\t#100\nMain\tPUSHJ\t$0,Sub\n\tTRAP\t0,Halt,0\nSub\tGET\t$1,40\n\tPOP\t0,0\n";
+    /// going through its own continuation loop and hits the reserved `SYNC`
+    /// there. Replaces a pre-0.4.0 `GET $1,40` the same way `INVALID_SYNC_MMS`
+    /// replaces its own former `GET $2,40` -- see that constant's doc
+    /// comment.
+    const CALL_INTO_INVALID_SYNC_MMS: &str =
+        "\tLOC\t#100\nMain\tPUSHJ\t$0,Sub\n\tTRAP\t0,Halt,0\nSub\tSYNC\t5\n\tPOP\t0,0\n";
 
     #[test]
     fn next_from_the_entry_marks_a_fault_reached_inside_the_callee() {
         let mut control =
-            Control::new(CALL_INTO_INVALID_GET_MMS, "call_get.mms").expect("assembles");
+            Control::new(CALL_INTO_INVALID_SYNC_MMS, "call_sync.mms").expect("assembles");
         assert_eq!(control.next_chunk(CHUNK_BUDGET), StepOutcome::Halted);
         assert_eq!(control.machine().get_exit_code(), 1);
-        assert_eq!(control.marker_pc(), 0x108, "the GET inside Sub");
-        assert_eq!(control.current_line(), Some(4), "the GET line");
+        assert_eq!(control.marker_pc(), 0x108, "the SYNC inside Sub");
+        assert_eq!(control.current_line(), Some(4), "the SYNC line");
     }
 
     /// A call into a callee that halts cleanly via its own `TRAP` before
