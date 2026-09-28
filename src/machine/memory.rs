@@ -9,16 +9,19 @@ use checksmix::MMix;
 /// width, per `docs/layout-spec.md`'s Memory pane section.
 pub(super) const MEMORY_ROW_WIDTH: usize = 16;
 
-/// One of MMIX's four segments, selected by an address's top three bits.
-/// checksmix doesn't export this constant (`control.rs` restates
-/// `DATA_SEGMENT_START` the same way); it's a stable MMIX architectural
-/// boundary, safe to restate here too.
+/// One of the address space's segments, selected by an address's top three
+/// bits: Text, Data, Pool and Stack are MMIX's own four; an address with
+/// the sign bit set (`>= #8000000000000000`) belongs to the operating
+/// system, labeled `Os`. checksmix doesn't export these boundaries
+/// (`control.rs` restates `DATA_SEGMENT_START` the same way); they're
+/// stable MMIX architectural constants, safe to restate here too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Segment {
     Text,
     Data,
     Pool,
     Stack,
+    Os,
 }
 
 impl Segment {
@@ -27,7 +30,8 @@ impl Segment {
             0 => Segment::Text,
             1 => Segment::Data,
             2 => Segment::Pool,
-            _ => Segment::Stack,
+            3 => Segment::Stack,
+            _ => Segment::Os,
         }
     }
 
@@ -37,6 +41,7 @@ impl Segment {
             Segment::Data => "data",
             Segment::Pool => "pool",
             Segment::Stack => "stack",
+            Segment::Os => "os",
         }
     }
 }
@@ -244,6 +249,15 @@ pub fn memory_row_instruction_span(row: &MemoryRow, marker_pc: u64) -> Vec<usize
 mod tests {
     use super::*;
     use checksmix::{MMixAssembler, write_image};
+
+    #[test]
+    fn from_addr_maps_every_boundary_including_the_sign_bit() {
+        assert_eq!(Segment::from_addr(0x5FFF_FFFF_FFFF_FFFF), Segment::Pool);
+        assert_eq!(Segment::from_addr(0x6000_0000_0000_0000), Segment::Stack);
+        assert_eq!(Segment::from_addr(0x7FFF_FFFF_FFFF_FFFF), Segment::Stack);
+        assert_eq!(Segment::from_addr(0x8000_0000_0000_0000), Segment::Os);
+        assert_eq!(Segment::from_addr(u64::MAX), Segment::Os);
+    }
 
     #[test]
     fn memory_runs_tag_the_text_label_with_its_full_loaded_bytes() {
