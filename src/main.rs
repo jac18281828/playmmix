@@ -25,7 +25,7 @@ mod share;
 
 use control::{Control, StepOutcome, yield_to_event_loop};
 use control_bar::{ControlBar, ControlEnablement, control_enablement};
-use diagnostics::{describe_source_error, parse_error_location};
+use diagnostics::{ErrorLocation, describe_source_error, parse_error_location};
 use editor::Editor;
 use examples::DEFAULT_MMS;
 use keys::{KeydownHandler, install_keyboard_shortcuts};
@@ -306,18 +306,18 @@ fn reload_and_record(
     control: &mut Control,
     source: &str,
     error: &mut Option<String>,
-    error_line: &mut Option<usize>,
+    error_location: &mut Option<ErrorLocation>,
     view_state: &mut ViewState,
 ) {
     *chunk_timeout = None;
     match control.reload(source) {
         Ok(()) => {
             *error = None;
-            *error_line = None;
+            *error_location = None;
             view_state.reset(control);
         }
         Err(err) => {
-            *error_line = parse_error_location(&err).map(|(line, _)| line);
+            *error_location = parse_error_location(&err);
             *error = Some(describe_source_error(source, &err));
         }
     }
@@ -344,7 +344,7 @@ fn restore_source(
     chunk_timeout: &mut Option<Timeout>,
     control: &mut Control,
     error: &mut Option<String>,
-    error_line: &mut Option<usize>,
+    error_location: &mut Option<ErrorLocation>,
     view_state: &mut ViewState,
 ) -> String {
     match saved {
@@ -354,7 +354,7 @@ fn restore_source(
                 control,
                 &source,
                 error,
-                error_line,
+                error_location,
                 view_state,
             );
             source
@@ -372,7 +372,7 @@ fn start_over(
     debounce_timeout: &mut Option<Timeout>,
     control: &mut Control,
     error: &mut Option<String>,
-    error_line: &mut Option<usize>,
+    error_location: &mut Option<ErrorLocation>,
     view_state: &mut ViewState,
 ) -> String {
     start_fresh(
@@ -380,7 +380,7 @@ fn start_over(
         debounce_timeout,
         control,
         error,
-        error_line,
+        error_location,
         view_state,
         DEFAULT_MMS,
     );
@@ -451,7 +451,7 @@ fn start_fresh(
     debounce_timeout: &mut Option<Timeout>,
     control: &mut Control,
     error: &mut Option<String>,
-    error_line: &mut Option<usize>,
+    error_location: &mut Option<ErrorLocation>,
     view_state: &mut ViewState,
     shared: &str,
 ) {
@@ -461,11 +461,11 @@ fn start_fresh(
         Ok(fresh) => {
             *control = fresh;
             *error = None;
-            *error_line = None;
+            *error_location = None;
         }
         Err(err) => {
             *control = default_control();
-            *error_line = parse_error_location(&err).map(|(line, _)| line);
+            *error_location = parse_error_location(&err);
             *error = Some(describe_source_error(shared, &err));
         }
     }
@@ -606,7 +606,7 @@ fn restart_and_run(
     control: &mut Control,
     source: &str,
     error: &mut Option<String>,
-    error_line: &mut Option<usize>,
+    error_location: &mut Option<ErrorLocation>,
     view_state: &mut ViewState,
 ) -> bool {
     let debounce_pending = debounce_timeout.is_some();
@@ -617,7 +617,7 @@ fn restart_and_run(
         control,
         source,
         error,
-        error_line,
+        error_location,
         view_state,
     )
 }
@@ -636,7 +636,7 @@ fn run_pressed(
     control: &mut Control,
     source: &str,
     error: &mut Option<String>,
-    error_line: &mut Option<usize>,
+    error_location: &mut Option<ErrorLocation>,
     view_state: &mut ViewState,
 ) -> Option<bool> {
     if control.is_running() {
@@ -648,7 +648,7 @@ fn run_pressed(
         control,
         source,
         error,
-        error_line,
+        error_location,
         view_state,
     ))
 }
@@ -670,7 +670,7 @@ fn restart_and_run_with(
     control: &mut Control,
     source: &str,
     error: &mut Option<String>,
-    error_line: &mut Option<usize>,
+    error_location: &mut Option<ErrorLocation>,
     view_state: &mut ViewState,
 ) -> bool {
     let had_session = !debounce_pending && control.session();
@@ -679,7 +679,7 @@ fn restart_and_run_with(
         control,
         source,
         error,
-        error_line,
+        error_location,
         view_state,
     );
     if error.is_some() {
@@ -711,7 +711,7 @@ fn flush_pending_source(
     chunk_timeout: &mut Option<Timeout>,
     source: &str,
     error: &mut Option<String>,
-    error_line: &mut Option<usize>,
+    error_location: &mut Option<ErrorLocation>,
     view_state: &mut ViewState,
 ) -> bool {
     if debounce_timeout.is_none() {
@@ -723,7 +723,7 @@ fn flush_pending_source(
         control,
         source,
         error,
-        error_line,
+        error_location,
         view_state,
     );
     true
@@ -772,12 +772,12 @@ pub struct App {
     source: String,
     control: Control,
     error: Option<String>,
-    /// The 1-based source line a parsed `self.error` location names, if the
-    /// raw error text carried one (see `parse_error_location`). Updated at
-    /// the same points `self.error` itself is; stale during the same
+    /// The 1-based line and column a parsed `self.error` location names, if
+    /// the raw error text carried one (see `parse_error_location`). Updated
+    /// at the same points `self.error` itself is; stale during the same
     /// debounce window `self.error` is already accepted to be stale in
     /// (`Msg::SourceChanged` clears neither).
-    error_line: Option<usize>,
+    error_location: Option<ErrorLocation>,
     /// The pending chunk-tick timeout, if a chunked Run, Continue, or Next
     /// is in flight. Held rather than `.forget()`-ten so Interrupt, or a
     /// `reload` mid-run, can cancel it by dropping this (runs `clearTimeout`
@@ -938,7 +938,7 @@ impl App {
             &mut self.control,
             &self.source,
             &mut self.error,
-            &mut self.error_line,
+            &mut self.error_location,
             &mut self.view_state,
         );
     }
@@ -975,14 +975,14 @@ impl Component for App {
         // it there, showing its error exactly as an edit would.
         let mut chunk_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
         let mut view_state = ViewState::new();
         let source = restore_source(
             autosave::load(),
             &mut chunk_timeout,
             &mut control,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
 
@@ -990,7 +990,7 @@ impl Component for App {
             source,
             control,
             error,
-            error_line,
+            error_location,
             chunk_timeout,
             debounce_timeout: None,
             view_state,
@@ -1055,7 +1055,7 @@ impl Component for App {
                     &mut self.control,
                     &self.source,
                     &mut self.error,
-                    &mut self.error_line,
+                    &mut self.error_location,
                     &mut self.view_state,
                 );
                 if self.error.is_none() {
@@ -1091,7 +1091,7 @@ impl Component for App {
                     &mut self.control,
                     &self.source,
                     &mut self.error,
-                    &mut self.error_line,
+                    &mut self.error_location,
                     &mut self.view_state,
                 ) {
                     None => false,
@@ -1200,7 +1200,7 @@ impl Component for App {
                         &mut self.debounce_timeout,
                         &mut self.control,
                         &mut self.error,
-                        &mut self.error_line,
+                        &mut self.error_location,
                         &mut self.view_state,
                     );
                     self.restart_signal = false;
@@ -1230,7 +1230,7 @@ impl Component for App {
                                 &mut self.debounce_timeout,
                                 &mut self.control,
                                 &mut self.error,
-                                &mut self.error_line,
+                                &mut self.error_location,
                                 &mut self.view_state,
                                 &source,
                             );
@@ -1255,7 +1255,7 @@ impl Component for App {
                     &mut self.chunk_timeout,
                     &self.source,
                     &mut self.error,
-                    &mut self.error_line,
+                    &mut self.error_location,
                     &mut self.view_state,
                 );
                 if flushed {
@@ -1422,7 +1422,7 @@ impl Component for App {
                     breakpoints={self.control.breakpoint_lines().clone()}
                     {current_line}
                     execution_stops={self.execution_stops}
-                    error_line={self.error_line}
+                    error_location={self.error_location}
                     {on_toggle_breakpoint}
                 />
                 <div
@@ -1496,7 +1496,7 @@ mod tests {
         let mut chunk_timeout = None;
         let mut debounce_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
         let mut view_state = ViewState::new();
         view_state.reset(control);
         let had_session = restart_and_run(
@@ -1505,7 +1505,7 @@ mod tests {
             control,
             RESTART_STRAIGHT_LINE_MMS,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
         assert!(error.is_none(), "fixture must still assemble");
@@ -1572,7 +1572,7 @@ mod tests {
         let mut chunk_timeout = None;
         let mut debounce_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
         let mut view_state = ViewState::new();
         view_state.reset(&control);
 
@@ -1583,7 +1583,7 @@ mod tests {
                 &mut control,
                 RESTART_STRAIGHT_LINE_MMS,
                 &mut error,
-                &mut error_line,
+                &mut error_location,
                 &mut view_state,
             )
             .is_none(),
@@ -1609,7 +1609,7 @@ mod tests {
         let mut chunk_timeout = None;
         let mut debounce_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
         let mut view_state = ViewState::new();
         view_state.reset(&control);
         restart_and_run(
@@ -1618,7 +1618,7 @@ mod tests {
             &mut control,
             RESTART_STRAIGHT_LINE_MMS,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
         assert!(error.is_none(), "fixture must still assemble");
@@ -1675,7 +1675,7 @@ mod tests {
         assert!(!already_flushed.session());
         let mut chunk_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
         let mut view_state = ViewState::new();
         view_state.reset(&already_flushed);
         let had_session_after_flush = restart_and_run_with(
@@ -1684,7 +1684,7 @@ mod tests {
             &mut already_flushed,
             RESTART_STRAIGHT_LINE_MMS,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
         assert!(error.is_none());
@@ -1699,7 +1699,7 @@ mod tests {
         assert!(still_pending.session());
         let mut chunk_timeout2 = None;
         let mut error2 = None;
-        let mut error_line2 = None;
+        let mut error_location2 = None;
         let mut view_state2 = ViewState::new();
         view_state2.reset(&still_pending);
         let had_session_within_debounce = restart_and_run_with(
@@ -1708,7 +1708,7 @@ mod tests {
             &mut still_pending,
             RESTART_STRAIGHT_LINE_MMS,
             &mut error2,
-            &mut error_line2,
+            &mut error_location2,
             &mut view_state2,
         );
         assert!(error2.is_none());
@@ -1729,14 +1729,14 @@ mod tests {
             let mut chunk_timeout = None;
             let mut debounce_timeout = None;
             let mut error = None;
-            let mut error_line = None;
+            let mut error_location = None;
             let mut restart_signal = restart_and_run(
                 &mut chunk_timeout,
                 &mut debounce_timeout,
                 control,
                 RESTART_STRAIGHT_LINE_MMS,
                 &mut error,
-                &mut error_line,
+                &mut error_location,
                 view_state,
             );
             assert!(error.is_none(), "fixture must still assemble");
@@ -1999,20 +1999,20 @@ mod tests {
         let mut debounce_timeout: Option<Timeout> = None;
         let mut chunk_timeout: Option<Timeout> = None;
         let mut error: Option<String> = None;
-        let mut error_line: Option<usize> = None;
+        let mut error_location: Option<ErrorLocation> = None;
         assert!(!flush_pending_source(
             &mut debounce_timeout,
             &mut control,
             &mut chunk_timeout,
             WRITES_REGISTER_MMS,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         ));
         assert!(error.is_none(), "a no-op flush must not set an error");
         assert!(
-            error_line.is_none(),
-            "a no-op flush must not set error_line"
+            error_location.is_none(),
+            "a no-op flush must not set error_location"
         );
         assert_eq!(
             view_state.changed_registers(),
@@ -2046,13 +2046,13 @@ mod tests {
 
         let mut chunk_timeout: Option<Timeout> = None;
         let mut error: Option<String> = None;
-        let mut error_line: Option<usize> = None;
+        let mut error_location: Option<ErrorLocation> = None;
         reload_and_record(
             &mut chunk_timeout,
             &mut control,
             WRITES_REGISTER_MMS,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
 
@@ -2069,7 +2069,7 @@ mod tests {
         let mut control = Control::new(DEFAULT_MMS, "restore-none.mms").expect("assembles");
         let mut chunk_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
         let mut view_state = ViewState::new();
         view_state.reset(&control);
 
@@ -2078,7 +2078,7 @@ mod tests {
             &mut chunk_timeout,
             &mut control,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
         assert_eq!(source, DEFAULT_MMS);
@@ -2090,7 +2090,7 @@ mod tests {
         let mut control = Control::new(DEFAULT_MMS, "restore-ok.mms").expect("assembles");
         let mut chunk_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
         let mut view_state = ViewState::new();
         view_state.reset(&control);
 
@@ -2099,7 +2099,7 @@ mod tests {
             &mut chunk_timeout,
             &mut control,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
         assert_eq!(source, RESTART_STRAIGHT_LINE_MMS);
@@ -2123,7 +2123,7 @@ mod tests {
         let default_pc = control.get_pc();
         let mut chunk_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
         let mut view_state = ViewState::new();
         view_state.reset(&control);
 
@@ -2132,7 +2132,7 @@ mod tests {
             &mut chunk_timeout,
             &mut control,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
         assert_eq!(source, BOGUS_MMS, "the editor must show the saved text");
@@ -2188,14 +2188,14 @@ mod tests {
         let mut chunk_timeout = None;
         let mut debounce_timeout = None;
         let mut error = Some("stale error".to_string());
-        let mut error_line = Some(5);
+        let mut error_location = Some(ErrorLocation { line: 5, column: 1 });
 
         let source = start_over(
             &mut chunk_timeout,
             &mut debounce_timeout,
             &mut control,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
         );
 
@@ -2205,7 +2205,7 @@ mod tests {
             "New must start with no breakpoints"
         );
         assert!(error.is_none());
-        assert!(error_line.is_none());
+        assert!(error_location.is_none());
         assert!(
             view_state.changed_registers().is_empty(),
             "New must reset the view state, dropping the prior program's changed marks"
@@ -2284,7 +2284,7 @@ mod tests {
         let mut chunk_timeout = None;
         let mut debounce_timeout = None;
         let mut error = Some("stale error".to_string());
-        let mut error_line = Some(5);
+        let mut error_location = Some(ErrorLocation { line: 5, column: 1 });
         let mut view_state = ViewState::new();
         view_state.reset(&control);
 
@@ -2293,7 +2293,7 @@ mod tests {
             &mut debounce_timeout,
             &mut control,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
             RESTART_STRAIGHT_LINE_MMS,
         );
@@ -2303,7 +2303,7 @@ mod tests {
             "a shared program must start with no breakpoints from the program it replaced"
         );
         assert!(error.is_none());
-        assert!(error_line.is_none());
+        assert!(error_location.is_none());
         // Prove the loaded machine is the shared program's own, not
         // `DEFAULT_MMS`'s: stepping runs `SETL $1,1`, which only this
         // fixture's own entry point contains.
@@ -2342,14 +2342,14 @@ mod tests {
         let mut chunk_timeout = None;
         let mut debounce_timeout = None;
         let mut error = None;
-        let mut error_line = None;
+        let mut error_location = None;
 
         start_fresh(
             &mut chunk_timeout,
             &mut debounce_timeout,
             &mut control,
             &mut error,
-            &mut error_line,
+            &mut error_location,
             &mut view_state,
             BOGUS_MMS,
         );
@@ -2359,9 +2359,9 @@ mod tests {
             "the shared program's own error must surface"
         );
         assert_eq!(
-            error_line,
-            Some(2),
-            "error_line must name BOGUS_MMS's own bad line"
+            error_location,
+            Some(ErrorLocation { line: 2, column: 6 }),
+            "error_location must name BOGUS_MMS's own bad line and column"
         );
         assert!(
             control.breakpoint_lines().is_empty(),

@@ -17,11 +17,13 @@
 //! `should_follow_current_line` and `scroll_top_to_reveal_line`.
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
+use crate::diagnostics::ErrorLocation;
 use crate::highlight;
 
 #[derive(Properties, PartialEq)]
@@ -37,11 +39,12 @@ pub struct EditorProps {
     /// this against the count it last saw to decide whether to scroll
     /// `current_line` into view.
     pub execution_stops: u64,
-    /// The line a parsed assembly-error location names, if the error text
-    /// carried one (`diagnostics.rs`'s `parse_error_location`). Independent of
+    /// A parsed assembly-error location, if the error text carried one
+    /// (`diagnostics.rs`'s `parse_error_location`). Independent of
     /// `current_line`: an error can exist whether or not the machine has
-    /// ever run.
-    pub error_line: Option<usize>,
+    /// ever run. The gutter and the line band read its line; the overlay's
+    /// `.error-column` marker alone reads its column.
+    pub error_location: Option<ErrorLocation>,
     pub on_toggle_breakpoint: Callback<usize>,
 }
 
@@ -133,7 +136,8 @@ impl Component for Editor {
 
         let breakpoints = ctx.props().breakpoints.clone();
         let current_line = ctx.props().current_line;
-        let error_line = ctx.props().error_line;
+        let error_location = ctx.props().error_location;
+        let error_line = error_location.map(|loc| loc.line);
         let on_toggle_breakpoint = ctx.props().on_toggle_breakpoint.clone();
 
         let gutter_rows: Html = lines
@@ -158,6 +162,7 @@ impl Component for Editor {
                     line,
                     overlay_row_is_current(i, current_line),
                     overlay_row_is_error(i, error_line),
+                    error_column_for_row(i, error_location),
                 )
             })
             .collect();
@@ -496,6 +501,100 @@ fn overlay_row_is_error(i: usize, error_line: Option<usize>) -> bool {
     error_line == Some(i + 1)
 }
 
+/// The 1-based column to mark on the overlay's zero-based row `i` (source
+/// line `i + 1`), or `None` when this row doesn't carry `error_location`'s
+/// line -- `overlay_row_is_error`'s twin for the column, kept separate
+/// since the gutter and the line band only ever need the line.
+fn error_column_for_row(i: usize, error_location: Option<ErrorLocation>) -> Option<usize> {
+    error_location
+        .filter(|location| location.line == i + 1)
+        .map(|location| location.column)
+}
+
+/// The byte range of `line`'s `column`th character (1-based, `char`s --
+/// checksmix's own counting: a tab is one column, a multi-byte character is
+/// one column), or `None` past the line's last character -- the overlay
+/// then marks nothing and the line band alone shows.
+fn error_column_byte_range(line: &str, column: usize) -> Option<Range<usize>> {
+    let (start, ch) = line.char_indices().nth(column.checked_sub(1)?)?;
+    Some(start..start + ch.len_utf8())
+}
+
+/// One rendered fragment of an overlay line: a `line_pieces` piece's own
+/// highlight class (`None` for `LinePiece::Plain`), and whether it is the
+/// exact character `error_column` names.
+struct MarkedFragment<'a> {
+    text: &'a str,
+    class: Option<&'static str>,
+    is_error_column: bool,
+}
+
+/// Splits `line`'s highlight pieces around `error_column`, when it names a
+/// real character (`error_column_byte_range`), so that one character stands
+/// alone as its own fragment, tagged `is_error_column` -- at most one
+/// fragment per line ever is. `error_column` naming nothing past `line`'s
+/// last character, or `None`, marks nothing at all: every piece passes
+/// through as its own untagged fragment. Concatenating every fragment's
+/// `text`, in order, always reproduces `line` exactly -- `line_pieces`' own
+/// invariant, preserved through the split since `highlight::classify`'s
+/// spans, and so every piece boundary, fall on `char` boundaries, never
+/// inside the one character this ever marks.
+fn marked_line_fragments(line: &str, error_column: Option<usize>) -> Vec<MarkedFragment<'_>> {
+    let marked_range = error_column.and_then(|column| error_column_byte_range(line, column));
+    let mut fragments = Vec::new();
+    let mut cursor = 0;
+
+    for piece in line_pieces(line) {
+        let text = piece.text();
+        let start = cursor;
+        let end = start + text.len();
+        cursor = end;
+        let class = match &piece {
+            LinePiece::Plain(_) => None,
+            LinePiece::Styled(_, kind) => Some(kind.css_class()),
+        };
+
+        let split = marked_range
+            .clone()
+            .filter(|range| range.start >= start && range.end <= end)
+            .map(|range| (range.start - start, range.end - start));
+
+        match split {
+            Some((rel_start, rel_end)) => {
+                let pre = &text[..rel_start];
+                let marked = &text[rel_start..rel_end];
+                let post = &text[rel_end..];
+                if !pre.is_empty() {
+                    fragments.push(MarkedFragment {
+                        text: pre,
+                        class,
+                        is_error_column: false,
+                    });
+                }
+                fragments.push(MarkedFragment {
+                    text: marked,
+                    class,
+                    is_error_column: true,
+                });
+                if !post.is_empty() {
+                    fragments.push(MarkedFragment {
+                        text: post,
+                        class,
+                        is_error_column: false,
+                    });
+                }
+            }
+            None => fragments.push(MarkedFragment {
+                text,
+                class,
+                is_error_column: false,
+            }),
+        }
+    }
+
+    fragments
+}
+
 /// `.overlay-line`, plus `.overlay-current` when this line carries the
 /// paused machine's current line -- a full-width background band, additive
 /// alongside the gutter's own `gutter-current` marker (defect 4 is
@@ -515,17 +614,20 @@ fn overlay_line_class(is_current: bool, is_error: bool) -> Classes {
     class
 }
 
-/// Render one source line as the overlay's colored spans. Untagged gaps
-/// between spans render in the overlay's default text color.
-fn render_line(line: &str, is_current: bool, is_error: bool) -> Html {
-    let children: Vec<Html> = line_pieces(line)
+/// Render one source line as the overlay's colored spans, with an
+/// `.error-column` span nested inside the piece it falls in when
+/// `error_column` names a real character (`marked_line_fragments`).
+/// Untagged gaps between spans render in the overlay's default text color.
+fn render_line(line: &str, is_current: bool, is_error: bool, error_column: Option<usize>) -> Html {
+    let children: Vec<Html> = marked_line_fragments(line, error_column)
         .into_iter()
-        .map(|piece| {
-            let class = match piece {
-                LinePiece::Plain(_) => None,
-                LinePiece::Styled(_, kind) => Some(kind.css_class()),
-            };
-            html! { <span {class}>{ piece.text() }</span> }
+        .map(|fragment| {
+            let class = fragment.class;
+            if fragment.is_error_column {
+                html! { <span {class}><span class="error-column">{ fragment.text }</span></span> }
+            } else {
+                html! { <span {class}>{ fragment.text }</span> }
+            }
         })
         .collect();
 
@@ -718,6 +820,100 @@ mod tests {
         for i in 0..4 {
             assert_eq!(overlay_row_is_error(i, error_line), i == 1, "row {i}");
         }
+    }
+
+    #[test]
+    fn error_column_for_row_reads_only_the_matching_line() {
+        let error_location = Some(ErrorLocation { line: 2, column: 7 });
+        for i in 0..4 {
+            let expected = (i == 1).then_some(7);
+            assert_eq!(error_column_for_row(i, error_location), expected, "row {i}");
+        }
+    }
+
+    #[test]
+    fn error_column_for_row_is_none_with_no_error() {
+        assert_eq!(error_column_for_row(0, None), None);
+    }
+
+    #[test]
+    fn error_column_byte_range_marks_an_ascii_character() {
+        let line = "SET $1,2";
+        // S=1 E=2 T=3 (space)=4 $=5: column 5 is the '$'.
+        let range = error_column_byte_range(line, 5).expect("column 5 exists");
+        assert_eq!(&line[range], "$");
+    }
+
+    #[test]
+    fn error_column_byte_range_counts_a_tab_as_one_column() {
+        let line = "\tADDI\t$1,$2,300";
+        // \t=1 A=2 D=3 D=4 I=5 \t=6: column 6 is the second tab, one column
+        // wide despite the browser's own multi-column tab-stop rendering.
+        let range = error_column_byte_range(line, 6).expect("column 6 exists");
+        assert_eq!(&line[range], "\t");
+    }
+
+    #[test]
+    fn error_column_byte_range_counts_a_multibyte_character_as_one_column() {
+        let line = "café SET";
+        // c=1 a=2 f=3 é=4: one column despite é's two UTF-8 bytes.
+        let range = error_column_byte_range(line, 4).expect("column 4 exists");
+        assert_eq!(&line[range], "é");
+    }
+
+    #[test]
+    fn error_column_byte_range_is_none_past_the_lines_last_character() {
+        let line = "SET $1,2";
+        assert_eq!(
+            error_column_byte_range(line, line.chars().count() + 1),
+            None
+        );
+    }
+
+    fn reconstruct_fragments(fragments: &[MarkedFragment<'_>]) -> String {
+        fragments.iter().map(|f| f.text).collect()
+    }
+
+    fn marked_text<'a>(fragments: &'a [MarkedFragment<'a>]) -> Vec<&'a str> {
+        fragments
+            .iter()
+            .filter(|f| f.is_error_column)
+            .map(|f| f.text)
+            .collect()
+    }
+
+    #[test]
+    fn marked_line_fragments_marks_exactly_the_columns_character() {
+        let line = "\tADDI\t$1,$2,300";
+        // \t=1 A=2 D=3 D=4 I=5 \t=6 $=7 1=8 ,=9 $=10 2=11 ,=12 3=13 0=14
+        // 0=15: column 13 is the '3'.
+        let fragments = marked_line_fragments(line, Some(13));
+        assert_eq!(reconstruct_fragments(&fragments), line);
+        assert_eq!(marked_text(&fragments), vec!["3"]);
+    }
+
+    #[test]
+    fn marked_line_fragments_marks_a_multibyte_character_whole() {
+        let line = "café";
+        let fragments = marked_line_fragments(line, Some(4));
+        assert_eq!(reconstruct_fragments(&fragments), line);
+        assert_eq!(marked_text(&fragments), vec!["é"]);
+    }
+
+    #[test]
+    fn marked_line_fragments_marks_nothing_past_the_lines_end() {
+        let line = "SET $1,2";
+        let fragments = marked_line_fragments(line, Some(line.chars().count() + 5));
+        assert_eq!(reconstruct_fragments(&fragments), line);
+        assert!(marked_text(&fragments).is_empty());
+    }
+
+    #[test]
+    fn marked_line_fragments_marks_nothing_with_no_column() {
+        let line = "SET $1,2";
+        let fragments = marked_line_fragments(line, None);
+        assert_eq!(reconstruct_fragments(&fragments), line);
+        assert!(marked_text(&fragments).is_empty());
     }
 
     #[test]

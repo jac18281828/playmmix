@@ -105,41 +105,36 @@ fn strip_source_filename(error: &str) -> String {
     error.replace(&format!("{SOURCE_FILENAME}:"), "")
 }
 
-/// Parses checksmix's raw error text for a `(line, column)` source
-/// location, defensively -- checksmix's error shapes are not uniform:
-///
-/// - The common `pest`-parser syntax error:
-///   `"{SOURCE_FILENAME}:{line}:{col}: {message}"` -- both a line and a
-///   column.
-/// - A symbol-redefinition error: `"{SOURCE_FILENAME}:{line}: symbol
-///   '{name}' redefined (first defined at {SOURCE_FILENAME}:{line})"` --
-///   a line only, no column, and a second, embedded
-///   `{SOURCE_FILENAME}:{line}` reference later in the message that must
-///   not be mistaken for this one.
-/// - Everything else (e.g. `"Invalid opcode: {value}"`) -- no location at
-///   all.
-///
-/// Tries the line-and-column prefix first, then the line-only prefix,
-/// returning `None` if neither matches -- there is genuinely nothing to
-/// point at. Only ever looks at a leading `"{SOURCE_FILENAME}:"` prefix, so
-/// the redefinition shape's second, embedded reference is never mistaken
-/// for the primary location.
-pub(crate) fn parse_error_location(error: &str) -> Option<(usize, Option<usize>)> {
-    let rest = error.strip_prefix(&format!("{SOURCE_FILENAME}:"))?;
-    let (line_str, after_line) = rest.split_once(':')?;
+/// A source location one of checksmix's own error messages named: 1-based
+/// `line` and `column`, both `usize` rather than a tuple -- two same-typed
+/// fields are easy to swap by position; naming them isn't.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ErrorLocation {
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+}
 
-    if let Some((col_str, after_col)) = after_line.split_once(':')
-        && after_col.starts_with(' ')
-        && let (Ok(line), Ok(col)) = (line_str.parse(), col_str.parse())
-    {
-        return Some((line, Some(col)));
+/// Parses checksmix's raw error text for its `(line, column)` source
+/// location. 0.4.0 gives every error `MMixAssembler::parse` returns a
+/// `"{SOURCE_FILENAME}:{line}:{col}: {message}"` prefix -- the
+/// symbol-redefinition shape included, `"{SOURCE_FILENAME}:{line}:{col}:
+/// symbol '{name}' redefined (first defined at {SOURCE_FILENAME}:{line})"`
+/// -- so one shape covers every located error; `None` for a message with no
+/// location at all (e.g. `"Invalid opcode: {value}"`). Only ever looks at a
+/// leading `"{SOURCE_FILENAME}:"` prefix, so the redefinition shape's
+/// second, embedded `{SOURCE_FILENAME}:{line}` reference is never mistaken
+/// for the primary location.
+pub(crate) fn parse_error_location(error: &str) -> Option<ErrorLocation> {
+    let rest = error.strip_prefix(&format!("{SOURCE_FILENAME}:"))?;
+    let (line_str, rest) = rest.split_once(':')?;
+    let (col_str, after_col) = rest.split_once(':')?;
+    if !after_col.starts_with(' ') {
+        return None;
     }
-    if after_line.starts_with(' ')
-        && let Ok(line) = line_str.parse()
-    {
-        return Some((line, None));
-    }
-    None
+    Some(ErrorLocation {
+        line: line_str.parse().ok()?,
+        column: col_str.parse().ok()?,
+    })
 }
 
 #[cfg(test)]
@@ -180,16 +175,13 @@ mod tests {
     #[test]
     fn parse_error_location_recovers_line_and_column_from_the_common_shape() {
         let error = "source.mms:3:13: syntax error: expected one of: ...";
-        assert_eq!(parse_error_location(error), Some((3, Some(13))));
-    }
-
-    #[test]
-    fn parse_error_location_recovers_line_only_from_the_redefinition_shape() {
-        // No column in this shape, and a *second* `filename:line` reference
-        // embedded later in the message -- must not be mistaken for the
-        // primary location.
-        let error = "source.mms:5: symbol 'Foo' redefined (first defined at source.mms:2)";
-        assert_eq!(parse_error_location(error), Some((5, None)));
+        assert_eq!(
+            parse_error_location(error),
+            Some(ErrorLocation {
+                line: 3,
+                column: 13
+            })
+        );
     }
 
     #[test]
@@ -214,6 +206,37 @@ mod tests {
         assert!(
             parse_error_location(&error).is_some(),
             "a real checksmix parse failure must still yield a location: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_location_recovers_the_common_shape_from_real_checksmix_output() {
+        // Driven through a real assembly failure, not a hand-crafted
+        // string: `BOGUS` is not a valid opcode.
+        let source = "\tLOC\t#100\nMain\tBOGUS\t$1,1\n";
+        let error = match Control::new(source, SOURCE_FILENAME) {
+            Ok(_) => panic!("BOGUS is not a real opcode"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            parse_error_location(&error),
+            Some(ErrorLocation { line: 2, column: 6 })
+        );
+    }
+
+    #[test]
+    fn parse_error_location_recovers_the_redefinition_shape_from_real_checksmix_output() {
+        // 0.4.0 gives the redefinition shape a column too, same as every
+        // other located error -- driven through a real redefinition, not a
+        // hand-crafted string.
+        let source = "Foo\tIS\t1\nFoo\tIS\t2\n";
+        let error = match Control::new(source, SOURCE_FILENAME) {
+            Ok(_) => panic!("redefining Foo must fail to assemble"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            parse_error_location(&error),
+            Some(ErrorLocation { line: 2, column: 1 })
         );
     }
 

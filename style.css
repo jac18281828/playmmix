@@ -571,6 +571,14 @@ main {
     background: rgba(241, 76, 76, 0.18);
 }
 
+/* The exact character a parsed error location's column names, nested
+   inside its line's own highlight span. No glyph metric changes (no
+   weight, padding, border or letter spacing), so the overlay stays
+   aligned with the textarea underneath it. */
+.error-column {
+    text-decoration: underline wavy #f14c4c;
+}
+
 .overlay,
 .source-input {
     position: absolute;
