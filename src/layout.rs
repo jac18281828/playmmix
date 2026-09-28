@@ -226,6 +226,161 @@ pub(crate) struct CommittedSizes {
     pub(crate) output_height: Option<f64>,
 }
 
+/// An element's rendered extent along a splitter's own axis -- width for
+/// the column splitter, height for the row splitter. Wraps `Element::
+/// client_width`/`client_height` (`i32`) into the `f64` every clamp and drag
+/// computation here uses.
+fn client_width_px(element: &Element) -> f64 {
+    element.client_width() as f64
+}
+
+fn client_height_px(element: &Element) -> f64 {
+    element.client_height() as f64
+}
+
+/// A pointer event's client coordinate along a splitter's own axis -- `x`
+/// for the column splitter, `y` for the row splitter.
+fn pointer_client_x(event: &PointerEvent) -> f64 {
+    event.client_x() as f64
+}
+
+fn pointer_client_y(event: &PointerEvent) -> f64 {
+    event.client_y() as f64
+}
+
+/// One splitter's axis-specific pieces, everything `splitter_handlers`
+/// otherwise can't tell the column and row splitters apart by: which
+/// `Splitter` it is, the elements `pointerdown` reads (`size_start_ref` for
+/// the drag-start size, `ceiling_ref` for the clamp's other parameter --
+/// see `column_splitter_handlers`'/`row_splitter_handlers`'s own doc
+/// comments for what each reads), and the functions reading an element's
+/// extent, a pointer's coordinate, and clamping the requested size. Plain
+/// function arguments, not a trait: each splitter's own functions (`client_
+/// width_px`/`clamp_left_column_width` or `client_height_px`/`clamp_output_
+/// height`) already exist as free functions with no shared behavior beyond
+/// being called the same way.
+struct SplitterAxis {
+    which: Splitter,
+    size_start_ref: NodeRef,
+    ceiling_ref: NodeRef,
+    extent: fn(&Element) -> f64,
+    pointer_extent: fn(&PointerEvent) -> f64,
+    clamp: fn(f64, f64) -> f64,
+}
+
+/// Build one splitter's `pointerdown`/`pointermove`/`pointerup`/
+/// `pointercancel` callbacks -- the one private helper `column_splitter_
+/// handlers` and `row_splitter_handlers` both thin-wrap, since the two were
+/// otherwise identical line for line but for `axis`'s pieces (finding 1).
+/// `committed` is `App`'s own current values for both dimensions -- see
+/// `CommittedSizes`'s doc comment.
+fn splitter_handlers(
+    drag_state: Rc<RefCell<Option<DragState>>>,
+    main_ref: NodeRef,
+    handle_ref: NodeRef,
+    axis: SplitterAxis,
+    committed: CommittedSizes,
+    on_commit: Callback<f64>,
+) -> (
+    Callback<PointerEvent>,
+    Callback<PointerEvent>,
+    Callback<PointerEvent>,
+    Callback<PointerEvent>,
+) {
+    let SplitterAxis {
+        which,
+        size_start_ref,
+        ceiling_ref,
+        extent,
+        pointer_extent,
+        clamp,
+    } = axis;
+    let CommittedSizes {
+        left_column_width,
+        output_height,
+    } = committed;
+    let (own_committed, other_committed) = match which {
+        Splitter::Column => (left_column_width, output_height),
+        Splitter::Row => (output_height, left_column_width),
+    };
+
+    let onpointerdown = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
+        Callback::from(move |event: PointerEvent| {
+            let size_start_px = size_start_ref
+                .cast::<Element>()
+                .map(|element| extent(&element))
+                .unwrap_or(0.0);
+            let ceiling_param_px = ceiling_ref
+                .cast::<Element>()
+                .map(|element| extent(&element))
+                .unwrap_or(0.0);
+            *drag_state.borrow_mut() = Some(DragState {
+                which,
+                pointer_start_client_px: pointer_extent(&event),
+                size_start_px,
+                ceiling_param_px,
+            });
+            capture_pointer(&handle_ref, event.pointer_id());
+            write_drag_style(&main_ref, which, Some(size_start_px), other_committed, true);
+        })
+    };
+
+    let onpointermove = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
+        Callback::from(move |event: PointerEvent| {
+            let Some(state) = *drag_state.borrow() else {
+                return;
+            };
+            if state.which != which {
+                return;
+            }
+            let delta = pointer_extent(&event) - state.pointer_start_client_px;
+            let requested = resized_extent(state.size_start_px, delta, which);
+            let clamped = clamp(requested, state.ceiling_param_px);
+            write_drag_style(&main_ref, which, Some(clamped), other_committed, true);
+        })
+    };
+
+    let onpointerup = {
+        let drag_state = drag_state.clone();
+        let main_ref = main_ref.clone();
+        Callback::from(move |event: PointerEvent| {
+            let Some(state) = drag_state.borrow_mut().take() else {
+                return;
+            };
+            if state.which != which {
+                return;
+            }
+            let delta = pointer_extent(&event) - state.pointer_start_client_px;
+            if delta.abs() <= DRAG_COMMIT_THRESHOLD_PX {
+                write_drag_style(&main_ref, which, own_committed, other_committed, false);
+                return;
+            }
+            let requested = resized_extent(state.size_start_px, delta, which);
+            let clamped = clamp(requested, state.ceiling_param_px);
+            write_drag_style(&main_ref, which, Some(clamped), other_committed, false);
+            on_commit.emit(clamped);
+        })
+    };
+
+    let onpointercancel = {
+        Callback::from(move |_event: PointerEvent| {
+            let Some(state) = drag_state.borrow_mut().take() else {
+                return;
+            };
+            if state.which != which {
+                return;
+            }
+            write_drag_style(&main_ref, which, own_committed, other_committed, false);
+        })
+    };
+
+    (onpointerdown, onpointermove, onpointerup, onpointercancel)
+}
+
 /// Build the column splitter's `pointerdown`/`pointermove`/`pointerup`/
 /// `pointercancel` callbacks. `left_col_ref` is any element whose rendered
 /// width equals the left column's current width -- `App::row_splitter_ref`
@@ -245,118 +400,21 @@ pub(crate) fn column_splitter_handlers(
     Callback<PointerEvent>,
     Callback<PointerEvent>,
 ) {
-    let CommittedSizes {
-        left_column_width,
-        output_height,
-    } = committed;
-
-    let onpointerdown = {
-        let drag_state = drag_state.clone();
-        let main_ref = main_ref.clone();
-        let handle_ref = handle_ref.clone();
-        let left_col_ref = left_col_ref.clone();
-        Callback::from(move |event: PointerEvent| {
-            let size_start_px = left_col_ref
-                .cast::<Element>()
-                .map(|element| element.client_width() as f64)
-                .unwrap_or(0.0);
-            let ceiling_param_px = main_ref
-                .cast::<Element>()
-                .map(|element| element.client_width() as f64)
-                .unwrap_or(0.0);
-            *drag_state.borrow_mut() = Some(DragState {
-                which: Splitter::Column,
-                pointer_start_client_px: event.client_x() as f64,
-                size_start_px,
-                ceiling_param_px,
-            });
-            capture_pointer(&handle_ref, event.pointer_id());
-            write_drag_style(
-                &main_ref,
-                Splitter::Column,
-                Some(size_start_px),
-                output_height,
-                true,
-            );
-        })
-    };
-
-    let onpointermove = {
-        let drag_state = drag_state.clone();
-        let main_ref = main_ref.clone();
-        Callback::from(move |event: PointerEvent| {
-            let Some(state) = *drag_state.borrow() else {
-                return;
-            };
-            if state.which != Splitter::Column {
-                return;
-            }
-            let delta = event.client_x() as f64 - state.pointer_start_client_px;
-            let requested = resized_extent(state.size_start_px, delta, Splitter::Column);
-            let clamped = clamp_left_column_width(requested, state.ceiling_param_px);
-            write_drag_style(
-                &main_ref,
-                Splitter::Column,
-                Some(clamped),
-                output_height,
-                true,
-            );
-        })
-    };
-
-    let onpointerup = {
-        let drag_state = drag_state.clone();
-        let main_ref = main_ref.clone();
-        Callback::from(move |event: PointerEvent| {
-            let Some(state) = drag_state.borrow_mut().take() else {
-                return;
-            };
-            if state.which != Splitter::Column {
-                return;
-            }
-            let delta = event.client_x() as f64 - state.pointer_start_client_px;
-            if delta.abs() <= DRAG_COMMIT_THRESHOLD_PX {
-                write_drag_style(
-                    &main_ref,
-                    Splitter::Column,
-                    left_column_width,
-                    output_height,
-                    false,
-                );
-                return;
-            }
-            let requested = resized_extent(state.size_start_px, delta, Splitter::Column);
-            let clamped = clamp_left_column_width(requested, state.ceiling_param_px);
-            write_drag_style(
-                &main_ref,
-                Splitter::Column,
-                Some(clamped),
-                output_height,
-                false,
-            );
-            on_commit.emit(clamped);
-        })
-    };
-
-    let onpointercancel = {
-        Callback::from(move |_event: PointerEvent| {
-            let Some(state) = drag_state.borrow_mut().take() else {
-                return;
-            };
-            if state.which != Splitter::Column {
-                return;
-            }
-            write_drag_style(
-                &main_ref,
-                Splitter::Column,
-                left_column_width,
-                output_height,
-                false,
-            );
-        })
-    };
-
-    (onpointerdown, onpointermove, onpointerup, onpointercancel)
+    splitter_handlers(
+        drag_state,
+        main_ref.clone(),
+        handle_ref,
+        SplitterAxis {
+            which: Splitter::Column,
+            size_start_ref: left_col_ref,
+            ceiling_ref: main_ref,
+            extent: client_width_px,
+            pointer_extent: pointer_client_x,
+            clamp: clamp_left_column_width,
+        },
+        committed,
+        on_commit,
+    )
 }
 
 /// Build the row splitter's `pointerdown`/`pointermove`/`pointerup`/
@@ -385,119 +443,21 @@ pub(crate) fn row_splitter_handlers(
     Callback<PointerEvent>,
     Callback<PointerEvent>,
 ) {
-    let CommittedSizes {
-        left_column_width,
-        output_height,
-    } = committed;
-
-    let onpointerdown = {
-        let drag_state = drag_state.clone();
-        let main_ref = main_ref.clone();
-        let handle_ref = handle_ref.clone();
-        let column_height_ref = column_height_ref.clone();
-        let output_pane_ref = output_pane_ref.clone();
-        Callback::from(move |event: PointerEvent| {
-            let size_start_px = output_pane_ref
-                .cast::<Element>()
-                .map(|element| element.client_height() as f64)
-                .unwrap_or(0.0);
-            let ceiling_param_px = column_height_ref
-                .cast::<Element>()
-                .map(|element| element.client_height() as f64)
-                .unwrap_or(0.0);
-            *drag_state.borrow_mut() = Some(DragState {
-                which: Splitter::Row,
-                pointer_start_client_px: event.client_y() as f64,
-                size_start_px,
-                ceiling_param_px,
-            });
-            capture_pointer(&handle_ref, event.pointer_id());
-            write_drag_style(
-                &main_ref,
-                Splitter::Row,
-                Some(size_start_px),
-                left_column_width,
-                true,
-            );
-        })
-    };
-
-    let onpointermove = {
-        let drag_state = drag_state.clone();
-        let main_ref = main_ref.clone();
-        Callback::from(move |event: PointerEvent| {
-            let Some(state) = *drag_state.borrow() else {
-                return;
-            };
-            if state.which != Splitter::Row {
-                return;
-            }
-            let delta = event.client_y() as f64 - state.pointer_start_client_px;
-            let requested = resized_extent(state.size_start_px, delta, Splitter::Row);
-            let clamped = clamp_output_height(requested, state.ceiling_param_px);
-            write_drag_style(
-                &main_ref,
-                Splitter::Row,
-                Some(clamped),
-                left_column_width,
-                true,
-            );
-        })
-    };
-
-    let onpointerup = {
-        let drag_state = drag_state.clone();
-        let main_ref = main_ref.clone();
-        Callback::from(move |event: PointerEvent| {
-            let Some(state) = drag_state.borrow_mut().take() else {
-                return;
-            };
-            if state.which != Splitter::Row {
-                return;
-            }
-            let delta = event.client_y() as f64 - state.pointer_start_client_px;
-            if delta.abs() <= DRAG_COMMIT_THRESHOLD_PX {
-                write_drag_style(
-                    &main_ref,
-                    Splitter::Row,
-                    output_height,
-                    left_column_width,
-                    false,
-                );
-                return;
-            }
-            let requested = resized_extent(state.size_start_px, delta, Splitter::Row);
-            let clamped = clamp_output_height(requested, state.ceiling_param_px);
-            write_drag_style(
-                &main_ref,
-                Splitter::Row,
-                Some(clamped),
-                left_column_width,
-                false,
-            );
-            on_commit.emit(clamped);
-        })
-    };
-
-    let onpointercancel = {
-        Callback::from(move |_event: PointerEvent| {
-            let Some(state) = drag_state.borrow_mut().take() else {
-                return;
-            };
-            if state.which != Splitter::Row {
-                return;
-            }
-            write_drag_style(
-                &main_ref,
-                Splitter::Row,
-                output_height,
-                left_column_width,
-                false,
-            );
-        })
-    };
-
-    (onpointerdown, onpointermove, onpointerup, onpointercancel)
+    splitter_handlers(
+        drag_state,
+        main_ref,
+        handle_ref,
+        SplitterAxis {
+            which: Splitter::Row,
+            size_start_ref: output_pane_ref,
+            ceiling_ref: column_height_ref,
+            extent: client_height_px,
+            pointer_extent: pointer_client_y,
+            clamp: clamp_output_height,
+        },
+        committed,
+        on_commit,
+    )
 }
 
 #[cfg(test)]
