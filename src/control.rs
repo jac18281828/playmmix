@@ -311,7 +311,7 @@ impl Control {
                 }
                 let token = text.split_whitespace().next()?;
                 let token = token.strip_prefix(':').unwrap_or(token);
-                let candidate = *self.assembler.labels.get(token)?;
+                let candidate = *self.assembler.labels().get(token)?;
                 self.assembler.source_loc(candidate)?;
                 Some(candidate)
             })?;
@@ -336,7 +336,7 @@ impl Control {
     /// the assembler once, `Control` keeps it alive for the session's
     /// life, re-set on every `reload`.
     pub fn labels(&self) -> &HashMap<String, u64> {
-        &self.assembler.labels
+        self.assembler.labels()
     }
 
     /// Whether a chunked Run, Continue, or Next is in flight.
@@ -1548,7 +1548,7 @@ mod tests {
         // table, read from a fresh assembler instance, not through `Control`.
         let mut oracle = MMixAssembler::new(LABEL_LINE_MMS, "label.mms");
         oracle.parse().expect("test program assembles");
-        let label_addr = *oracle.labels.get("Loop").expect("Loop is a real label");
+        let label_addr = *oracle.labels().get("Loop").expect("Loop is a real label");
         assert!(
             oracle.addr_for_line("label.mms", 3).is_none(),
             "line 3 is the bare label; addr_for_line alone can't resolve it, \
@@ -1582,7 +1582,7 @@ mod tests {
 
         let mut oracle = MMixAssembler::new(ROOT_LABEL_LINE_MMS, "root.mms");
         oracle.parse().expect("test program assembles");
-        let main_addr = *oracle.labels.get("Main").expect("Main is a real label");
+        let main_addr = *oracle.labels().get("Main").expect("Main is a real label");
         assert_eq!(main_addr, 0x100);
 
         assert!(
@@ -1614,7 +1614,7 @@ mod tests {
 
         let mut oracle = MMixAssembler::new(TRAILING_LABEL_MMS, "trailing.mms");
         oracle.parse().expect("test program assembles");
-        let end_addr = *oracle.labels.get("End").expect("End is a real label");
+        let end_addr = *oracle.labels().get("End").expect("End is a real label");
         assert!(
             oracle.source_loc(end_addr).is_none(),
             "End's address must hold no instruction for this test to mean anything"

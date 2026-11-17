@@ -294,12 +294,12 @@ mod tests {
         write_image(&mut mmix, &assembler);
 
         let main_addr = *assembler
-            .labels
+            .labels()
             .get("Main")
             .expect("top.mms defines a Main label");
         assert_eq!(main_addr, u64::MAX - 3);
 
-        let runs = memory_runs(&mmix, &assembler.labels);
+        let runs = memory_runs(&mmix, assembler.labels());
         let run = runs
             .iter()
             .find(|run| run.start == main_addr)
@@ -366,12 +366,12 @@ mod tests {
         write_image(&mut mmix, &assembler);
 
         let text_addr = *assembler
-            .labels
+            .labels()
             .get("Text")
             .expect("hello_world.mms defines a Text label");
         assert_eq!(text_addr, 0x2000_0000_0000_0000);
 
-        let runs = memory_runs(&mmix, &assembler.labels);
+        let runs = memory_runs(&mmix, assembler.labels());
         let run = runs
             .iter()
             .find(|run| {
